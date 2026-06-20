@@ -40,7 +40,7 @@ DISPLAY_COLS = [
 
 
 def kite_chart_url(symbol: str) -> str:
-    return f"https://kite.zerodha.com/chart/web/ciq/NSE/{symbol}/"
+    return f"https://www.tradingview.com/chart/?symbol=NSE:{symbol}"
 
 
 def signal_style(val):
@@ -189,9 +189,9 @@ if "results" in st.session_state:
         height=450,
         column_config={
             "Kite Chart": st.column_config.LinkColumn(
-                "Kite Chart",
-                display_text="📊 Open",
-                help="Click to open Kite chart in a new tab",
+                "Chart",
+                display_text="📊 View Chart",
+                help="Click to open TradingView chart in a new tab",
             ),
         },
     )
