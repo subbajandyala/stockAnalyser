@@ -21,21 +21,6 @@ st.markdown("""
 /* ── Page background ── */
 .stApp { background: #0d1117; }
 
-/* ── Header ── */
-.hdr {
-    background: linear-gradient(120deg, #0f2027, #203a43, #2c5364);
-    border-radius: 14px;
-    padding: 22px 30px 18px;
-    margin-bottom: 24px;
-    border: 1px solid #1e3a4a;
-    display: flex;
-    align-items: center;
-    gap: 16px;
-}
-.hdr-icon { font-size: 2.8rem; line-height: 1; }
-.hdr-title { font-size: 1.9rem; font-weight: 800; color: #e8f4f8; margin: 0; letter-spacing: -0.5px; }
-.hdr-sub { font-size: 0.88rem; color: #7eb8d4; margin-top: 3px; }
-
 /* ── Timeframe pill selector ── */
 .tf-bar {
     background: #161b22;
@@ -308,16 +293,6 @@ def chart_modal(nse_symbol: str, company: str, tf_key: str, extra_levels: dict |
 # ════════════════════════════════════════════════════════════════════════════
 # PAGE HEADER
 # ════════════════════════════════════════════════════════════════════════════
-st.markdown("""
-<div class="hdr">
-  <div class="hdr-icon">📈</div>
-  <div>
-    <div class="hdr-title">NIFTY 500 Stock Screener</div>
-    <div class="hdr-sub">Real-time technical screening &nbsp;·&nbsp; NSE India &nbsp;·&nbsp; EMA · CPR · Breakout · Support</div>
-  </div>
-</div>
-""", unsafe_allow_html=True)
-
 # Timeframe bar
 tc1, tc2 = st.columns([1, 4])
 tc1.markdown('<p style="color:#8b949e;font-size:.82rem;font-weight:600;text-transform:uppercase;letter-spacing:.5px;margin:8px 0 0;">⏱ Timeframe</p>', unsafe_allow_html=True)
