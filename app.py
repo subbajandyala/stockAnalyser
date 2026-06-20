@@ -7,6 +7,7 @@ from screener.news import get_trending_stocks
 from screener.technical import analyze_stock, _ema
 from screener.ma_retracement import run_ma_retracement_scan
 from screener.ma_crossover import run_crossover_scan
+from screener.ma50_support import run_ma50_support_scan
 
 st.set_page_config(page_title="NIFTY 500 Stock Screener", layout="wide", page_icon="📈")
 
@@ -44,6 +45,12 @@ with st.sidebar:
 
     st.subheader("📈 20/50 EMA Crossover")
     run_cross_btn = st.button("🔍 Run Crossover Scan", type="primary", use_container_width=True)
+
+    st.divider()
+
+    st.subheader("🛡️ 50 MA Support")
+    touch_pct_50  = st.slider("EMA50 touch tolerance (%)", 1, 3, 1, key="touch50")
+    run_ma50_btn  = st.button("🔍 Run 50 MA Support Scan", type="primary", use_container_width=True)
 
     st.caption("First run may take 2–5 minutes.")
 
@@ -224,7 +231,7 @@ st.caption(
 
 st.divider()
 
-tab1, tab2, tab3 = st.tabs(["📰 News + Breakout", "🔁 20 MA Retracement", "📈 50 & 20 EMA Crossover"])
+tab1, tab2, tab3, tab4 = st.tabs(["📰 News + Breakout", "🔁 20 MA Retracement", "📈 50 & 20 EMA Crossover", "🛡️ 50 MA Support"])
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -488,3 +495,102 @@ with tab3:
                 chart_modal(cr["Symbol"] + ".NS", cr["Company"], "1D")
     else:
         st.info("👈 Click **Run Crossover Scan** in the sidebar to identify position trading setups.")
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# TAB 4 — 50 MA Support
+# ════════════════════════════════════════════════════════════════════════════
+MA50_SIGNAL_COLORS = {
+    "STRONG (50MA + Monthly CPR)": "#00C853",
+    "BUY (50MA + Monthly CPR)":    "#64DD17",
+    "WATCH":                        "#FFD600",
+}
+MA50_COLS = [
+    "Symbol", "Company",
+    "Price", "Change 1D%",
+    "EMA 20", "EMA 50", "EMA 200",
+    "% Above EMA50", "% Above EMA200",
+    "Touch%", "Vol Ratio",
+    "Above Monthly CPR", "Monthly TC", "Monthly Pivot", "Monthly BC",
+    "Signal",
+]
+
+def ma50_signal_style(val):
+    color = MA50_SIGNAL_COLORS.get(val, "#ffffff")
+    return f"background-color: {color}; color: black; font-weight: bold; border-radius: 4px;"
+
+with tab4:
+    st.markdown("**Stocks taking support at 50 EMA in a strong uptrend, above Monthly CPR**")
+    with st.expander("📋 Criteria"):
+        st.markdown("""
+        - **Uptrend:** EMA20 > EMA50 > EMA200 (strong multi-MA alignment)
+        - **Touch:** Previous candle's low within ±tolerance% of EMA50
+        - **No breakdown:** Previous candle closed above EMA50
+        - **Continuation:** Current candle is bullish and closing higher
+        - **Monthly CPR:** Price must be above Monthly TC (top of monthly CPR band)
+        - **Volume:** Higher than 20-day average confirms conviction
+        """)
+
+    if run_ma50_btn:
+        with st.spinner(f"Scanning NIFTY 500 for 50 MA support setups on {TF_CONFIG[tf_key]['label']} candles... (3–6 min)"):
+            symbols_df    = get_nifty500_symbols()
+            ma50_results  = run_ma50_support_scan(
+                symbols_df,
+                touch_pct=touch_pct_50 / 100,
+                interval=interval,
+                period=period,
+            )
+            st.session_state["ma50_results"] = ma50_results
+            st.session_state["ma50_tf"]      = tf_key
+
+    if "ma50_results" in st.session_state:
+        ma50_df: pd.DataFrame = st.session_state["ma50_results"]
+        cached_ma50_tf = st.session_state.get("ma50_tf", "1D")
+
+        if cached_ma50_tf != tf_key:
+            st.warning(f"⚠️ Results are from **{TF_CONFIG[cached_ma50_tf]['label']}** timeframe. Re-run to refresh for **{TF_CONFIG[tf_key]['label']}**.")
+
+        if ma50_df.empty:
+            st.warning("No stocks found. Markets may be closed, or try adjusting the touch tolerance.")
+        else:
+            c1, c2, c3 = st.columns(3)
+            c1.metric("Stocks Found",          len(ma50_df))
+            c2.metric("Above Monthly CPR",     len(ma50_df[ma50_df["Above Monthly CPR"] == "✅ Yes"]))
+            c3.metric("Vol Surge (>1.3x)",      len(ma50_df[ma50_df["Vol Ratio"] > 1.3]))
+
+            st.caption("👆 Click any row to open chart  ·  Press Esc to close")
+
+            show_ma50_cols = [c for c in MA50_COLS if c in ma50_df.columns]
+            display_ma50   = ma50_df[show_ma50_cols].copy()
+            styled_ma50 = (
+                display_ma50.style
+                .map(ma50_signal_style, subset=["Signal"])
+                .map(change_style, subset=["Change 1D%"])
+                .format({c: "₹{:.2f}" for c in ["Price", "EMA 20", "EMA 50", "EMA 200", "Monthly TC", "Monthly Pivot", "Monthly BC"] if c in display_ma50.columns})
+                .format({c: "{:+.2f}%" for c in ["Change 1D%", "% Above EMA50", "% Above EMA200", "Touch%"] if c in display_ma50.columns})
+                .format({c: "{:.2f}x" for c in ["Vol Ratio"] if c in display_ma50.columns})
+            )
+
+            ma50_selection = st.dataframe(
+                styled_ma50,
+                use_container_width=True,
+                height=600,
+                on_select="rerun",
+                selection_mode="single-row",
+                key="ma50_table",
+            )
+
+            csv_ma50 = ma50_df.to_csv(index=False).encode("utf-8")
+            st.download_button("⬇️ Download CSV", csv_ma50, "ma50_support.csv", "text/csv")
+
+            ma50_rows = ma50_selection.selection.get("rows", []) if ma50_selection else []
+            if ma50_rows:
+                ma50_row = ma50_df.iloc[ma50_rows[0]]
+                cpr_levels = {}
+                for lvl in ["Monthly TC", "Monthly Pivot", "Monthly BC"]:
+                    if lvl in ma50_row:
+                        cpr_levels[lvl] = float(ma50_row[lvl])
+                chart_modal(ma50_row["Symbol"] + ".NS", ma50_row["Company"],
+                            cached_ma50_tf, extra_levels=cpr_levels)
+    else:
+        st.info("👈 Click **Run 50 MA Support Scan** in the sidebar to start.")
