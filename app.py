@@ -9,7 +9,7 @@ from screener.ma_retracement import run_ma_retracement_scan
 from screener.ma_crossover import run_crossover_scan
 from screener.ma50_support import run_ma50_support_scan
 
-st.set_page_config(page_title="NIFTY 500 Screener", layout="wide", page_icon="📈")
+st.set_page_config(page_title="MarketPulse", layout="wide", page_icon="🐂")
 
 # ── Global CSS ────────────────────────────────────────────────────────────────
 st.markdown("""
@@ -303,8 +303,49 @@ def chart_modal(nse_symbol: str, company: str, tf_key: str, extra_levels: dict |
 
 
 # ════════════════════════════════════════════════════════════════════════════
-# PAGE HEADER
+# PAGE HEADER — Banner + Branding
 # ════════════════════════════════════════════════════════════════════════════
+import os, base64
+
+def _img_b64(path: str) -> str:
+    with open(path, "rb") as f:
+        return base64.b64encode(f.read()).decode()
+
+_banner_path = os.path.join(os.path.dirname(__file__), "assets", "banner.jpg")
+if os.path.exists(_banner_path):
+    _b64 = _img_b64(_banner_path)
+    st.markdown(f"""
+    <div style="position:relative;border-radius:16px;overflow:hidden;margin-bottom:6px;height:200px;">
+      <img src="data:image/jpeg;base64,{_b64}"
+           style="width:100%;height:100%;object-fit:cover;object-position:center 30%;display:block;" />
+      <div style="
+          position:absolute;inset:0;
+          background:linear-gradient(90deg,rgba(0,0,0,0.72) 0%,rgba(0,0,0,0.35) 60%,rgba(0,0,0,0.05) 100%);
+          display:flex;align-items:center;padding:0 36px;">
+        <div>
+          <div style="font-size:2.6rem;font-weight:900;color:#ffffff;letter-spacing:-1px;line-height:1;
+                      text-shadow:0 2px 12px rgba(0,0,0,0.7);">
+            🐂 MarketPulse
+          </div>
+          <div style="font-size:0.95rem;color:#90caf9;margin-top:6px;font-weight:500;
+                      text-shadow:0 1px 6px rgba(0,0,0,0.6);">
+            NIFTY 500 · Real-time Technical Screener · NSE India
+          </div>
+        </div>
+      </div>
+    </div>
+    """, unsafe_allow_html=True)
+else:
+    st.markdown("""
+    <div style="background:linear-gradient(120deg,#0f2027,#203a43,#2c5364);
+                border-radius:14px;padding:22px 30px;margin-bottom:6px;border:1px solid #1e3a4a;">
+      <div style="font-size:2rem;font-weight:900;color:#fff;letter-spacing:-0.5px;">🐂 MarketPulse</div>
+      <div style="font-size:0.88rem;color:#90caf9;margin-top:4px;">
+        NIFTY 500 · Real-time Technical Screener · NSE India
+      </div>
+    </div>
+    """, unsafe_allow_html=True)
+
 # Timeframe bar
 tc1, tc2 = st.columns([1, 4])
 tc1.markdown('<p style="color:#8b949e;font-size:.82rem;font-weight:600;text-transform:uppercase;letter-spacing:.5px;margin:8px 0 0;">⏱ Timeframe</p>', unsafe_allow_html=True)
@@ -319,7 +360,7 @@ tf       = TF_CONFIG[tf_key]
 interval = tf["interval"]
 period   = tf["screener_period"]
 
-mkt_note = " &nbsp;·&nbsp; Charts: **9:15 AM – 3:30 PM IST only**" if tf["market_hours"] else ""
+mkt_note = " &nbsp;·&nbsp; Charts: 9:15 AM – 3:30 PM IST only" if tf["market_hours"] else ""
 st.markdown(
     f'<p style="color:#8b949e;font-size:.82rem;margin:2px 0 12px;">'
     f'📌 Screener on <b style="color:#c9d1d9">{tf["label"]}</b> candles &nbsp;·&nbsp; '
