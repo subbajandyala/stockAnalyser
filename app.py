@@ -19,7 +19,7 @@ st.set_page_config(page_title="NIFTY 500 Stock Screener", layout="wide", page_ic
 TF_CONFIG = {
     "5m":  {"interval": "5m",   "screener_period": "5d",  "chart_period": "2d",  "display_period": "2d",  "label": "5 Min",  "market_hours": True},
     "15m": {"interval": "15m",  "screener_period": "5d",  "chart_period": "2d",  "display_period": "2d",  "label": "15 Min", "market_hours": True},
-    "1H":  {"interval": "1h",   "screener_period": "6mo", "chart_period": "6mo", "display_period": "6mo", "label": "1 Hour", "market_hours": False},
+    "1H":  {"interval": "1h",   "screener_period": "6mo", "chart_period": "6mo", "display_period": "6mo", "label": "1 Hour", "market_hours": True},
     "1D":  {"interval": "1d",   "screener_period": "1y",  "chart_period": "1y",  "display_period": "1y",  "label": "Daily",  "market_hours": False},
     "1W":  {"interval": "1wk",  "screener_period": "5y",  "chart_period": "5y",  "display_period": "5y",  "label": "Weekly", "market_hours": False},
 }
@@ -99,7 +99,7 @@ def change_style(val):
 
 # ── Chart modal ───────────────────────────────────────────────────────────────
 def _filter_market_hours(df: pd.DataFrame) -> pd.DataFrame:
-    """Keep only NSE market hours 9:10 AM – 3:30 PM IST."""
+    """Keep only NSE market hours 9:15 AM – 3:30 PM IST."""
     if df.empty:
         return df
     idx = df.index
@@ -108,7 +108,7 @@ def _filter_market_hours(df: pd.DataFrame) -> pd.DataFrame:
     idx = idx.tz_convert("Asia/Kolkata")
     df = df.copy()
     df.index = idx
-    df = df.between_time("09:10", "15:30")
+    df = df.between_time("09:15", "15:30")
     return df
 
 
@@ -132,7 +132,7 @@ def chart_modal(nse_symbol: str, company: str, tf_key: str, extra_levels: dict |
     if use_mkt_hours:
         df = _filter_market_hours(df)
         if df.empty:
-            st.warning("No data in market hours (9:10–15:30 IST). Market may be closed.")
+            st.warning("No data in market hours (9:15–15:30 IST). Market may be closed.")
             return
 
     close  = df["Close"].squeeze()
@@ -223,7 +223,7 @@ interval = tf["interval"]
 period   = tf["screener_period"]
 
 if tf["market_hours"]:
-    mkt_note = f" · Charts show 9:10 AM – 3:30 PM IST for {tf['display_period']}"
+    mkt_note = f" · Charts show 9:15 AM – 3:30 PM IST"
 else:
     mkt_note = ""
 st.caption(
