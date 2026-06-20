@@ -17,8 +17,8 @@ st.set_page_config(page_title="NIFTY 500 Stock Screener", layout="wide", page_ic
 # display_period:  shown in the caption to the user
 # market_hours:    if True, chart is filtered to NSE hours 9:10–15:00 IST
 TF_CONFIG = {
-    "5m":  {"interval": "5m",   "screener_period": "5d",  "chart_period": "1d",  "display_period": "1d",  "label": "5 Min",  "market_hours": True},
-    "15m": {"interval": "15m",  "screener_period": "5d",  "chart_period": "1d",  "display_period": "1d",  "label": "15 Min", "market_hours": True},
+    "5m":  {"interval": "5m",   "screener_period": "5d",  "chart_period": "2d",  "display_period": "2d",  "label": "5 Min",  "market_hours": True},
+    "15m": {"interval": "15m",  "screener_period": "5d",  "chart_period": "2d",  "display_period": "2d",  "label": "15 Min", "market_hours": True},
     "1H":  {"interval": "1h",   "screener_period": "6mo", "chart_period": "6mo", "display_period": "6mo", "label": "1 Hour", "market_hours": False},
     "1D":  {"interval": "1d",   "screener_period": "1y",  "chart_period": "1y",  "display_period": "1y",  "label": "Daily",  "market_hours": False},
     "1W":  {"interval": "1wk",  "screener_period": "5y",  "chart_period": "5y",  "display_period": "5y",  "label": "Weekly", "market_hours": False},
@@ -222,7 +222,10 @@ tf       = TF_CONFIG[tf_key]
 interval = tf["interval"]
 period   = tf["screener_period"]
 
-mkt_note = " · Charts show 9:10 AM – 3:00 PM IST" if tf["market_hours"] else ""
+if tf["market_hours"]:
+    mkt_note = f" · Charts show 9:10 AM – 3:00 PM IST for {tf['display_period']}"
+else:
+    mkt_note = ""
 st.caption(
     f"📌 Screener running on **{tf['label']}** candles · "
     f"Data period: **{tf['display_period']}**"
