@@ -5,23 +5,36 @@ import yfinance as yf
 from screener.stocks import get_nifty500_symbols
 from screener.news import get_trending_stocks
 from screener.technical import analyze_stocks, _ema
+from screener.ma_retracement import run_ma_retracement_scan
 
 st.set_page_config(page_title="NIFTY 500 Stock Screener", layout="wide", page_icon="📈")
 
 st.title("📈 NIFTY 500 Stock Screener")
-st.markdown("**Trending in News · Uptrend · Breakout Ready**")
 
-# ── Sidebar ──────────────────────────────────────────────────────────────────
-with st.sidebar:
-    st.header("⚙️ Filters")
-    news_days = st.slider("News lookback (days)", 7, 14, 10)
-    min_mentions = st.slider("Min news mentions", 1, 10, 2)
-    breakout_pct = st.slider("Max % below 52W High", 1, 20, 5)
-    show_all = st.checkbox("Show SKIP signals too", value=False)
+tab1, tab2 = st.tabs(["📰 News + Breakout", "🔁 20 MA Retracement"])
 
-    st.divider()
-    run_btn = st.button("🔍 Run Screener", type="primary", use_container_width=True)
-    st.caption("First run may take 2–3 minutes while fetching data.")
+# ════════════════════════════════════════════════════════════════════════════
+# TAB 1 — News + Breakout Screener
+# ════════════════════════════════════════════════════════════════════════════
+with tab1:
+    st.markdown("**Trending in News · Uptrend · Breakout Ready**")
+
+    with st.sidebar:
+        st.header("⚙️ Filters")
+
+        st.subheader("📰 News Screener")
+        news_days = st.slider("News lookback (days)", 7, 14, 10)
+        min_mentions = st.slider("Min news mentions", 1, 10, 2)
+        breakout_pct = st.slider("Max % below 52W High", 1, 20, 5)
+        show_all = st.checkbox("Show SKIP signals too", value=False)
+        st.divider()
+        run_btn = st.button("🔍 Run News Screener", type="primary", use_container_width=True)
+
+        st.subheader("🔁 MA Retracement")
+        touch_pct = st.slider("20 MA touch tolerance (%)", 1, 3, 1)
+        run_ma_btn = st.button("🔍 Run MA Screener", type="primary", use_container_width=True)
+
+        st.caption("First run may take 2–3 minutes.")
 
 # ── Signal badge colors ───────────────────────────────────────────────────────
 SIGNAL_COLORS = {
@@ -107,114 +120,212 @@ def show_chart(nse_symbol: str, company: str):
     st.plotly_chart(fig, use_container_width=True)
 
 
-# ── Main ──────────────────────────────────────────────────────────────────────
-if run_btn:
-    with st.spinner("📰 Fetching news feeds..."):
-        symbols_df = get_nifty500_symbols()
-        trending = get_trending_stocks(symbols_df, days=news_days)
+    # ── News Screener logic ───────────────────────────────────────────────────
+    if run_btn:
+        with st.spinner("📰 Fetching news feeds..."):
+            symbols_df = get_nifty500_symbols()
+            trending = get_trending_stocks(symbols_df, days=news_days)
 
-    if not trending:
-        st.error("No trending stocks found in news feeds. Try increasing the lookback period.")
-        st.stop()
+        if not trending:
+            st.error("No trending stocks found. Try increasing the lookback period.")
+            st.stop()
 
-    st.info(f"Found **{len(trending)}** stocks mentioned in news. Running technical analysis...")
+        st.info(f"Found **{len(trending)}** stocks in news. Running technical analysis...")
+        progress = st.progress(0, text="Analyzing stocks...")
+        rows_done = []
 
-    progress = st.progress(0, text="Analyzing stocks...")
-    results_placeholder = st.empty()
-    rows_done = []
+        from screener.technical import analyze_stock
+        for i, item in enumerate(trending):
+            tech = analyze_stock(item["NSE_Symbol"], breakout_pct=breakout_pct / 100)
+            if tech:
+                rows_done.append({
+                    "Symbol": item["Symbol"],
+                    "Company": item["Company"],
+                    "News Mentions": item["News_Mentions"],
+                    "Top Headline": item["Headlines"][0] if item["Headlines"] else "",
+                    **tech,
+                })
+            progress.progress((i + 1) / len(trending), text=f"Analyzing {item['Symbol']}...")
 
-    from screener.technical import analyze_stock
-    for i, item in enumerate(trending):
-        tech = analyze_stock(item["NSE_Symbol"], breakout_pct=breakout_pct / 100)
-        if tech:
-            rows_done.append({
-                "Symbol": item["Symbol"],
-                "Company": item["Company"],
-                "News Mentions": item["News_Mentions"],
-                "Top Headline": item["Headlines"][0] if item["Headlines"] else "",
-                **tech,
-            })
-        progress.progress((i + 1) / len(trending), text=f"Analyzing {item['Symbol']}...")
+        progress.empty()
+        st.session_state["news_results"] = pd.DataFrame(rows_done)
 
-    progress.empty()
-    st.session_state["results"] = pd.DataFrame(rows_done)
-    st.session_state["filters"] = (min_mentions, show_all, breakout_pct)
+    if "news_results" in st.session_state:
+        full_df: pd.DataFrame = st.session_state["news_results"]
 
-if "results" in st.session_state:
-    full_df: pd.DataFrame = st.session_state["results"]
+        if full_df.empty:
+            st.warning("No results. Try relaxing the filters.")
+        else:
+            signal_order = {"STRONG BUY": 0, "BUY": 1, "WATCH": 2, "SKIP": 3}
+            full_df["_rank"] = full_df["Signal"].map(signal_order)
+            full_df = full_df.sort_values(["_rank", "News Mentions"], ascending=[True, False])
+            full_df = full_df.drop(columns=["_rank"])
 
-    if full_df.empty:
-        st.warning("No results. Try relaxing the filters.")
-        st.stop()
+            filtered = full_df[full_df["News Mentions"] >= min_mentions]
+            if not show_all:
+                filtered = filtered[filtered["Signal"] != "SKIP"]
 
-    # Sort
-    signal_order = {"STRONG BUY": 0, "BUY": 1, "WATCH": 2, "SKIP": 3}
-    full_df["_rank"] = full_df["Signal"].map(signal_order)
-    full_df = full_df.sort_values(["_rank", "News Mentions"], ascending=[True, False])
-    full_df = full_df.drop(columns=["_rank"])
+            col1, col2, col3, col4 = st.columns(4)
+            col1.metric("Stocks Screened", len(full_df))
+            col2.metric("Strong Buy", len(full_df[full_df["Signal"] == "STRONG BUY"]))
+            col3.metric("Buy", len(full_df[full_df["Signal"] == "BUY"]))
+            col4.metric("Watch", len(full_df[full_df["Signal"] == "WATCH"]))
 
-    filtered = full_df[full_df["News Mentions"] >= min_mentions]
-    if not show_all:
-        filtered = filtered[filtered["Signal"] != "SKIP"]
+            st.subheader(f"Results — {len(filtered)} stocks")
 
-    # ── Summary metrics ───────────────────────────────────────────────────────
-    col1, col2, col3, col4 = st.columns(4)
-    col1.metric("Stocks Screened", len(full_df))
-    col2.metric("Strong Buy", len(full_df[full_df["Signal"] == "STRONG BUY"]))
-    col3.metric("Buy", len(full_df[full_df["Signal"] == "BUY"]))
-    col4.metric("Watch", len(full_df[full_df["Signal"] == "WATCH"]))
+            display = filtered.copy()
+            display["Kite Chart"] = display["Symbol"].apply(kite_chart_url)
+            display = display[DISPLAY_COLS]
 
-    st.subheader(f"Results — {len(filtered)} stocks")
+            styled = (
+                display.style
+                .map(signal_style, subset=["Signal"])
+                .map(change_style, subset=["Change 1D%", "Change 1W%"])
+                .format({
+                    "Price": "₹{:.2f}",
+                    "Change 1D%": "{:+.2f}%",
+                    "Change 1W%": "{:+.2f}%",
+                    "RSI": "{:.1f}",
+                    "% from 52W High": "{:.1f}%",
+                    "Vol Ratio (5d/20d)": "{:.2f}x",
+                })
+            )
+            st.dataframe(
+                styled,
+                use_container_width=True,
+                height=450,
+                column_config={
+                    "Kite Chart": st.column_config.LinkColumn(
+                        "Chart",
+                        display_text="📊 View Chart",
+                        help="Opens TradingView chart in a new tab",
+                    ),
+                },
+            )
 
-    display = filtered.copy()
-    display["Kite Chart"] = display["Symbol"].apply(kite_chart_url)
-    display = display[DISPLAY_COLS]
+            csv = filtered.to_csv(index=False).encode("utf-8")
+            st.download_button("⬇️ Download CSV", csv, "news_screener.csv", "text/csv")
 
-    styled = (
-        display.style
-        .map(signal_style, subset=["Signal"])
-        .map(change_style, subset=["Change 1D%", "Change 1W%"])
-        .format({
-            "Price": "₹{:.2f}",
-            "Change 1D%": "{:+.2f}%",
-            "Change 1W%": "{:+.2f}%",
-            "RSI": "{:.1f}",
-            "% from 52W High": "{:.1f}%",
-            "Vol Ratio (5d/20d)": "{:.2f}x",
-        })
-    )
-    st.dataframe(
-        styled,
-        use_container_width=True,
-        height=450,
-        column_config={
-            "Kite Chart": st.column_config.LinkColumn(
-                "Chart",
-                display_text="📊 View Chart",
-                help="Click to open TradingView chart in a new tab",
-            ),
-        },
-    )
+            st.divider()
+            st.subheader("📊 Stock Chart")
+            choices = filtered["Symbol"].tolist()
+            if choices:
+                selected_sym = st.selectbox("Select a stock", choices, key="news_chart_select")
+                if selected_sym:
+                    row = filtered[filtered["Symbol"] == selected_sym].iloc[0]
+                    show_chart(row["NSE_Symbol"], row["Company"])
+                    with st.expander("📰 Recent Headlines"):
+                        st.write(f"- {row['Top Headline']}")
+    else:
+        st.info("👈 Click **Run News Screener** in the sidebar to start.")
 
-    # ── Download ──────────────────────────────────────────────────────────────
-    csv = filtered.to_csv(index=False).encode("utf-8")
-    st.download_button("⬇️ Download CSV", csv, "screener_results.csv", "text/csv")
 
-    st.divider()
+# ════════════════════════════════════════════════════════════════════════════
+# TAB 2 — 20 MA Retracement Scanner
+# ════════════════════════════════════════════════════════════════════════════
+with tab2:
+    st.markdown("**Stocks retesting 20 EMA in an uptrend with bullish continuation**")
+    st.markdown("""
+    **Criteria:**
+    - Stock is in uptrend (Price > EMA20 > EMA50, positive slope)
+    - Previous candle's low touched EMA20 within ±tolerance%
+    - Previous candle closed above EMA20 (no breakdown)
+    - Today's candle is bullish and closing higher (continuation confirmed)
+    - 🟢 **Bonus:** Previous candle also found support at daily CPR level
+    """)
 
-    # ── Stock detail chart ────────────────────────────────────────────────────
-    st.subheader("📊 Stock Chart")
-    choices = filtered["Symbol"].tolist()
-    if choices:
-        selected_sym = st.selectbox("Select a stock to view chart", choices)
-        if selected_sym:
-            row = filtered[filtered["Symbol"] == selected_sym].iloc[0]
-            show_chart(row["NSE_Symbol"], row["Company"])
+    if run_ma_btn:
+        with st.spinner("Scanning NIFTY 500 for 20 MA retracements... (this takes 3-5 min)"):
+            symbols_df = get_nifty500_symbols()
+            ma_results = run_ma_retracement_scan(symbols_df, touch_pct=touch_pct / 100)
+            st.session_state["ma_results"] = ma_results
 
-            with st.expander("📰 Recent Headlines"):
-                idx = full_df[full_df["Symbol"] == selected_sym].index
-                if len(idx) > 0:
-                    headline = full_df.loc[idx[0], "Top Headline"]
-                    st.write(f"- {headline}")
-else:
-    st.info("👈 Configure filters in the sidebar and click **Run Screener** to start.")
+    if "ma_results" in st.session_state:
+        ma_df: pd.DataFrame = st.session_state["ma_results"]
+
+        if ma_df.empty:
+            st.warning("No stocks found matching 20 MA retracement criteria today. Try increasing the touch tolerance.")
+        else:
+            c1, c2, c3 = st.columns(3)
+            c1.metric("Stocks Found", len(ma_df))
+            c2.metric("With CPR Support", len(ma_df[ma_df["CPR Support"] == "✅ Yes"]))
+            c3.metric("With Volume Surge", len(ma_df[ma_df["Vol Ratio"] > 1.2]))
+
+            st.subheader(f"20 MA Retracement Setups — {len(ma_df)} stocks")
+
+            MA_DISPLAY_COLS = [
+                "Chart", "Symbol", "Company",
+                "Price", "Change 1D%", "EMA20", "% Above EMA20",
+                "Touch%", "Vol Ratio", "CPR Support",
+                "CPR BC", "CPR Pivot", "CPR TC", "Signal",
+            ]
+
+            def ma_signal_style(val):
+                colors = {
+                    "STRONG (20MA + CPR)": "#00C853",
+                    "GOOD (20MA + CPR)":   "#64DD17",
+                    "GOOD (20MA + Vol)":   "#FFD600",
+                    "20MA Bounce":         "#80CBC4",
+                }
+                color = colors.get(val, "#ffffff")
+                return f"background-color: {color}; color: black; font-weight: bold;"
+
+            display_ma = ma_df.copy()
+            display_ma["Chart"] = display_ma["Symbol"].apply(kite_chart_url)
+            display_ma = display_ma.rename(columns={"Chart": "Chart"})
+
+            cols_to_show = ["Chart"] + [c for c in MA_DISPLAY_COLS[1:] if c in display_ma.columns]
+
+            styled_ma = (
+                display_ma[cols_to_show].style
+                .map(ma_signal_style, subset=["Signal"])
+                .map(change_style, subset=["Change 1D%"])
+                .format({
+                    "Price": "₹{:.2f}",
+                    "EMA20": "₹{:.2f}",
+                    "Change 1D%": "{:+.2f}%",
+                    "% Above EMA20": "{:+.2f}%",
+                    "Touch%": "{:+.2f}%",
+                    "Vol Ratio": "{:.2f}x",
+                    "CPR BC": "₹{:.2f}",
+                    "CPR Pivot": "₹{:.2f}",
+                    "CPR TC": "₹{:.2f}",
+                })
+            )
+            st.dataframe(
+                styled_ma,
+                use_container_width=True,
+                height=500,
+                column_config={
+                    "Chart": st.column_config.LinkColumn(
+                        "Chart",
+                        display_text="📊 View",
+                        help="Opens TradingView chart in a new tab",
+                    ),
+                },
+            )
+
+            csv_ma = ma_df.to_csv(index=False).encode("utf-8")
+            st.download_button("⬇️ Download CSV", csv_ma, "ma_retracement.csv", "text/csv")
+
+            st.divider()
+            st.subheader("📊 Stock Chart")
+            ma_choices = ma_df["Symbol"].tolist()
+            selected_ma = st.selectbox("Select a stock", ma_choices, key="ma_chart_select")
+            if selected_ma:
+                ma_row = ma_df[ma_df["Symbol"] == selected_ma].iloc[0]
+                nse_sym = ma_row["Symbol"] + ".NS"
+                show_chart(nse_sym, ma_row["Company"])
+
+                # Show CPR levels on the chart info
+                with st.expander("📐 CPR Levels"):
+                    st.markdown(f"""
+                    | Level | Price |
+                    |-------|-------|
+                    | TC (Top Central Pivot) | ₹{ma_row['CPR TC']:.2f} |
+                    | Pivot | ₹{ma_row['CPR Pivot']:.2f} |
+                    | BC (Bottom Central Pivot) | ₹{ma_row['CPR BC']:.2f} |
+                    | EMA 20 | ₹{ma_row['EMA20']:.2f} |
+                    """)
+    else:
+        st.info("👈 Click **Run MA Screener** in the sidebar to scan for retracement setups.")
