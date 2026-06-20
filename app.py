@@ -165,8 +165,8 @@ if "results" in st.session_state:
     display = filtered[DISPLAY_COLS].copy()
     styled = (
         display.style
-        .applymap(signal_style, subset=["Signal"])
-        .applymap(change_style, subset=["Change 1D%", "Change 1W%"])
+        .map(signal_style, subset=["Signal"])
+        .map(change_style, subset=["Change 1D%", "Change 1W%"])
         .format({
             "Price": "₹{:.2f}",
             "Change 1D%": "{:+.2f}%",
