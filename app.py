@@ -56,24 +56,36 @@ st.markdown("""
 
 /* ── Tab strip ── */
 [data-testid="stTabs"] [role="tablist"] {
-    background: #161b22;
-    border-radius: 10px 10px 0 0;
-    padding: 6px 8px 0;
-    gap: 4px;
-    border-bottom: 2px solid #21262d;
+    background: #0d1117;
+    border-radius: 0;
+    padding: 0;
+    gap: 6px;
+    border-bottom: 1px solid #21262d;
 }
 [data-testid="stTabs"] button[role="tab"] {
-    border-radius: 8px 8px 0 0 !important;
+    border-radius: 6px 6px 0 0 !important;
+    font-size: 0.75rem !important;
     font-weight: 600 !important;
-    color: #8b949e !important;
-    padding: 8px 18px !important;
-    border: none !important;
-    background: transparent !important;
+    color: #6e7681 !important;
+    padding: 5px 14px !important;
+    border: 1px solid transparent !important;
+    border-bottom: none !important;
+    background: #161b22 !important;
+    letter-spacing: 0.3px !important;
+    text-transform: uppercase !important;
+    transition: all 0.15s !important;
+}
+[data-testid="stTabs"] button[role="tab"]:hover {
+    color: #c9d1d9 !important;
+    background: #1c2128 !important;
+    border-color: #30363d !important;
 }
 [data-testid="stTabs"] button[role="tab"][aria-selected="true"] {
     background: #21262d !important;
     color: #58a6ff !important;
+    border-color: #30363d !important;
     border-bottom: 2px solid #58a6ff !important;
+    font-weight: 700 !important;
 }
 
 /* ── Run button ── */
@@ -321,10 +333,10 @@ st.divider()
 # TABS
 # ════════════════════════════════════════════════════════════════════════════
 tab1, tab2, tab3, tab4 = st.tabs([
-    "📰  News + Breakout",
-    "🔁  20 MA Retracement",
-    "📈  EMA Crossover",
-    "🛡️  50 MA Support",
+    "📰 News + Breakout",
+    "🔁 20 MA Retracement",
+    "📈 EMA Crossover",
+    "🛡️ 50 MA Support",
 ])
 
 # ── TAB 1 ────────────────────────────────────────────────────────────────────
