@@ -9,24 +9,33 @@ from screener.ma_retracement import run_ma_retracement_scan
 
 st.set_page_config(page_title="NIFTY 500 Stock Screener", layout="wide", page_icon="📈")
 
+# ── Timeframe config ──────────────────────────────────────────────────────────
+TF_CONFIG = {
+    "5m":  {"interval": "5m",   "period": "5d",   "chart_period": "5d",   "label": "5 Min"},
+    "15m": {"interval": "15m",  "period": "60d",  "chart_period": "60d",  "label": "15 Min"},
+    "1H":  {"interval": "1h",   "period": "6mo",  "chart_period": "6mo",  "label": "1 Hour"},
+    "1D":  {"interval": "1d",   "period": "1y",   "chart_period": "1y",   "label": "Daily"},
+    "1W":  {"interval": "1wk",  "period": "5y",   "chart_period": "5y",   "label": "Weekly"},
+}
+
 # ── Sidebar ───────────────────────────────────────────────────────────────────
 with st.sidebar:
     st.header("⚙️ Filters")
 
     st.subheader("📰 News Screener")
-    news_days = st.slider("News lookback (days)", 7, 14, 10)
+    news_days    = st.slider("News lookback (days)", 7, 14, 10)
     min_mentions = st.slider("Min news mentions", 1, 10, 2)
-    breakout_pct = st.slider("Max % below 52W High", 1, 20, 5)
-    show_all = st.checkbox("Show SKIP signals too", value=False)
-    run_btn = st.button("🔍 Run News Screener", type="primary", use_container_width=True)
+    breakout_pct = st.slider("Max % below Period High", 1, 20, 5)
+    show_all     = st.checkbox("Show SKIP signals too", value=False)
+    run_btn      = st.button("🔍 Run News Screener", type="primary", use_container_width=True)
 
     st.divider()
 
     st.subheader("🔁 MA Retracement")
-    touch_pct = st.slider("20 MA touch tolerance (%)", 1, 3, 1)
+    touch_pct  = st.slider("20 MA touch tolerance (%)", 1, 3, 1)
     run_ma_btn = st.button("🔍 Run MA Screener", type="primary", use_container_width=True)
 
-    st.caption("First run may take 2–3 minutes.")
+    st.caption("First run may take 2–5 minutes.")
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 SIGNAL_COLORS = {
@@ -43,13 +52,13 @@ MA_SIGNAL_COLORS = {
 }
 NEWS_COLS = [
     "Symbol", "Company", "News Mentions",
-    "Price", "Change 1D%", "Change 1W%",
-    "RSI", "% from 52W High", "Vol Ratio (5d/20d)",
+    "Price", "Change Last%", "Change Prev 5%",
+    "RSI", "% from High", "Vol Ratio",
     "Signal", "Top Headline",
 ]
 MA_COLS = [
     "Symbol", "Company",
-    "Price", "Change 1D%", "EMA20", "% Above EMA20",
+    "Price", "Change%", "EMA20", "% Above EMA20",
     "Touch%", "Vol Ratio", "CPR Support",
     "CPR BC", "CPR Pivot", "CPR TC", "Signal",
 ]
@@ -71,36 +80,21 @@ def change_style(val):
         return ""
 
 
-# ── Timeframe config ─────────────────────────────────────────────────────────
-TIMEFRAMES = {
-    "5m":  ("5min",  "5d",   "5m"),
-    "15m": ("15min", "60d",  "15m"),
-    "1H":  ("1 Hr",  "6mo",  "1h"),
-    "1D":  ("Daily", "1y",   "1d"),
-    "1W":  ("Weekly","5y",   "1wk"),
-}
-
-
 # ── Chart modal ───────────────────────────────────────────────────────────────
 @st.dialog("📊 Stock Chart", width="large")
-def chart_modal(nse_symbol: str, company: str, extra_levels: dict | None = None):
+def chart_modal(nse_symbol: str, company: str, tf_key: str, extra_levels: dict | None = None):
     st.markdown(f"### {company} &nbsp; `{nse_symbol}`")
 
-    # Timeframe selector
-    tf_label = st.segmented_control(
-        "Timeframe",
-        options=list(TIMEFRAMES.keys()),
-        default="1D",
-        key=f"tf_{nse_symbol}",
-    )
-    _, period, interval = TIMEFRAMES[tf_label]
+    cfg        = TF_CONFIG[tf_key]
+    interval   = cfg["interval"]
+    chart_per  = cfg["chart_period"]
 
-    with st.spinner(f"Loading {tf_label} chart..."):
-        df = yf.download(nse_symbol, period=period, interval=interval,
+    with st.spinner(f"Loading {tf_key} chart..."):
+        df = yf.download(nse_symbol, period=chart_per, interval=interval,
                          progress=False, auto_adjust=True)
 
     if df is None or df.empty:
-        st.error("No data available for this symbol.")
+        st.error("No data available.")
         return
 
     close  = df["Close"].squeeze()
@@ -108,63 +102,44 @@ def chart_modal(nse_symbol: str, company: str, extra_levels: dict | None = None)
     ema20  = _ema(close, 20)
     ema50  = _ema(close, 50)
 
-    latest = float(close.iloc[-1])
-    prev   = float(close.iloc[-2])
-    chg    = (latest - prev) / prev * 100
-    high52 = float(close.max())
-    low52  = float(close.min())
+    latest   = float(close.iloc[-1])
+    prev     = float(close.iloc[-2])
+    chg      = (latest - prev) / prev * 100
+    ph       = float(close.max())
+    pl       = float(close.min())
 
-    # Key metrics row inside modal
     m1, m2, m3, m4 = st.columns(4)
-    m1.metric("Price",    f"₹{latest:.2f}", f"{chg:+.2f}%")
-    m2.metric("EMA 20",   f"₹{float(ema20.iloc[-1]):.2f}")
-    m3.metric("Period High", f"₹{high52:.2f}")
-    m4.metric("Period Low",  f"₹{low52:.2f}")
+    m1.metric("Price",        f"₹{latest:.2f}", f"{chg:+.2f}%")
+    m2.metric("EMA 20",       f"₹{float(ema20.iloc[-1]):.2f}")
+    m3.metric("Period High",  f"₹{ph:.2f}")
+    m4.metric("Period Low",   f"₹{pl:.2f}")
 
     fig = go.Figure()
-
     fig.add_trace(go.Candlestick(
         x=df.index,
-        open=df["Open"].squeeze(),
-        high=df["High"].squeeze(),
-        low=df["Low"].squeeze(),
-        close=close,
+        open=df["Open"].squeeze(), high=df["High"].squeeze(),
+        low=df["Low"].squeeze(),   close=close,
         name="Price",
         increasing_line_color="#00C853",
         decreasing_line_color="#FF5252",
     ))
-    fig.add_trace(go.Scatter(
-        x=df.index, y=ema20, name="EMA 20",
-        line=dict(color="#FFD600", width=1.8),
-    ))
-    fig.add_trace(go.Scatter(
-        x=df.index, y=ema50, name="EMA 50",
-        line=dict(color="#FF9100", width=1.8),
-    ))
+    fig.add_trace(go.Scatter(x=df.index, y=ema20, name="EMA 20",
+                             line=dict(color="#FFD600", width=1.8)))
+    fig.add_trace(go.Scatter(x=df.index, y=ema50, name="EMA 50",
+                             line=dict(color="#FF9100", width=1.8)))
 
     if extra_levels:
-        level_colors = {
-            "CPR TC":    "#CE93D8",
-            "CPR Pivot": "#9575CD",
-            "CPR BC":    "#7986CB",
-        }
+        level_colors = {"CPR TC": "#CE93D8", "CPR Pivot": "#9575CD", "CPR BC": "#7986CB"}
         for label, price in extra_levels.items():
             fig.add_hline(
-                y=price,
-                line_dash="dot",
-                line_color=level_colors.get(label, "#aaa"),
-                line_width=1.5,
+                y=price, line_dash="dot",
+                line_color=level_colors.get(label, "#aaa"), line_width=1.5,
                 annotation_text=f" {label}: ₹{price:.2f}",
-                annotation_position="right",
-                annotation_font_size=11,
+                annotation_position="right", annotation_font_size=11,
             )
 
-    fig.add_trace(go.Bar(
-        x=df.index, y=volume,
-        name="Volume",
-        marker_color="rgba(100,150,255,0.25)",
-        yaxis="y2",
-    ))
+    fig.add_trace(go.Bar(x=df.index, y=volume, name="Volume",
+                         marker_color="rgba(100,150,255,0.25)", yaxis="y2"))
 
     fig.update_layout(
         xaxis_rangeslider_visible=False,
@@ -179,7 +154,7 @@ def chart_modal(nse_symbol: str, company: str, extra_levels: dict | None = None)
     )
     st.plotly_chart(fig, use_container_width=True)
 
-    col_a, col_b = st.columns([1, 1])
+    col_a, col_b = st.columns(2)
     with col_a:
         if extra_levels:
             st.markdown("**CPR Levels**")
@@ -187,15 +162,36 @@ def chart_modal(nse_symbol: str, company: str, extra_levels: dict | None = None)
                 st.markdown(f"- **{label}:** ₹{price:.2f}")
     with col_b:
         sym = nse_symbol.replace(".NS", "")
-        st.link_button(
-            "🔗 Open on TradingView",
-            f"https://www.tradingview.com/chart/?symbol=NSE:{sym}",
-            use_container_width=True,
-        )
+        st.link_button("🔗 Open on TradingView",
+                       f"https://www.tradingview.com/chart/?symbol=NSE:{sym}",
+                       use_container_width=True)
 
 
-# ── Tabs ──────────────────────────────────────────────────────────────────────
+# ── Page header + Timeframe selector ─────────────────────────────────────────
 st.title("📈 NIFTY 500 Stock Screener")
+
+st.markdown("#### Select Timeframe")
+tf_key = st.segmented_control(
+    label="Timeframe",
+    options=list(TF_CONFIG.keys()),
+    format_func=lambda k: TF_CONFIG[k]["label"],
+    default="1D",
+    key="global_tf",
+    label_visibility="collapsed",
+)
+
+tf      = TF_CONFIG[tf_key]
+interval = tf["interval"]
+period   = tf["period"]
+
+st.caption(
+    f"📌 Screener running on **{TF_CONFIG[tf_key]['label']}** candles · "
+    f"Data period: **{period}** · "
+    f"Charts open in the same timeframe"
+)
+
+st.divider()
+
 tab1, tab2 = st.tabs(["📰 News + Breakout", "🔁 20 MA Retracement"])
 
 
@@ -204,7 +200,7 @@ tab1, tab2 = st.tabs(["📰 News + Breakout", "🔁 20 MA Retracement"])
 # ════════════════════════════════════════════════════════════════════════════
 with tab1:
     if run_btn:
-        with st.spinner("📰 Fetching news and running analysis..."):
+        with st.spinner("📰 Fetching news..."):
             symbols_df = get_nifty500_symbols()
             trending   = get_trending_stocks(symbols_df, days=news_days)
 
@@ -214,10 +210,16 @@ with tab1:
             progress  = st.progress(0, text="Analyzing stocks...")
             rows_done = []
             for i, item in enumerate(trending):
-                tech = analyze_stock(item["NSE_Symbol"], breakout_pct=breakout_pct / 100)
+                tech = analyze_stock(
+                    item["NSE_Symbol"],
+                    breakout_pct=breakout_pct / 100,
+                    interval=interval,
+                    period=period,
+                )
                 if tech:
                     rows_done.append({
                         "Symbol":        item["Symbol"],
+                        "NSE_Symbol":    item["NSE_Symbol"],
                         "Company":       item["Company"],
                         "News Mentions": item["News_Mentions"],
                         "Top Headline":  item["Headlines"][0] if item["Headlines"] else "",
@@ -226,9 +228,14 @@ with tab1:
                 progress.progress((i + 1) / len(trending), text=f"Analyzing {item['Symbol']}...")
             progress.empty()
             st.session_state["news_results"] = pd.DataFrame(rows_done)
+            st.session_state["news_tf"] = tf_key
 
     if "news_results" in st.session_state:
         full_df: pd.DataFrame = st.session_state["news_results"]
+        cached_tf = st.session_state.get("news_tf", "1D")
+
+        if cached_tf != tf_key:
+            st.warning(f"⚠️ Results are from **{TF_CONFIG[cached_tf]['label']}** timeframe. Click **Run News Screener** to refresh for **{TF_CONFIG[tf_key]['label']}**.")
 
         if full_df.empty:
             st.warning("No results. Try relaxing the filters.")
@@ -250,19 +257,16 @@ with tab1:
 
             st.caption("👆 Click any row to open chart  ·  Press Esc to close")
 
-            display = filtered[NEWS_COLS].copy()
+            show_cols = [c for c in NEWS_COLS if c in filtered.columns]
+            display   = filtered[show_cols].copy()
             styled = (
                 display.style
                 .map(signal_style, subset=["Signal"])
-                .map(change_style, subset=["Change 1D%", "Change 1W%"])
-                .format({
-                    "Price":              "₹{:.2f}",
-                    "Change 1D%":         "{:+.2f}%",
-                    "Change 1W%":         "{:+.2f}%",
-                    "RSI":                "{:.1f}",
-                    "% from 52W High":    "{:.1f}%",
-                    "Vol Ratio (5d/20d)": "{:.2f}x",
-                })
+                .map(change_style, subset=[c for c in ["Change Last%", "Change Prev 5%"] if c in display.columns])
+                .format({c: "₹{:.2f}" for c in ["Price"] if c in display.columns})
+                .format({c: "{:+.2f}%" for c in ["Change Last%", "Change Prev 5%", "% from High"] if c in display.columns})
+                .format({c: "{:.1f}" for c in ["RSI"] if c in display.columns})
+                .format({c: "{:.2f}x" for c in ["Vol Ratio"] if c in display.columns})
             )
 
             selection = st.dataframe(
@@ -280,7 +284,8 @@ with tab1:
             rows_sel = selection.selection.get("rows", []) if selection else []
             if rows_sel:
                 row = filtered.iloc[rows_sel[0]]
-                chart_modal(row["NSE_Symbol"], row["Company"])
+                nse_sym = row.get("NSE_Symbol", row["Symbol"] + ".NS")
+                chart_modal(nse_sym, row["Company"], cached_tf)
     else:
         st.info("👈 Click **Run News Screener** in the sidebar to start.")
 
@@ -295,21 +300,31 @@ with tab2:
         - **Uptrend:** Price > EMA20 > EMA50, positive EMA20 slope
         - **Touch:** Previous candle's low within ±tolerance% of EMA20
         - **No breakdown:** Previous candle closed above EMA20
-        - **Continuation:** Today's candle is bullish and closing higher
-        - 🟢 **CPR Bonus:** Previous candle found support at daily CPR level
+        - **Continuation:** Current candle is bullish and closing higher
+        - 🟢 **CPR Bonus:** Previous candle found support at CPR level
         """)
 
     if run_ma_btn:
-        with st.spinner("Scanning NIFTY 500 for 20 MA retracements... (3–5 min)"):
+        with st.spinner(f"Scanning NIFTY 500 on {TF_CONFIG[tf_key]['label']} timeframe... (3–5 min)"):
             symbols_df = get_nifty500_symbols()
-            ma_results = run_ma_retracement_scan(symbols_df, touch_pct=touch_pct / 100)
+            ma_results = run_ma_retracement_scan(
+                symbols_df,
+                touch_pct=touch_pct / 100,
+                interval=interval,
+                period=period,
+            )
             st.session_state["ma_results"] = ma_results
+            st.session_state["ma_tf"] = tf_key
 
     if "ma_results" in st.session_state:
         ma_df: pd.DataFrame = st.session_state["ma_results"]
+        cached_ma_tf = st.session_state.get("ma_tf", "1D")
+
+        if cached_ma_tf != tf_key:
+            st.warning(f"⚠️ Results are from **{TF_CONFIG[cached_ma_tf]['label']}** timeframe. Click **Run MA Screener** to refresh for **{TF_CONFIG[tf_key]['label']}**.")
 
         if ma_df.empty:
-            st.warning("No stocks found. Try increasing touch tolerance.")
+            st.warning("No stocks found. Try increasing touch tolerance or switching timeframe.")
         else:
             c1, c2, c3 = st.columns(3)
             c1.metric("Stocks Found",      len(ma_df))
@@ -318,22 +333,15 @@ with tab2:
 
             st.caption("👆 Click any row to open chart  ·  Press Esc to close")
 
-            display_ma = ma_df[[c for c in MA_COLS if c in ma_df.columns]].copy()
+            show_ma_cols = [c for c in MA_COLS if c in ma_df.columns]
+            display_ma   = ma_df[show_ma_cols].copy()
             styled_ma = (
                 display_ma.style
                 .map(ma_signal_style, subset=["Signal"])
-                .map(change_style, subset=["Change 1D%"])
-                .format({
-                    "Price":         "₹{:.2f}",
-                    "EMA20":         "₹{:.2f}",
-                    "Change 1D%":    "{:+.2f}%",
-                    "% Above EMA20": "{:+.2f}%",
-                    "Touch%":        "{:+.2f}%",
-                    "Vol Ratio":     "{:.2f}x",
-                    "CPR BC":        "₹{:.2f}",
-                    "CPR Pivot":     "₹{:.2f}",
-                    "CPR TC":        "₹{:.2f}",
-                })
+                .map(change_style, subset=[c for c in ["Change%"] if c in display_ma.columns])
+                .format({c: "₹{:.2f}" for c in ["Price", "EMA20", "CPR BC", "CPR Pivot", "CPR TC"] if c in display_ma.columns})
+                .format({c: "{:+.2f}%" for c in ["Change%", "% Above EMA20", "Touch%"] if c in display_ma.columns})
+                .format({c: "{:.2f}x" for c in ["Vol Ratio"] if c in display_ma.columns})
             )
 
             ma_selection = st.dataframe(
@@ -356,6 +364,7 @@ with tab2:
                     "CPR Pivot": float(ma_row["CPR Pivot"]),
                     "CPR BC":    float(ma_row["CPR BC"]),
                 }
-                chart_modal(ma_row["Symbol"] + ".NS", ma_row["Company"], extra_levels=cpr_levels)
+                chart_modal(ma_row["Symbol"] + ".NS", ma_row["Company"],
+                            cached_ma_tf, extra_levels=cpr_levels)
     else:
         st.info("👈 Click **Run MA Screener** in the sidebar to scan.")
