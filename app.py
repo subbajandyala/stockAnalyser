@@ -71,11 +71,33 @@ def change_style(val):
         return ""
 
 
+# ── Timeframe config ─────────────────────────────────────────────────────────
+TIMEFRAMES = {
+    "5m":  ("5min",  "5d",   "5m"),
+    "15m": ("15min", "60d",  "15m"),
+    "1H":  ("1 Hr",  "6mo",  "1h"),
+    "1D":  ("Daily", "1y",   "1d"),
+    "1W":  ("Weekly","5y",   "1wk"),
+}
+
+
 # ── Chart modal ───────────────────────────────────────────────────────────────
 @st.dialog("📊 Stock Chart", width="large")
 def chart_modal(nse_symbol: str, company: str, extra_levels: dict | None = None):
-    with st.spinner(f"Loading {nse_symbol}..."):
-        df = yf.download(nse_symbol, period="6mo", interval="1d", progress=False, auto_adjust=True)
+    st.markdown(f"### {company} &nbsp; `{nse_symbol}`")
+
+    # Timeframe selector
+    tf_label = st.segmented_control(
+        "Timeframe",
+        options=list(TIMEFRAMES.keys()),
+        default="1D",
+        key=f"tf_{nse_symbol}",
+    )
+    _, period, interval = TIMEFRAMES[tf_label]
+
+    with st.spinner(f"Loading {tf_label} chart..."):
+        df = yf.download(nse_symbol, period=period, interval=interval,
+                         progress=False, auto_adjust=True)
 
     if df is None or df.empty:
         st.error("No data available for this symbol.")
@@ -89,15 +111,15 @@ def chart_modal(nse_symbol: str, company: str, extra_levels: dict | None = None)
     latest = float(close.iloc[-1])
     prev   = float(close.iloc[-2])
     chg    = (latest - prev) / prev * 100
-    high52 = float(close.tail(252).max())
-    low52  = float(close.tail(252).min())
+    high52 = float(close.max())
+    low52  = float(close.min())
 
     # Key metrics row inside modal
     m1, m2, m3, m4 = st.columns(4)
     m1.metric("Price",    f"₹{latest:.2f}", f"{chg:+.2f}%")
     m2.metric("EMA 20",   f"₹{float(ema20.iloc[-1]):.2f}")
-    m3.metric("52W High", f"₹{high52:.2f}")
-    m4.metric("52W Low",  f"₹{low52:.2f}")
+    m3.metric("Period High", f"₹{high52:.2f}")
+    m4.metric("Period Low",  f"₹{low52:.2f}")
 
     fig = go.Figure()
 
