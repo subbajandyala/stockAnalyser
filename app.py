@@ -32,11 +32,15 @@ SIGNAL_COLORS = {
 }
 
 DISPLAY_COLS = [
-    "Symbol", "Company", "News Mentions",
+    "Kite Chart", "Symbol", "Company", "News Mentions",
     "Price", "Change 1D%", "Change 1W%",
     "RSI", "% from 52W High", "Vol Ratio (5d/20d)",
     "Signal", "Top Headline",
 ]
+
+
+def kite_chart_url(symbol: str) -> str:
+    return f"https://kite.zerodha.com/chart/web/ciq/NSE/{symbol}/"
 
 
 def signal_style(val):
@@ -162,7 +166,10 @@ if "results" in st.session_state:
 
     st.subheader(f"Results — {len(filtered)} stocks")
 
-    display = filtered[DISPLAY_COLS].copy()
+    display = filtered.copy()
+    display["Kite Chart"] = display["Symbol"].apply(kite_chart_url)
+    display = display[DISPLAY_COLS]
+
     styled = (
         display.style
         .map(signal_style, subset=["Signal"])
@@ -176,7 +183,18 @@ if "results" in st.session_state:
             "Vol Ratio (5d/20d)": "{:.2f}x",
         })
     )
-    st.dataframe(styled, use_container_width=True, height=450)
+    st.dataframe(
+        styled,
+        use_container_width=True,
+        height=450,
+        column_config={
+            "Kite Chart": st.column_config.LinkColumn(
+                "Kite Chart",
+                display_text="📊 Open",
+                help="Click to open Kite chart in a new tab",
+            ),
+        },
+    )
 
     # ── Download ──────────────────────────────────────────────────────────────
     csv = filtered.to_csv(index=False).encode("utf-8")
