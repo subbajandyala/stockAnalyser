@@ -6,6 +6,7 @@ from screener.stocks import get_nifty500_symbols
 from screener.news import get_trending_stocks
 from screener.technical import analyze_stock, _ema
 from screener.ma_retracement import run_ma_retracement_scan
+from screener.ma_crossover import run_crossover_scan
 
 st.set_page_config(page_title="NIFTY 500 Stock Screener", layout="wide", page_icon="📈")
 
@@ -38,6 +39,11 @@ with st.sidebar:
     st.subheader("🔁 MA Retracement")
     touch_pct  = st.slider("20 MA touch tolerance (%)", 1, 3, 1)
     run_ma_btn = st.button("🔍 Run MA Screener", type="primary", use_container_width=True)
+
+    st.divider()
+
+    st.subheader("📈 20/50 EMA Crossover")
+    run_cross_btn = st.button("🔍 Run Crossover Scan", type="primary", use_container_width=True)
 
     st.caption("First run may take 2–5 minutes.")
 
@@ -218,7 +224,7 @@ st.caption(
 
 st.divider()
 
-tab1, tab2 = st.tabs(["📰 News + Breakout", "🔁 20 MA Retracement"])
+tab1, tab2, tab3 = st.tabs(["📰 News + Breakout", "🔁 20 MA Retracement", "📈 50 & 20 EMA Crossover"])
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -394,3 +400,91 @@ with tab2:
                             cached_ma_tf, extra_levels=cpr_levels)
     else:
         st.info("👈 Click **Run MA Screener** in the sidebar to scan.")
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# TAB 3 — 20/50 EMA Crossover (Position Trading)
+# ════════════════════════════════════════════════════════════════════════════
+CROSS_SIGNAL_COLORS = {
+    "STRONG BUY": "#00C853",
+    "BUY":        "#64DD17",
+    "WATCH":      "#FFD600",
+}
+CROSS_COLS = [
+    "Symbol", "Company",
+    "Price", "Change 1D%", "RSI",
+    "EMA 20", "EMA 50", "EMA 200", "% Above EMA200",
+    "EMA Gap%", "Cross Day", "Confirmed Days",
+    "Vol on Cross", "Vol Today", "Move Since Cross%",
+    "Signal",
+]
+
+def cross_signal_style(val):
+    color = CROSS_SIGNAL_COLORS.get(val, "#ffffff")
+    return f"background-color: {color}; color: black; font-weight: bold; border-radius: 4px;"
+
+with tab3:
+    st.markdown("**Position Trading — 20 EMA crossing above 50 EMA with price above 200 EMA**")
+    with st.expander("📋 Criteria"):
+        st.markdown("""
+        - **Timeframe:** Daily (fixed — position trading)
+        - **Long-term uptrend:** Price > 200 EMA
+        - **Crossover:** 20 EMA crossed above 50 EMA within last 1–5 days
+        - **Fake breakout filter:** 20 EMA stayed above 50 EMA for 2+ consecutive days
+        - **Volume surge:** Above-average volume on crossover day confirms conviction
+        - **RSI > 30:** Stock is not in oversold/trapped zone
+        - Sorted by: recency of crossover → volume surge
+        """)
+
+    if run_cross_btn:
+        with st.spinner("Scanning NIFTY 500 for 20/50 EMA crossovers on Daily charts... (3–5 min)"):
+            symbols_df    = get_nifty500_symbols()
+            cross_results = run_crossover_scan(symbols_df)
+            st.session_state["cross_results"] = cross_results
+
+    if "cross_results" in st.session_state:
+        cross_df: pd.DataFrame = st.session_state["cross_results"]
+
+        if cross_df.empty:
+            st.warning("No fresh crossovers found in NIFTY 500. Try again tomorrow or check back after market hours.")
+        else:
+            c1, c2, c3, c4 = st.columns(4)
+            c1.metric("Crossovers Found",  len(cross_df))
+            c2.metric("Strong Buy",        len(cross_df[cross_df["Signal"] == "STRONG BUY"]))
+            c3.metric("Buy",               len(cross_df[cross_df["Signal"] == "BUY"]))
+            c4.metric("Vol Surge on Cross", len(cross_df[cross_df["Vol on Cross"] > 1.3]))
+
+            st.caption("👆 Click any row to open Daily chart  ·  Press Esc to close")
+
+            show_cross_cols = [c for c in CROSS_COLS if c in cross_df.columns]
+            display_cross   = cross_df[show_cross_cols].copy()
+            styled_cross = (
+                display_cross.style
+                .map(cross_signal_style, subset=["Signal"])
+                .map(change_style, subset=["Change 1D%"])
+                .format({c: "₹{:.2f}" for c in ["Price", "EMA 20", "EMA 50", "EMA 200"] if c in display_cross.columns})
+                .format({c: "{:+.2f}%" for c in ["Change 1D%", "% Above EMA200", "EMA Gap%", "Move Since Cross%"] if c in display_cross.columns})
+                .format({c: "{:.1f}" for c in ["RSI"] if c in display_cross.columns})
+                .format({c: "{:.2f}x" for c in ["Vol on Cross", "Vol Today"] if c in display_cross.columns})
+                .format({c: "{:.0f} day(s) ago" for c in ["Cross Day"] if c in display_cross.columns})
+                .format({c: "{:.0f} days" for c in ["Confirmed Days"] if c in display_cross.columns})
+            )
+
+            cross_selection = st.dataframe(
+                styled_cross,
+                use_container_width=True,
+                height=600,
+                on_select="rerun",
+                selection_mode="single-row",
+                key="cross_table",
+            )
+
+            csv_cross = cross_df.to_csv(index=False).encode("utf-8")
+            st.download_button("⬇️ Download CSV", csv_cross, "ema_crossover.csv", "text/csv")
+
+            cross_rows = cross_selection.selection.get("rows", []) if cross_selection else []
+            if cross_rows:
+                cr = cross_df.iloc[cross_rows[0]]
+                chart_modal(cr["Symbol"] + ".NS", cr["Company"], "1D")
+    else:
+        st.info("👈 Click **Run Crossover Scan** in the sidebar to identify position trading setups.")
