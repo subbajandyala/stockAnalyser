@@ -152,18 +152,24 @@ def chart_modal(nse_symbol: str, company: str, tf_key: str, extra_levels: dict |
     m3.metric("Day High",     f"₹{ph:.2f}")
     m4.metric("Day Low",      f"₹{pl:.2f}")
 
+    # Use string x-axis labels to eliminate overnight/off-market gaps
+    if use_mkt_hours:
+        x_labels = df.index.strftime("%d %b %H:%M")
+    else:
+        x_labels = df.index.strftime("%d %b %Y") if cfg["interval"] in ("1d", "1wk") else df.index.strftime("%d %b %H:%M")
+
     fig = go.Figure()
     fig.add_trace(go.Candlestick(
-        x=df.index,
+        x=x_labels,
         open=df["Open"].squeeze(), high=df["High"].squeeze(),
         low=df["Low"].squeeze(),   close=close,
         name="Price",
         increasing_line_color="#00C853",
         decreasing_line_color="#FF5252",
     ))
-    fig.add_trace(go.Scatter(x=df.index, y=ema20, name="EMA 20",
+    fig.add_trace(go.Scatter(x=x_labels, y=ema20, name="EMA 20",
                              line=dict(color="#FFD600", width=1.8)))
-    fig.add_trace(go.Scatter(x=df.index, y=ema50, name="EMA 50",
+    fig.add_trace(go.Scatter(x=x_labels, y=ema50, name="EMA 50",
                              line=dict(color="#FF9100", width=1.8)))
 
     if extra_levels:
@@ -176,16 +182,27 @@ def chart_modal(nse_symbol: str, company: str, tf_key: str, extra_levels: dict |
                 annotation_position="right", annotation_font_size=11,
             )
 
-    fig.add_trace(go.Bar(x=df.index, y=volume, name="Volume",
+    fig.add_trace(go.Bar(x=x_labels, y=volume, name="Volume",
                          marker_color="rgba(255,255,255,0.85)", yaxis="y2"))
 
+    # Reduce x-axis tick density so labels don't overlap
+    total_bars = len(x_labels)
+    tick_every = max(1, total_bars // 20)
+    visible_ticks = x_labels[::tick_every].tolist()
+
     fig.update_layout(
+        xaxis=dict(
+            type="category",
+            tickvals=visible_ticks,
+            ticktext=visible_ticks,
+            tickangle=-45,
+        ),
         xaxis_rangeslider_visible=False,
         yaxis=dict(title="Price (₹)", side="left", showgrid=True, gridcolor="#2a2a2a"),
         yaxis2=dict(overlaying="y", side="right", showgrid=False, title="Volume"),
         legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0),
         height=520,
-        margin=dict(t=30, b=30, l=10, r=100),
+        margin=dict(t=30, b=60, l=10, r=100),
         template="plotly_dark",
         plot_bgcolor="#0e1117",
         paper_bgcolor="#0e1117",
