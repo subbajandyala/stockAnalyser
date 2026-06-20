@@ -99,7 +99,7 @@ def change_style(val):
 
 # ── Chart modal ───────────────────────────────────────────────────────────────
 def _filter_market_hours(df: pd.DataFrame) -> pd.DataFrame:
-    """Keep only NSE market hours 9:10 AM – 3:00 PM IST."""
+    """Keep only NSE market hours 9:10 AM – 3:30 PM IST."""
     if df.empty:
         return df
     idx = df.index
@@ -108,7 +108,7 @@ def _filter_market_hours(df: pd.DataFrame) -> pd.DataFrame:
     idx = idx.tz_convert("Asia/Kolkata")
     df = df.copy()
     df.index = idx
-    df = df.between_time("09:10", "15:00")
+    df = df.between_time("09:10", "15:30")
     return df
 
 
@@ -132,7 +132,7 @@ def chart_modal(nse_symbol: str, company: str, tf_key: str, extra_levels: dict |
     if use_mkt_hours:
         df = _filter_market_hours(df)
         if df.empty:
-            st.warning("No data in market hours (9:10–15:00 IST) for today. Market may be closed.")
+            st.warning("No data in market hours (9:10–15:30 IST). Market may be closed.")
             return
 
     close  = df["Close"].squeeze()
@@ -223,7 +223,7 @@ interval = tf["interval"]
 period   = tf["screener_period"]
 
 if tf["market_hours"]:
-    mkt_note = f" · Charts show 9:10 AM – 3:00 PM IST for {tf['display_period']}"
+    mkt_note = f" · Charts show 9:10 AM – 3:30 PM IST for {tf['display_period']}"
 else:
     mkt_note = ""
 st.caption(
