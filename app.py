@@ -10,12 +10,16 @@ from screener.ma_retracement import run_ma_retracement_scan
 st.set_page_config(page_title="NIFTY 500 Stock Screener", layout="wide", page_icon="📈")
 
 # ── Timeframe config ──────────────────────────────────────────────────────────
+# screener_period: data range used for EMA calculations in the screener
+# chart_period:    data range fetched for the chart modal
+# display_period:  shown in the caption to the user
+# market_hours:    if True, chart is filtered to NSE hours 9:10–15:00 IST
 TF_CONFIG = {
-    "5m":  {"interval": "5m",   "period": "5d",   "chart_period": "5d",   "label": "5 Min"},
-    "15m": {"interval": "15m",  "period": "60d",  "chart_period": "60d",  "label": "15 Min"},
-    "1H":  {"interval": "1h",   "period": "6mo",  "chart_period": "6mo",  "label": "1 Hour"},
-    "1D":  {"interval": "1d",   "period": "1y",   "chart_period": "1y",   "label": "Daily"},
-    "1W":  {"interval": "1wk",  "period": "5y",   "chart_period": "5y",   "label": "Weekly"},
+    "5m":  {"interval": "5m",   "screener_period": "5d",  "chart_period": "1d",  "display_period": "1d",  "label": "5 Min",  "market_hours": True},
+    "15m": {"interval": "15m",  "screener_period": "5d",  "chart_period": "1d",  "display_period": "1d",  "label": "15 Min", "market_hours": True},
+    "1H":  {"interval": "1h",   "screener_period": "6mo", "chart_period": "6mo", "display_period": "6mo", "label": "1 Hour", "market_hours": False},
+    "1D":  {"interval": "1d",   "screener_period": "1y",  "chart_period": "1y",  "display_period": "1y",  "label": "Daily",  "market_hours": False},
+    "1W":  {"interval": "1wk",  "screener_period": "5y",  "chart_period": "5y",  "display_period": "5y",  "label": "Weekly", "market_hours": False},
 }
 
 # ── Sidebar ───────────────────────────────────────────────────────────────────
@@ -81,13 +85,28 @@ def change_style(val):
 
 
 # ── Chart modal ───────────────────────────────────────────────────────────────
+def _filter_market_hours(df: pd.DataFrame) -> pd.DataFrame:
+    """Keep only NSE market hours 9:10 AM – 3:00 PM IST."""
+    if df.empty:
+        return df
+    idx = df.index
+    if idx.tzinfo is None:
+        idx = idx.tz_localize("UTC")
+    idx = idx.tz_convert("Asia/Kolkata")
+    df = df.copy()
+    df.index = idx
+    df = df.between_time("09:10", "15:00")
+    return df
+
+
 @st.dialog("📊 Stock Chart", width="large")
 def chart_modal(nse_symbol: str, company: str, tf_key: str, extra_levels: dict | None = None):
     st.markdown(f"### {company} &nbsp; `{nse_symbol}`")
 
-    cfg        = TF_CONFIG[tf_key]
-    interval   = cfg["interval"]
-    chart_per  = cfg["chart_period"]
+    cfg           = TF_CONFIG[tf_key]
+    interval      = cfg["interval"]
+    chart_per     = cfg["chart_period"]
+    use_mkt_hours = cfg["market_hours"]
 
     with st.spinner(f"Loading {tf_key} chart..."):
         df = yf.download(nse_symbol, period=chart_per, interval=interval,
@@ -97,22 +116,28 @@ def chart_modal(nse_symbol: str, company: str, tf_key: str, extra_levels: dict |
         st.error("No data available.")
         return
 
+    if use_mkt_hours:
+        df = _filter_market_hours(df)
+        if df.empty:
+            st.warning("No data in market hours (9:10–15:00 IST) for today. Market may be closed.")
+            return
+
     close  = df["Close"].squeeze()
     volume = df["Volume"].squeeze()
     ema20  = _ema(close, 20)
     ema50  = _ema(close, 50)
 
     latest   = float(close.iloc[-1])
-    prev     = float(close.iloc[-2])
-    chg      = (latest - prev) / prev * 100
+    prev     = float(close.iloc[-2]) if len(close) > 1 else latest
+    chg      = (latest - prev) / prev * 100 if prev else 0
     ph       = float(close.max())
     pl       = float(close.min())
 
     m1, m2, m3, m4 = st.columns(4)
     m1.metric("Price",        f"₹{latest:.2f}", f"{chg:+.2f}%")
     m2.metric("EMA 20",       f"₹{float(ema20.iloc[-1]):.2f}")
-    m3.metric("Period High",  f"₹{ph:.2f}")
-    m4.metric("Period Low",   f"₹{pl:.2f}")
+    m3.metric("Day High",     f"₹{ph:.2f}")
+    m4.metric("Day Low",      f"₹{pl:.2f}")
 
     fig = go.Figure()
     fig.add_trace(go.Candlestick(
@@ -180,14 +205,15 @@ tf_key = st.segmented_control(
     label_visibility="collapsed",
 )
 
-tf      = TF_CONFIG[tf_key]
+tf       = TF_CONFIG[tf_key]
 interval = tf["interval"]
-period   = tf["period"]
+period   = tf["screener_period"]
 
+mkt_note = " · Charts show 9:10 AM – 3:00 PM IST" if tf["market_hours"] else ""
 st.caption(
-    f"📌 Screener running on **{TF_CONFIG[tf_key]['label']}** candles · "
-    f"Data period: **{period}** · "
-    f"Charts open in the same timeframe"
+    f"📌 Screener running on **{tf['label']}** candles · "
+    f"Data period: **{tf['display_period']}**"
+    f"{mkt_note}"
 )
 
 st.divider()
