@@ -170,7 +170,7 @@ def chart_modal(nse_symbol: str, company: str, tf_key: str, extra_levels: dict |
             )
 
     fig.add_trace(go.Bar(x=df.index, y=volume, name="Volume",
-                         marker_color="rgba(100,150,255,0.25)", yaxis="y2"))
+                         marker_color="rgba(100,180,255,0.7)", yaxis="y2"))
 
     fig.update_layout(
         xaxis_rangeslider_visible=False,
