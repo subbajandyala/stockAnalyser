@@ -11,6 +11,61 @@ from screener.ma50_support import run_ma50_support_scan
 
 st.set_page_config(page_title="MarketPulse", layout="wide", page_icon="🐂")
 
+# ── Auth ──────────────────────────────────────────────────────────────────────
+_USERNAME = "msnfriends"
+_PASSWORD = "msnfriends123456"
+
+if "authenticated" not in st.session_state:
+    st.session_state.authenticated = False
+
+if not st.session_state.authenticated:
+    st.markdown("""
+    <style>
+    .stApp { background: #0d1117; }
+    [data-testid="stSidebar"] { display: none; }
+    [data-testid="collapsedControl"] { display: none; }
+    .login-box {
+        background: #161b22;
+        border: 1px solid #21262d;
+        border-radius: 14px;
+        padding: 40px 36px;
+        max-width: 400px;
+        margin: 80px auto 0;
+    }
+    .login-title {
+        color: #e6edf3;
+        font-size: 1.5rem;
+        font-weight: 700;
+        text-align: center;
+        margin-bottom: 6px;
+    }
+    .login-sub {
+        color: #8b949e;
+        font-size: 0.85rem;
+        text-align: center;
+        margin-bottom: 28px;
+    }
+    </style>
+    <div class="login-box">
+      <div class="login-title">🐂 MarketPulse</div>
+      <div class="login-sub">Sign in to continue</div>
+    </div>
+    """, unsafe_allow_html=True)
+
+    with st.form("login_form"):
+        username = st.text_input("Username")
+        password = st.text_input("Password", type="password")
+        submitted = st.form_submit_button("Sign In", use_container_width=True)
+
+    if submitted:
+        if username == _USERNAME and password == _PASSWORD:
+            st.session_state.authenticated = True
+            st.rerun()
+        else:
+            st.error("Invalid username or password.")
+
+    st.stop()
+
 # ── Global CSS ────────────────────────────────────────────────────────────────
 st.markdown("""
 <style>
@@ -345,6 +400,13 @@ else:
       </div>
     </div>
     """, unsafe_allow_html=True)
+
+# Logout
+_lcol1, _lcol2 = st.columns([8, 1])
+with _lcol2:
+    if st.button("Sign Out", use_container_width=True):
+        st.session_state.authenticated = False
+        st.rerun()
 
 # Timeframe bar
 tc1, tc2 = st.columns([1, 4])
