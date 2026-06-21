@@ -24,41 +24,32 @@ def _api_path(symbol: str) -> str:
     return f"/api/option-chain-equities?symbol={symbol}"
 
 
-# ── Primary: Selenium (uses real Chrome on local machine) ─────────────────────
-# Navigates to NSE in headless Chrome so Akamai JS executes and sets cookies,
-# then fires the API fetch from within the browser context (same-origin).
+# ── Primary: undetected-chromedriver ─────────────────────────────────────────
+# Uses real Chrome but patches the binary so Akamai's JS fingerprint checks
+# cannot detect automation.  Once on the page, fires the API fetch from inside
+# the browser context so all Akamai cookies are included automatically.
 
-def _fetch_via_selenium(symbol: str) -> dict:
+def _fetch_via_uc(symbol: str) -> dict:
     try:
-        import logging
-        from selenium import webdriver
-        from selenium.webdriver.chrome.options import Options
-        from selenium.webdriver.chrome.service import Service
-        from webdriver_manager.chrome import ChromeDriverManager
-        logging.getLogger("WDM").setLevel(logging.ERROR)
+        import undetected_chromedriver as uc
     except ImportError:
-        raise RuntimeError("selenium/webdriver-manager not installed")
+        raise RuntimeError("undetected-chromedriver not installed")
 
     path = _api_path(symbol)
 
-    opts = Options()
+    opts = uc.ChromeOptions()
     opts.add_argument("--headless=new")
     opts.add_argument("--no-sandbox")
     opts.add_argument("--disable-dev-shm-usage")
     opts.add_argument("--disable-gpu")
-    opts.add_argument("--log-level=3")
-    opts.add_experimental_option("excludeSwitches", ["enable-logging"])
+    opts.add_argument("--window-size=1280,800")
 
-    driver = webdriver.Chrome(
-        service=Service(ChromeDriverManager().install()),
-        options=opts,
-    )
+    driver = uc.Chrome(options=opts)
     try:
         driver.set_page_load_timeout(30)
         driver.get(f"{_NSE}/option-chain")
-        time.sleep(5)  # wait for Akamai JS to run and set cookies
+        time.sleep(6)  # let Akamai JS run and set cookies
 
-        # Execute the fetch from inside the browser (same-origin — cookies auto-sent)
         data = driver.execute_async_script(f"""
             var done = arguments[0];
             fetch("{path}", {{
@@ -74,41 +65,27 @@ def _fetch_via_selenium(symbol: str) -> dict:
         """)
 
         if isinstance(data, dict) and "__err__" in data:
-            raise RuntimeError(f"Browser fetch: {data['__err__']}")
+            raise RuntimeError(f"fetch error: {data['__err__']}")
         if not data or not data.get("records"):
-            raise RuntimeError("Selenium: NSE returned empty data")
+            raise RuntimeError("NSE returned empty data")
         return data
     finally:
-        driver.quit()
+        try:
+            driver.quit()
+        except Exception:
+            pass
 
 
-# ── Fallback 1: requests with session warming ─────────────────────────────────
-
-def _fetch_via_requests(symbol: str) -> dict:
-    s = _req.Session()
-    s.headers.update(_HEADERS)
-    s.get(_NSE, timeout=12)
-    time.sleep(1.5)
-    s.get(f"{_NSE}/option-chain", timeout=12)
-    time.sleep(1.5)
-    resp = s.get(f"{_NSE}{_api_path(symbol)}", timeout=20)
-    resp.raise_for_status()
-    data = resp.json()
-    if not data.get("records"):
-        raise RuntimeError("NSE returned empty data")
-    return data
-
-
-# ── Fallback 2: curl_cffi Chrome TLS impersonation ───────────────────────────
+# ── Fallback: curl_cffi Chrome TLS impersonation ─────────────────────────────
 
 def _fetch_via_curl_cffi(symbol: str) -> dict:
     from curl_cffi import requests as cf
     s = cf.Session(impersonate="chrome120")
     try:
         s.get(_NSE, timeout=12)
-        time.sleep(1.5)
+        time.sleep(2)
         s.get(f"{_NSE}/option-chain", timeout=12)
-        time.sleep(1.5)
+        time.sleep(2)
     except Exception:
         pass
     resp = s.get(f"{_NSE}{_api_path(symbol)}", timeout=20, headers={
@@ -125,35 +102,30 @@ def _fetch_via_curl_cffi(symbol: str) -> dict:
 # ── Public entry point ────────────────────────────────────────────────────────
 
 def fetch_option_chain(symbol: str) -> dict:
-    """Selenium (local Chrome) → requests → curl_cffi, with retries."""
+    """undetected-chromedriver (local) → curl_cffi → error."""
     last_err = None
 
+    # Try Chrome with bot-detection patches (works locally)
     try:
-        return _fetch_via_selenium(symbol)
+        return _fetch_via_uc(symbol)
     except Exception as e:
         last_err = e
 
-    for attempt in range(2):
-        try:
-            return _fetch_via_requests(symbol)
-        except Exception as e:
-            last_err = e
-            time.sleep(2 ** attempt)
-
-    for attempt in range(2):
+    # Try curl_cffi TLS impersonation
+    for attempt in range(3):
         try:
             return _fetch_via_curl_cffi(symbol)
         except Exception as e:
             last_err = e
-            time.sleep(2 ** attempt)
+            if attempt < 2:
+                time.sleep(2 ** attempt)
 
     raise RuntimeError(
         f"NSE option chain fetch failed ({last_err}).\n\n"
         "**To fix this:**\n"
-        "- Run the app locally on your laptop\n"
-        "- Make sure **Google Chrome** is installed\n"
-        "- Click **Refresh** once or twice — NSE sometimes needs 2 attempts\n"
-        "- NSE blocks all cloud hosting IPs (Streamlit Cloud, AWS, GCP)"
+        "- Make sure **Google Chrome** is installed on your computer\n"
+        "- Click **Refresh** 1–2 more times — NSE sometimes needs retries\n"
+        "- NSE blocks cloud hosting IPs — this feature only works when running locally"
     ) from last_err
 
 
