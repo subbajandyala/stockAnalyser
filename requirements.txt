@@ -6,3 +6,4 @@ requests>=2.31.0
 plotly>=5.17.0
 numpy>=1.24.0
 curl-cffi>=0.7.0
+playwright>=1.40.0
