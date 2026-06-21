@@ -1,3 +1,4 @@
+import time
 import streamlit as st
 import pandas as pd
 import plotly.graph_objects as go
@@ -8,6 +9,10 @@ from screener.technical import analyze_stock, _ema
 from screener.ma_retracement import run_ma_retracement_scan
 from screener.ma_crossover import run_crossover_scan
 from screener.ma50_support import run_ma50_support_scan
+from screener.option_chain import (
+    fetch_option_chain, get_expiries, parse_chain,
+    atm_strike, calc_pcr, calc_max_pain,
+)
 
 st.set_page_config(page_title="MarketPulse", layout="wide", page_icon="🐂")
 
@@ -373,11 +378,12 @@ st.divider()
 # ════════════════════════════════════════════════════════════════════════════
 # TABS
 # ════════════════════════════════════════════════════════════════════════════
-tab1, tab2, tab3, tab4 = st.tabs([
+tab1, tab2, tab3, tab4, tab5 = st.tabs([
     "📰 News + Breakout",
     "🔁 20 MA Retracement",
     "📈 EMA Crossover",
     "🛡️ 50 MA Support",
+    "🔗 Option Chain Insights",
 ])
 
 # ── TAB 1 ────────────────────────────────────────────────────────────────────
@@ -620,3 +626,203 @@ with tab4:
                 chart_modal(r["Symbol"]+".NS", r["Company"], cached_ma50_tf, extra_levels=cpr)
     else:
         st.info("🔎 Configure filters above and click **Run 50 MA Scan** to start.")
+
+
+# ── TAB 5 — Option Chain Insights ────────────────────────────────────────────
+with tab5:
+    st.markdown("#### 🔗 Option Chain Insights — Live NSE Data")
+
+    oc1, oc2, oc3, oc4 = st.columns([2, 2, 2, 1])
+
+    with oc1:
+        oc_symbol = st.selectbox("Index", ["NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY"], key="oc_symbol")
+
+    cache_key = f"oc_{oc_symbol}"
+    ts_key    = f"oc_{oc_symbol}_ts"
+    oc_raw    = st.session_state.get(cache_key)
+
+    expiries = get_expiries(oc_raw) if oc_raw else []
+    with oc2:
+        oc_expiry = st.selectbox(
+            "Expiry", expiries if expiries else ["— load data first —"],
+            key="oc_expiry", disabled=not expiries,
+        )
+    with oc3:
+        n_strikes = st.slider("Strikes ± ATM", 5, 25, 10, key="oc_n")
+    with oc4:
+        load_oc = st.button("🔄 Refresh", type="primary", use_container_width=True, key="load_oc")
+
+    if load_oc:
+        with st.spinner(f"Fetching {oc_symbol} option chain from NSE…"):
+            try:
+                oc_raw = fetch_option_chain(oc_symbol)
+                st.session_state[cache_key] = oc_raw
+                st.session_state[ts_key]    = time.time()
+                st.rerun()
+            except Exception as _e:
+                st.error(
+                    f"Could not reach NSE API: {_e}\n\n"
+                    "NSE sometimes blocks non-browser IPs. Try again or check your network."
+                )
+
+    if not oc_raw:
+        st.info("👆 Select an index and click **🔄 Refresh** to load live option chain data from NSE.")
+    elif expiries and oc_expiry and oc_expiry != "— load data first —":
+        ts = st.session_state.get(ts_key)
+        if ts:
+            elapsed = int(time.time() - ts)
+            st.caption(f"🕐 Last updated: {elapsed}s ago  ·  Source: NSE India  ·  Click Refresh to update")
+
+        oc_df, spot = parse_chain(oc_raw, oc_expiry)
+
+        if oc_df.empty:
+            st.warning("No data available for the selected expiry.")
+        else:
+            atm  = atm_strike(oc_df, spot)
+            _pcr = calc_pcr(oc_df)
+            _mp  = calc_max_pain(oc_df)
+            pcr_label = "Bullish" if _pcr >= 1.2 else ("Bearish" if _pcr < 0.8 else "Neutral")
+
+            # ── Metric cards ─────────────────────────────────────────────────
+            m1, m2, m3, m4, m5, m6 = st.columns(6)
+            m1.metric("Spot Price",    f"₹{spot:,.2f}")
+            m2.metric("PCR",           f"{_pcr:.2f}", pcr_label)
+            m3.metric("Max Pain",      f"₹{_mp:,.0f}", f"{_mp - spot:+.0f} from spot")
+            m4.metric("ATM Strike",    f"₹{atm:,.0f}")
+            m5.metric("Total CE OI",   f"{oc_df['CE OI'].sum() / 1_000:.0f}K lots")
+            m6.metric("Total PE OI",   f"{oc_df['PE OI'].sum() / 1_000:.0f}K lots")
+
+            st.divider()
+
+            # ── Option chain table ────────────────────────────────────────────
+            atm_iloc = int((oc_df["Strike"] - atm).abs().values.argmin())
+            r_start  = max(0, atm_iloc - n_strikes)
+            r_end    = min(len(oc_df), atm_iloc + n_strikes + 1)
+            view_df  = oc_df.iloc[r_start:r_end].copy()
+
+            disp_cols = [
+                "CE OI", "CE Chng OI", "CE Vol", "CE IV", "CE LTP",
+                "Strike",
+                "PE LTP", "PE IV", "PE Vol", "PE Chng OI", "PE OI",
+            ]
+            disp_df = view_df[disp_cols].copy()
+
+            def _atm_row(row):
+                if row["Strike"] == atm:
+                    return ["background-color:#1c2f4a; color:#58a6ff; font-weight:700;"] * len(row)
+                return [""] * len(row)
+
+            def _chng_color(val):
+                try:
+                    v = float(val)
+                    if v > 0:
+                        return "color:#26a641; font-weight:600;"
+                    if v < 0:
+                        return "color:#f85149; font-weight:600;"
+                except Exception:
+                    pass
+                return ""
+
+            styled_oc = (
+                disp_df.style
+                .apply(_atm_row, axis=1)
+                .background_gradient(subset=["CE OI"], cmap="Reds", vmin=0)
+                .background_gradient(subset=["PE OI"], cmap="Greens", vmin=0)
+                .map(_chng_color, subset=["CE Chng OI", "PE Chng OI"])
+                .format({
+                    "CE OI":      "{:,.0f}",
+                    "CE Chng OI": "{:+,.0f}",
+                    "CE Vol":     "{:,.0f}",
+                    "CE IV":      "{:.1f}%",
+                    "CE LTP":     "₹{:.2f}",
+                    "Strike":     "{:,.0f}",
+                    "PE LTP":     "₹{:.2f}",
+                    "PE IV":      "{:.1f}%",
+                    "PE Vol":     "{:,.0f}",
+                    "PE Chng OI": "{:+,.0f}",
+                    "PE OI":      "{:,.0f}",
+                })
+            )
+
+            st.caption(
+                "🔵 ATM row highlighted · CE OI (red heatmap) = resistance · "
+                "PE OI (green heatmap) = support · OI in lots"
+            )
+            st.dataframe(styled_oc, use_container_width=True, height=460)
+
+            csv_oc = oc_df.to_csv(index=False).encode("utf-8")
+            st.download_button(
+                "⬇️ Export Full Chain CSV", csv_oc,
+                f"{oc_symbol}_option_chain.csv", "text/csv", key="dl_oc",
+            )
+
+            st.divider()
+
+            # ── Charts — OI Buildup & Change in OI ───────────────────────────
+            chart_df  = view_df.sort_values("Strike")
+            str_x     = chart_df["Strike"].astype(int).astype(str).tolist()
+            atm_x     = str(int(atm))
+
+            chart_left, chart_right = st.columns(2)
+
+            with chart_left:
+                st.markdown("##### 📊 OI Buildup — CE vs PE")
+                fig_oi = go.Figure()
+                fig_oi.add_trace(go.Bar(
+                    x=str_x, y=chart_df["CE OI"].tolist(),
+                    name="CE OI", marker_color="#f85149", opacity=0.85,
+                ))
+                fig_oi.add_trace(go.Bar(
+                    x=str_x, y=chart_df["PE OI"].tolist(),
+                    name="PE OI", marker_color="#26a641", opacity=0.85,
+                ))
+                if atm_x in str_x:
+                    fig_oi.add_vline(
+                        x=atm_x, line_dash="dash", line_color="#58a6ff",
+                        annotation_text="ATM", annotation_font_color="#58a6ff",
+                        annotation_position="top",
+                    )
+                fig_oi.update_layout(
+                    barmode="group", template="plotly_dark",
+                    plot_bgcolor="#0d1117", paper_bgcolor="#0d1117",
+                    height=340, margin=dict(t=10, b=50, l=10, r=10),
+                    legend=dict(orientation="h", yanchor="bottom", y=1.01, x=0,
+                                font=dict(color="#c9d1d9"), bgcolor="rgba(0,0,0,0)"),
+                    xaxis=dict(tickfont=dict(color="#8b949e", size=9),
+                               showgrid=False, tickangle=-45),
+                    yaxis=dict(tickfont=dict(color="#8b949e"), gridcolor="#21262d"),
+                )
+                st.plotly_chart(fig_oi, use_container_width=True)
+
+            with chart_right:
+                st.markdown("##### 📉 Change in OI — Fresh Positions")
+                ce_chng = chart_df["CE Chng OI"].tolist()
+                pe_chng = chart_df["PE Chng OI"].tolist()
+                fig_chng = go.Figure()
+                fig_chng.add_trace(go.Bar(
+                    x=str_x, y=ce_chng, name="CE Chng OI",
+                    marker_color=["#f85149" if v >= 0 else "#80cbc4" for v in ce_chng],
+                    opacity=0.85,
+                ))
+                fig_chng.add_trace(go.Bar(
+                    x=str_x, y=pe_chng, name="PE Chng OI",
+                    marker_color=["#26a641" if v >= 0 else "#ff7043" for v in pe_chng],
+                    opacity=0.85,
+                ))
+                if atm_x in str_x:
+                    fig_chng.add_vline(
+                        x=atm_x, line_dash="dash", line_color="#58a6ff",
+                        annotation_text="ATM", annotation_font_color="#58a6ff",
+                        annotation_position="top",
+                    )
+                fig_chng.update_layout(
+                    barmode="group", template="plotly_dark",
+                    plot_bgcolor="#0d1117", paper_bgcolor="#0d1117",
+                    height=340, margin=dict(t=10, b=50, l=10, r=10),
+                    legend=dict(orientation="h", yanchor="bottom", y=1.01, x=0,
+                                font=dict(color="#c9d1d9"), bgcolor="rgba(0,0,0,0)"),
+                    xaxis=dict(tickfont=dict(color="#8b949e", size=9),
+                               showgrid=False, tickangle=-45),
+                    yaxis=dict(tickfont=dict(color="#8b949e"), gridcolor="#21262d"),
+                )
+                st.plotly_chart(fig_chng, use_container_width=True)
