@@ -40,6 +40,7 @@ def fetch_news_items(days: int = 14) -> list[dict]:
                     "title": title,
                     "summary": re.sub(r"<[^>]+>", " ", summary),
                     "date": pub_date,
+                    "link": getattr(entry, "link", "") or "",
                 })
         except Exception:
             continue
@@ -56,7 +57,7 @@ def get_trending_stocks(symbols_df: pd.DataFrame, days: int = 14) -> list[dict]:
     symbol_rows.sort(key=lambda r: len(r["Company"]), reverse=True)
 
     mention_count: dict[str, int] = {}
-    mention_articles: dict[str, list[str]] = {}
+    mention_articles: dict[str, list[dict]] = {}
 
     for item in news_items:
         text = (item["title"] + " " + item["summary"]).upper()
@@ -78,8 +79,9 @@ def get_trending_stocks(symbols_df: pd.DataFrame, days: int = 14) -> list[dict]:
                     mention_count[sym] = mention_count.get(sym, 0) + 1
                     if sym not in mention_articles:
                         mention_articles[sym] = []
-                    if item["title"] not in mention_articles[sym]:
-                        mention_articles[sym].append(item["title"])
+                    existing_titles = [a["title"] for a in mention_articles[sym]]
+                    if item["title"] not in existing_titles:
+                        mention_articles[sym].append({"title": item["title"], "link": item.get("link", "")})
                     break
 
     if not mention_count:
@@ -89,12 +91,14 @@ def get_trending_stocks(symbols_df: pd.DataFrame, days: int = 14) -> list[dict]:
     for row in symbol_rows:
         sym = row["Symbol"]
         if sym in mention_count:
+            articles = mention_articles.get(sym, [])[:3]
             results.append({
                 "Symbol": sym,
                 "NSE_Symbol": row["NSE_Symbol"],
                 "Company": row["Company"],
                 "News_Mentions": mention_count[sym],
-                "Headlines": mention_articles.get(sym, [])[:3],
+                "Headlines": [a["title"] for a in articles],
+                "Headline_Links": [a["link"] for a in articles],
             })
 
     results.sort(key=lambda x: x["News_Mentions"], reverse=True)

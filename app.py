@@ -115,7 +115,7 @@ MA_SIGNAL_COLORS    = {"STRONG (20MA + CPR)": "#00C853", "GOOD (20MA + CPR)": "#
 CROSS_SIGNAL_COLORS = {"STRONG BUY": "#00C853", "BUY": "#64DD17", "WATCH": "#FFD600"}
 MA50_SIGNAL_COLORS  = {"STRONG (50MA + Monthly CPR)": "#00C853", "BUY (50MA + Monthly CPR)": "#64DD17", "WATCH": "#FFD600"}
 
-NEWS_COLS  = ["Symbol","Company","News Mentions","Price","Change Last%","Change Prev 5%","RSI","% from High","Vol Ratio","Signal","Top Headline"]
+NEWS_COLS  = ["Symbol","Company","News Mentions","Price","Change Last%","Change Prev 5%","RSI","% from High","Vol Ratio","Signal","Top Headline","Top Link"]
 MA_COLS    = ["Symbol","Company","Price","Change%","EMA20","% Above EMA20","Touch%","Vol Ratio","CPR Support","CPR BC","CPR Pivot","CPR TC","Signal"]
 CROSS_COLS = ["Symbol","Company","Price","Change 1D%","RSI","EMA 20","EMA 50","EMA 200","% Above EMA200","EMA Gap%","Cross Day","Confirmed Days","Vol on Cross","Vol Today","Move Since Cross%","Signal"]
 MA50_COLS  = ["Symbol","Company","Price","Change 1D%","EMA 20","EMA 50","EMA 200","% Above EMA50","% Above EMA200","Touch%","Vol Ratio","Above Monthly CPR","Monthly TC","Monthly Pivot","Monthly BC","Signal"]
@@ -396,6 +396,7 @@ with tab1:
                     rows.append({"Symbol": item["Symbol"], "NSE_Symbol": item["NSE_Symbol"],
                                  "Company": item["Company"], "News Mentions": item["News_Mentions"],
                                  "Top Headline": item["Headlines"][0] if item["Headlines"] else "",
+                                 "Top Link": item["Headline_Links"][0] if item.get("Headline_Links") else "",
                                  **tech})
                 prog.progress((i+1)/len(trending), text=f"Analysing {item['Symbol']}…")
             prog.empty()
@@ -432,7 +433,10 @@ with tab1:
                       .format({c: "{:.1f}" for c in ["RSI"] if c in filtered.columns})
                       .format({c: "{:.2f}x" for c in ["Vol Ratio"] if c in filtered.columns}))
             sel = st.dataframe(styled, use_container_width=True, height=500,
-                               on_select="rerun", selection_mode="single-row", key="news_table")
+                               on_select="rerun", selection_mode="single-row", key="news_table",
+                               column_config={
+                                   "Top Link": st.column_config.LinkColumn("🔗 Link", display_text="Read →"),
+                               })
             csv = filtered.to_csv(index=False).encode("utf-8")
             st.download_button("⬇️ Export CSV", csv, "news_screener.csv", "text/csv")
             rows_sel = sel.selection.get("rows", []) if sel else []
