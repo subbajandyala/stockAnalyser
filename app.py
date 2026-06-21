@@ -661,8 +661,12 @@ with tab5:
                 st.rerun()
             except Exception as _e:
                 st.error(
-                    f"Could not reach NSE API: {_e}\n\n"
-                    "NSE sometimes blocks non-browser IPs. Try again or check your network."
+                    f"NSE fetch failed ({_e})\n\n"
+                    "**Why this happens:** NSE India requires an active browser session "
+                    "(cookies) before serving API data. The app re-warms the session on "
+                    "each refresh — please **click Refresh again** (1–2 retries usually "
+                    "work). If errors persist, NSE may be temporarily blocking this "
+                    "server's IP; try again in a few minutes."
                 )
 
     if not oc_raw:
