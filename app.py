@@ -653,12 +653,13 @@ with tab5:
         load_oc = st.button("🔄 Refresh", type="primary", use_container_width=True, key="load_oc")
 
     if load_oc:
+        _fetch_ok = False
         with st.spinner(f"Fetching {oc_symbol} option chain from NSE…"):
             try:
                 oc_raw = fetch_option_chain(oc_symbol)
                 st.session_state[cache_key] = oc_raw
                 st.session_state[ts_key]    = time.time()
-                st.rerun()
+                _fetch_ok = True
             except Exception as _e:
                 st.error(
                     f"NSE fetch failed ({_e})\n\n"
@@ -668,6 +669,8 @@ with tab5:
                     "work). If errors persist, NSE may be temporarily blocking this "
                     "server's IP; try again in a few minutes."
                 )
+        if _fetch_ok:
+            st.rerun()
 
     if not oc_raw:
         st.info("👆 Select an index and click **🔄 Refresh** to load live option chain data from NSE.")
