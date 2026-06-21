@@ -18,11 +18,71 @@ _HEADERS = {
 }
 
 
-def _api_url(symbol: str) -> str:
+def _api_path(symbol: str) -> str:
     if symbol in {"NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY"}:
-        return f"{_NSE}/api/option-chain-indices?symbol={symbol}"
-    return f"{_NSE}/api/option-chain-equities?symbol={symbol}"
+        return f"/api/option-chain-indices?symbol={symbol}"
+    return f"/api/option-chain-equities?symbol={symbol}"
 
+
+# ── Primary: Selenium (uses real Chrome on local machine) ─────────────────────
+# Navigates to NSE in headless Chrome so Akamai JS executes and sets cookies,
+# then fires the API fetch from within the browser context (same-origin).
+
+def _fetch_via_selenium(symbol: str) -> dict:
+    try:
+        import logging
+        from selenium import webdriver
+        from selenium.webdriver.chrome.options import Options
+        from selenium.webdriver.chrome.service import Service
+        from webdriver_manager.chrome import ChromeDriverManager
+        logging.getLogger("WDM").setLevel(logging.ERROR)
+    except ImportError:
+        raise RuntimeError("selenium/webdriver-manager not installed")
+
+    path = _api_path(symbol)
+
+    opts = Options()
+    opts.add_argument("--headless=new")
+    opts.add_argument("--no-sandbox")
+    opts.add_argument("--disable-dev-shm-usage")
+    opts.add_argument("--disable-gpu")
+    opts.add_argument("--log-level=3")
+    opts.add_experimental_option("excludeSwitches", ["enable-logging"])
+
+    driver = webdriver.Chrome(
+        service=Service(ChromeDriverManager().install()),
+        options=opts,
+    )
+    try:
+        driver.set_page_load_timeout(30)
+        driver.get(f"{_NSE}/option-chain")
+        time.sleep(5)  # wait for Akamai JS to run and set cookies
+
+        # Execute the fetch from inside the browser (same-origin — cookies auto-sent)
+        data = driver.execute_async_script(f"""
+            var done = arguments[0];
+            fetch("{path}", {{
+                credentials: "same-origin",
+                headers: {{
+                    "Accept": "application/json, text/plain, */*",
+                    "Referer": "{_NSE}/option-chain"
+                }}
+            }})
+            .then(r => r.json())
+            .then(d => done(d))
+            .catch(e => done({{"__err__": e.toString()}}));
+        """)
+
+        if isinstance(data, dict) and "__err__" in data:
+            raise RuntimeError(f"Browser fetch: {data['__err__']}")
+        if not data or not data.get("records"):
+            raise RuntimeError("Selenium: NSE returned empty data")
+        return data
+    finally:
+        driver.quit()
+
+
+# ── Fallback 1: requests with session warming ─────────────────────────────────
 
 def _fetch_via_requests(symbol: str) -> dict:
     s = _req.Session()
@@ -31,13 +91,15 @@ def _fetch_via_requests(symbol: str) -> dict:
     time.sleep(1.5)
     s.get(f"{_NSE}/option-chain", timeout=12)
     time.sleep(1.5)
-    resp = s.get(_api_url(symbol), timeout=20)
+    resp = s.get(f"{_NSE}{_api_path(symbol)}", timeout=20)
     resp.raise_for_status()
     data = resp.json()
     if not data.get("records"):
         raise RuntimeError("NSE returned empty data")
     return data
 
+
+# ── Fallback 2: curl_cffi Chrome TLS impersonation ───────────────────────────
 
 def _fetch_via_curl_cffi(symbol: str) -> dict:
     from curl_cffi import requests as cf
@@ -49,7 +111,7 @@ def _fetch_via_curl_cffi(symbol: str) -> dict:
         time.sleep(1.5)
     except Exception:
         pass
-    resp = s.get(_api_url(symbol), timeout=20, headers={
+    resp = s.get(f"{_NSE}{_api_path(symbol)}", timeout=20, headers={
         "Referer": f"{_NSE}/option-chain",
         "Accept":  "application/json, text/plain, */*",
     })
@@ -60,9 +122,16 @@ def _fetch_via_curl_cffi(symbol: str) -> dict:
     return data
 
 
+# ── Public entry point ────────────────────────────────────────────────────────
+
 def fetch_option_chain(symbol: str) -> dict:
-    """Try requests first (works from home IPs), then curl_cffi, then give up."""
+    """Selenium (local Chrome) → requests → curl_cffi, with retries."""
     last_err = None
+
+    try:
+        return _fetch_via_selenium(symbol)
+    except Exception as e:
+        last_err = e
 
     for attempt in range(2):
         try:
@@ -79,11 +148,12 @@ def fetch_option_chain(symbol: str) -> dict:
             time.sleep(2 ** attempt)
 
     raise RuntimeError(
-        f"NSE option chain fetch failed after retries ({last_err}).\n\n"
-        "**Tips:**\n"
-        "- Try clicking **Refresh** 1–2 more times\n"
-        "- NSE sometimes throttles requests — wait 30 seconds and retry\n"
-        "- If on Streamlit Cloud: NSE blocks cloud IPs; run the app locally instead"
+        f"NSE option chain fetch failed ({last_err}).\n\n"
+        "**To fix this:**\n"
+        "- Run the app locally on your laptop\n"
+        "- Make sure **Google Chrome** is installed\n"
+        "- Click **Refresh** once or twice — NSE sometimes needs 2 attempts\n"
+        "- NSE blocks all cloud hosting IPs (Streamlit Cloud, AWS, GCP)"
     ) from last_err
 
 
