@@ -695,14 +695,7 @@ with tab5:
                 st.session_state[ts_key]    = time.time()
                 _fetch_ok = True
             except Exception as _e:
-                st.error(
-                    f"NSE fetch failed ({_e})\n\n"
-                    "**Why this happens:** NSE India requires an active browser session "
-                    "(cookies) before serving API data. The app re-warms the session on "
-                    "each refresh — please **click Refresh again** (1–2 retries usually "
-                    "work). If errors persist, NSE may be temporarily blocking this "
-                    "server's IP; try again in a few minutes."
-                )
+                st.error(str(_e))
         if _fetch_ok:
             st.rerun()
 
