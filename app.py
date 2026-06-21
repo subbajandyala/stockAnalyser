@@ -15,14 +15,6 @@ from screener.option_chain import (
 )
 
 
-@st.cache_resource(show_spinner="Installing browser for option chain (first run only)…")
-def _install_playwright_browsers():
-    import subprocess
-    subprocess.run(["playwright", "install", "chromium"], capture_output=True, timeout=300)
-    return True
-
-_install_playwright_browsers()
-
 st.set_page_config(page_title="MarketPulse", layout="wide", page_icon="🐂")
 
 # ── Global CSS ────────────────────────────────────────────────────────────────
