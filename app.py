@@ -78,7 +78,22 @@ hr { border-color: #1a2035 !important; margin: 10px 0 !important; }
 .sb-dot { width: 7px; height: 7px; background: #00d4aa; border-radius: 50%; display: inline-block; animation: sb-pulse 1.5s ease-in-out infinite; }
 @keyframes sb-pulse { 0%,100% { opacity:1; transform:scale(1); } 50% { opacity:0.3; transform:scale(0.6); } }
 
-/* OI table */
+/* News table */
+.news-wrap { width:100%; overflow-x:auto; margin:6px 0 14px; }
+.news-tbl { width:100%; border-collapse:collapse; font-size:0.78rem; }
+.news-tbl th { background:#0f1523; color:#6e7681; font-weight:700; text-transform:uppercase; font-size:0.64rem; letter-spacing:0.6px; padding:8px 10px; border-bottom:1px solid #1a2035; white-space:nowrap; }
+.news-tbl th.r { text-align:right; } .news-tbl th.c { text-align:center; }
+.news-tbl td { padding:6px 10px; border-bottom:1px solid rgba(26,32,53,0.5); color:#c9d1d9; vertical-align:middle; white-space:nowrap; }
+.news-tbl td.r { text-align:right; font-variant-numeric:tabular-nums; }
+.news-tbl td.c { text-align:center; }
+.news-tbl tr:hover td { background:rgba(255,255,255,0.03); }
+.nsig-sb { background:#00C853; color:#000; font-weight:700; border-radius:4px; padding:2px 7px; font-size:0.68rem; }
+.nsig-b  { background:#64DD17; color:#000; font-weight:700; border-radius:4px; padding:2px 7px; font-size:0.68rem; }
+.nsig-w  { background:#FFD600; color:#000; font-weight:700; border-radius:4px; padding:2px 7px; font-size:0.68rem; }
+.nsig-sk { background:#FF5252; color:#000; font-weight:700; border-radius:4px; padding:2px 7px; font-size:0.68rem; }
+.hl-tip { max-width:300px; overflow:hidden; text-overflow:ellipsis; cursor:help; color:#adbac7; font-size:0.76rem; }
+.na { color:#00d4aa; text-decoration:none; font-size:0.72rem; font-weight:600; }
+.na:hover { text-decoration:underline; }
 .oc-wrap { width:100%; overflow-x:auto; margin:4px 0 16px; }
 .oc-tbl { width:100%; border-collapse:collapse; font-size:0.78rem; }
 .oc-tbl th { background:#0f1523; color:#6e7681; font-weight:700; text-transform:uppercase; font-size:0.64rem; letter-spacing:0.6px; padding:8px 10px; border-bottom:1px solid #1a2035; }
@@ -116,6 +131,68 @@ CROSS_SIGNAL_COLORS = {"STRONG BUY": "#00C853", "BUY": "#64DD17", "WATCH": "#FFD
 MA50_SIGNAL_COLORS  = {"STRONG (50MA + Monthly CPR)": "#00C853", "BUY (50MA + Monthly CPR)": "#64DD17", "WATCH": "#FFD600"}
 
 NEWS_COLS  = ["Symbol","Company","News Mentions","Price","Change Last%","Change Prev 5%","RSI","% from High","Vol Ratio","Signal","Top Headline","Top Link"]
+
+def _build_news_html(df: pd.DataFrame) -> str:
+    _SIG = {
+        "STRONG BUY": '<span class="nsig-sb">STRONG BUY</span>',
+        "BUY":        '<span class="nsig-b">BUY</span>',
+        "WATCH":      '<span class="nsig-w">WATCH</span>',
+        "SKIP":       '<span class="nsig-sk">SKIP</span>',
+    }
+    rows_html = []
+    for _, row in df.iterrows():
+        sym     = str(row.get("Symbol", ""))
+        company = str(row.get("Company", ""))
+        price   = f"₹{float(row.get('Price', 0) or 0):,.2f}"
+        chg     = float(row.get("Change Last%", 0) or 0)
+        chg_cls = "up" if chg >= 0 else "dn"
+        chg_s   = f'<span class="{chg_cls}">{chg:+.2f}%</span>'
+        rsi     = f"{float(row.get('RSI', 0) or 0):.1f}"
+        vol     = f"{float(row.get('Vol Ratio', 0) or 0):.2f}x"
+        fromhi  = f"{float(row.get('% from High', 0) or 0):+.1f}%"
+        signal  = str(row.get("Signal", ""))
+        sig_h   = _SIG.get(signal, f"<span>{signal}</span>")
+        headline = str(row.get("Top Headline", ""))
+        tooltip  = str(row.get("_tooltip", headline)).replace('"', "&quot;")
+        link     = str(row.get("Top Link", ""))
+        link_h   = f'<a href="{link}" target="_blank" class="na">Read →</a>' if link else "—"
+        tv_sym   = sym.replace(".NS", "")
+        tv_h     = f'<a href="https://www.tradingview.com/chart/?symbol=NSE:{tv_sym}" target="_blank" class="na">📊 Chart</a>'
+        rows_html.append(
+            f'<tr>'
+            f'<td><b style="color:#e6edf3">{company}</b><br>'
+            f'<span style="color:#4a5568;font-size:0.66rem;">{sym}</span></td>'
+            f'<td class="c">{int(row.get("News Mentions", 0))}</td>'
+            f'<td class="r">{price}</td>'
+            f'<td class="r">{chg_s}</td>'
+            f'<td class="c">{rsi}</td>'
+            f'<td class="c">{fromhi}</td>'
+            f'<td class="c">{vol}</td>'
+            f'<td class="c">{sig_h}</td>'
+            f'<td class="hl-tip" title="{tooltip}">{headline}</td>'
+            f'<td class="c">{link_h}</td>'
+            f'<td class="c">{tv_h}</td>'
+            f'</tr>'
+        )
+    return (
+        '<div class="news-wrap"><table class="news-tbl">'
+        '<thead><tr>'
+        '<th>Company</th>'
+        '<th class="c">Mentions</th>'
+        '<th class="r">Price</th>'
+        '<th class="r">Change%</th>'
+        '<th class="c">RSI</th>'
+        '<th class="c">%fromHigh</th>'
+        '<th class="c">Vol Ratio</th>'
+        '<th class="c">Signal</th>'
+        '<th>Top Headline &nbsp;<span style="color:#3d4a5c;font-size:0.6rem;font-weight:400;">'
+        'hover for all headlines</span></th>'
+        '<th class="c">Article</th>'
+        '<th class="c">Chart</th>'
+        '</tr></thead>'
+        f'<tbody>{"".join(rows_html)}</tbody>'
+        '</table></div>'
+    )
 MA_COLS    = ["Symbol","Company","Price","Change%","EMA20","% Above EMA20","Touch%","Vol Ratio","CPR Support","CPR BC","CPR Pivot","CPR TC","Signal"]
 CROSS_COLS = ["Symbol","Company","Price","Change 1D%","RSI","EMA 20","EMA 50","EMA 200","% Above EMA200","EMA Gap%","Cross Day","Confirmed Days","Vol on Cross","Vol Today","Move Since Cross%","Signal"]
 MA50_COLS  = ["Symbol","Company","Price","Change 1D%","EMA 20","EMA 50","EMA 200","% Above EMA50","% Above EMA200","Touch%","Vol Ratio","Above Monthly CPR","Monthly TC","Monthly Pivot","Monthly BC","Signal"]
@@ -393,10 +470,14 @@ with tab1:
                 tech = analyze_stock(item["NSE_Symbol"], breakout_pct=breakout_pct/100,
                                      interval=interval, period=period)
                 if tech:
+                    _all_h = item["Headlines"][:4]
+                    _all_l = (item.get("Headline_Links") or [])[:4]
+                    _tooltip = "\n".join(f"{i+1}. {h}" for i, h in enumerate(_all_h))
                     rows.append({"Symbol": item["Symbol"], "NSE_Symbol": item["NSE_Symbol"],
                                  "Company": item["Company"], "News Mentions": item["News_Mentions"],
-                                 "Top Headline": item["Headlines"][0] if item["Headlines"] else "",
-                                 "Top Link": item["Headline_Links"][0] if item.get("Headline_Links") else "",
+                                 "Top Headline": _all_h[0] if _all_h else "",
+                                 "Top Link": _all_l[0] if _all_l else "",
+                                 "_tooltip": _tooltip,
                                  **tech})
                 prog.progress((i+1)/len(trending), text=f"Analysing {item['Symbol']}…")
             prog.empty()
@@ -424,25 +505,10 @@ with tab1:
             mc4.metric("Watch 👀",       len(full_df[full_df["Signal"] == "WATCH"]))
             st.caption("👆 Click any row to open chart · Esc to close")
 
-            show_cols = [c for c in NEWS_COLS if c in filtered.columns]
-            styled = (filtered[show_cols].copy().style
-                      .map(_style(SIGNAL_COLORS), subset=["Signal"])
-                      .map(change_style, subset=[c for c in ["Change Last%", "Change Prev 5%"] if c in filtered.columns])
-                      .format({c: "₹{:.2f}" for c in ["Price"] if c in filtered.columns})
-                      .format({c: "{:+.2f}%" for c in ["Change Last%", "Change Prev 5%", "% from High"] if c in filtered.columns})
-                      .format({c: "{:.1f}" for c in ["RSI"] if c in filtered.columns})
-                      .format({c: "{:.2f}x" for c in ["Vol Ratio"] if c in filtered.columns}))
-            sel = st.dataframe(styled, use_container_width=True, height=500,
-                               on_select="rerun", selection_mode="single-row", key="news_table",
-                               column_config={
-                                   "Top Link": st.column_config.LinkColumn("🔗 Link", display_text="Read →"),
-                               })
+            st.caption("Hover over any headline cell to see all 4 related headlines · Click 📊 Chart to open TradingView")
+            st.markdown(_build_news_html(filtered), unsafe_allow_html=True)
             csv = filtered.to_csv(index=False).encode("utf-8")
             st.download_button("⬇️ Export CSV", csv, "news_screener.csv", "text/csv")
-            rows_sel = sel.selection.get("rows", []) if sel else []
-            if rows_sel:
-                row = filtered.iloc[rows_sel[0]]
-                chart_modal(row.get("NSE_Symbol", row["Symbol"] + ".NS"), row["Company"], cached_tf)
     else:
         st.info("🔎 Configure filters above and click **Run News Screener** to begin.")
 
