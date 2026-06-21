@@ -817,44 +817,51 @@ with tab6:
         gc1, gc2 = st.columns([6, 1])
         gc1.markdown(
             '<small style="color:#8b949e;">'
-            "Market Cap >₹1000Cr &nbsp;·&nbsp; ROCE >15% &nbsp;·&nbsp; ROE >15% &nbsp;·&nbsp; D/E <0.5 &nbsp;·&nbsp; "
-            "OPM >12% &nbsp;·&nbsp; Sales & Profit 3Y growth >8% &nbsp;·&nbsp; Piotroski ≥6 &nbsp;·&nbsp; "
-            "Promoter ≥0.1% &nbsp;·&nbsp; Pledged <10% &nbsp;·&nbsp; DII+FII >5% &nbsp;·&nbsp; "
-            "Down from 52W High >25% &nbsp;·&nbsp; PE &lt; Industry PE"
+            "Market Cap >₹1000Cr &nbsp;·&nbsp; ROE >15% &nbsp;·&nbsp; D/E &lt;0.5 &nbsp;·&nbsp; "
+            "OPM >12% &nbsp;·&nbsp; Revenue & Earnings growth >8% &nbsp;·&nbsp; "
+            "Down from 52W High >25% &nbsp;·&nbsp; Source: yfinance"
             "</small>",
             unsafe_allow_html=True,
         )
         run_fund_btn = gc2.button("🔍 Run", type="primary", use_container_width=True, key="run_fund")
 
     if run_fund_btn:
-        with st.spinner("Fetching fundamental data from Screener.in…"):
-            try:
-                fund_results = fetch_fundamental_stocks()
-                st.session_state["fund_results"] = fund_results
-            except Exception as _fe:
-                st.error(str(_fe))
+        _fund_prog = st.progress(0, text="Scanning NIFTY 500 fundamentals… (1–2 min)")
+        try:
+            _symbols_df = get_nifty500_symbols()
+            fund_results = fetch_fundamental_stocks(
+                _symbols_df,
+                progress_cb=lambda p: _fund_prog.progress(p, text=f"Scanning… {int(p*100)}% done"),
+            )
+            _fund_prog.empty()
+            st.session_state["fund_results"] = fund_results
+        except Exception as _fe:
+            _fund_prog.empty()
+            st.error(str(_fe))
 
     if "fund_results" in st.session_state:
         fund_df: pd.DataFrame = st.session_state["fund_results"]
         if fund_df.empty:
-            st.warning("No stocks matched all criteria today. Try again after market hours when data refreshes.")
+            st.warning("No stocks passed all filters today. Markets may be in a downtrend — most stocks will be below their 52W high by less than 25% or lack earnings growth.")
         else:
-            # Detect name column (Screener.in calls it "Name")
-            _name_col = next((c for c in ["Name", "Company", "Company Name"] if c in fund_df.columns), fund_df.columns[0])
-
             fm1, fm2, fm3 = st.columns(3)
             fm1.metric("Stocks Found", len(fund_df))
-            fm2.metric("Top Pick", str(fund_df[_name_col].iloc[0]) if len(fund_df) > 0 else "—")
-            if "ROCE %" in fund_df.columns:
-                fm3.metric("Avg ROCE %", f"{pd.to_numeric(fund_df['ROCE %'], errors='coerce').mean():.1f}%")
-            elif "Mar Cap ₹ Cr." in fund_df.columns:
-                fm3.metric("Largest Cap", f"₹{pd.to_numeric(fund_df['Mar Cap ₹ Cr.'].iloc[0], errors='coerce'):,.0f} Cr.")
+            fm2.metric("Top Pick", fund_df["Company"].iloc[0])
+            fm3.metric("Avg ROE %", f"{fund_df['ROE %'].mean():.1f}%")
 
-            st.caption("👆 Click any row to open Daily chart · Data: Screener.in · Esc to close")
+            st.caption("👆 Click any row to open Daily chart · Source: yfinance · Esc to close")
 
             display_cols = [c for c in fund_df.columns if c != "NSE_Symbol"]
+            styled_fund = (
+                fund_df[display_cols].copy().style
+                .map(change_style, subset=[c for c in ["Rev Growth %", "Earn Growth %"] if c in display_cols])
+                .format({c: "₹{:.2f}" for c in ["Price"] if c in display_cols})
+                .format({c: "{:.0f}" for c in ["Mkt Cap (Cr)"] if c in display_cols})
+                .format({c: "{:.1f}%" for c in ["ROE %", "OPM %", "Rev Growth %", "Earn Growth %", "↓ 52W High %"] if c in display_cols})
+                .format({c: "{:.2f}" for c in ["D/E"] if c in display_cols})
+            )
             fund_sel = st.dataframe(
-                fund_df[display_cols],
+                styled_fund,
                 use_container_width=True,
                 height=500,
                 on_select="rerun",
@@ -866,12 +873,7 @@ with tab6:
 
             fund_rows = fund_sel.selection.get("rows", []) if fund_sel else []
             if fund_rows:
-                fr    = fund_df.iloc[fund_rows[0]]
-                nse   = str(fr.get("NSE_Symbol", ""))
-                cname = str(fr.get(_name_col, nse))
-                if nse:
-                    chart_modal(nse, cname, "1D")
-                else:
-                    st.warning("NSE symbol not available for this stock — cannot open chart.")
+                fr = fund_df.iloc[fund_rows[0]]
+                chart_modal(str(fr["NSE_Symbol"]), str(fr["Company"]), "1D")
     else:
-        st.info("🔎 Click **Run** above to screen fundamentally strong NIFTY stocks via Screener.in.")
+        st.info("🔎 Click **Run** above to screen NIFTY 500 stocks by fundamental quality.")
