@@ -13,6 +13,7 @@ from screener.option_chain import (
     fetch_option_chain, get_expiries, parse_chain,
     atm_strike, calc_pcr, calc_max_pain,
 )
+from screener.fundamental import fetch_fundamental_stocks
 
 
 st.set_page_config(page_title="MarketPulse", layout="wide", page_icon="🐂")
@@ -251,6 +252,7 @@ _news_count  = len(st.session_state.get("news_results",  pd.DataFrame()))
 _ma_count    = len(st.session_state.get("ma_results",    pd.DataFrame()))
 _cross_count = len(st.session_state.get("cross_results", pd.DataFrame()))
 _ma50_count  = len(st.session_state.get("ma50_results",  pd.DataFrame()))
+_fund_count  = len(st.session_state.get("fund_results",  pd.DataFrame()))
 _oc_loaded   = any(k in st.session_state for k in ("oc_NIFTY", "oc_BANKNIFTY", "oc_FINNIFTY", "oc_MIDCPNIFTY"))
 
 def _sb_row(icon: str, label: str, count: int) -> str:
@@ -269,6 +271,8 @@ with st.sidebar:
 <div class="sb-sec">SCANNERS</div>
 {_sb_row("📈", "EMA Crossover", _cross_count)}
 {_sb_row("🛡️", "50 MA Support", _ma50_count)}
+<div class="sb-sec">ANALYSIS</div>
+{_sb_row("📊", "Fundamentals", _fund_count)}
 <div class="sb-sec">TOOLS</div>
 {_sb_row("🔗", "Option Chain", 1 if _oc_loaded else 0)}
 <div class="sb-div"></div>
@@ -359,12 +363,13 @@ st.markdown(
 st.divider()
 
 # ── Tabs ──────────────────────────────────────────────────────────────────────
-tab1, tab2, tab3, tab4, tab5 = st.tabs([
+tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
     "📰 News + Breakout",
     "🔁 20 MA Retracement",
     "📈 EMA Crossover",
     "🛡️ 50 MA Support",
     "🔗 Option Chain Insights",
+    "📊 Fundamentals",
 ])
 
 # ── TAB 1 ─────────────────────────────────────────────────────────────────────
@@ -802,3 +807,71 @@ with tab5:
                     yaxis=dict(tickfont=dict(color="#8b949e"), gridcolor="#1a2035"),
                 )
                 st.plotly_chart(fig_chng, use_container_width=True)
+
+
+# ── TAB 6 — Fundamental Analysis ──────────────────────────────────────────────
+with tab6:
+    st.markdown("#### 📊 Fundamentally Strong Stocks — Quality Filter")
+
+    with st.container(border=True):
+        gc1, gc2 = st.columns([6, 1])
+        gc1.markdown(
+            '<small style="color:#8b949e;">'
+            "Market Cap >₹1000Cr &nbsp;·&nbsp; ROCE >15% &nbsp;·&nbsp; ROE >15% &nbsp;·&nbsp; D/E <0.5 &nbsp;·&nbsp; "
+            "OPM >12% &nbsp;·&nbsp; Sales & Profit 3Y growth >8% &nbsp;·&nbsp; Piotroski ≥6 &nbsp;·&nbsp; "
+            "Promoter ≥0.1% &nbsp;·&nbsp; Pledged <10% &nbsp;·&nbsp; DII+FII >5% &nbsp;·&nbsp; "
+            "Down from 52W High >25% &nbsp;·&nbsp; PE &lt; Industry PE"
+            "</small>",
+            unsafe_allow_html=True,
+        )
+        run_fund_btn = gc2.button("🔍 Run", type="primary", use_container_width=True, key="run_fund")
+
+    if run_fund_btn:
+        with st.spinner("Fetching fundamental data from Screener.in…"):
+            try:
+                fund_results = fetch_fundamental_stocks()
+                st.session_state["fund_results"] = fund_results
+            except Exception as _fe:
+                st.error(str(_fe))
+
+    if "fund_results" in st.session_state:
+        fund_df: pd.DataFrame = st.session_state["fund_results"]
+        if fund_df.empty:
+            st.warning("No stocks matched all criteria today. Try again after market hours when data refreshes.")
+        else:
+            # Detect name column (Screener.in calls it "Name")
+            _name_col = next((c for c in ["Name", "Company", "Company Name"] if c in fund_df.columns), fund_df.columns[0])
+
+            fm1, fm2, fm3 = st.columns(3)
+            fm1.metric("Stocks Found", len(fund_df))
+            fm2.metric("Top Pick", str(fund_df[_name_col].iloc[0]) if len(fund_df) > 0 else "—")
+            if "ROCE %" in fund_df.columns:
+                fm3.metric("Avg ROCE %", f"{pd.to_numeric(fund_df['ROCE %'], errors='coerce').mean():.1f}%")
+            elif "Mar Cap ₹ Cr." in fund_df.columns:
+                fm3.metric("Largest Cap", f"₹{pd.to_numeric(fund_df['Mar Cap ₹ Cr.'].iloc[0], errors='coerce'):,.0f} Cr.")
+
+            st.caption("👆 Click any row to open Daily chart · Data: Screener.in · Esc to close")
+
+            display_cols = [c for c in fund_df.columns if c != "NSE_Symbol"]
+            fund_sel = st.dataframe(
+                fund_df[display_cols],
+                use_container_width=True,
+                height=500,
+                on_select="rerun",
+                selection_mode="single-row",
+                key="fund_table",
+            )
+            csv_fund = fund_df.to_csv(index=False).encode("utf-8")
+            st.download_button("⬇️ Export CSV", csv_fund, "fundamental_screener.csv", "text/csv")
+
+            fund_rows = fund_sel.selection.get("rows", []) if fund_sel else []
+            if fund_rows:
+                fr    = fund_df.iloc[fund_rows[0]]
+                nse   = str(fr.get("NSE_Symbol", ""))
+                cname = str(fr.get(_name_col, nse))
+                if nse:
+                    chart_modal(nse, cname, "1D")
+                else:
+                    st.warning("NSE symbol not available for this stock — cannot open chart.")
+    else:
+        st.info("🔎 Click **Run** above to screen fundamentally strong NIFTY stocks via Screener.in.")

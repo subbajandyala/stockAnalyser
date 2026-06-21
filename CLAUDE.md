@@ -37,6 +37,7 @@ There are no tests or linters configured. The `test` file in the root is empty.
 | `ma_crossover.py` | `run_crossover_scan()` — 20 EMA crossing above 50 EMA within the last 5 candles, confirmed over 2+ days |
 | `ma50_support.py` | `run_ma50_support_scan()` — stocks bouncing off 50 EMA in EMA20 > EMA50 > EMA200 alignment above monthly CPR |
 | `option_chain.py` | `fetch_option_chain()` — live NSE option chain; tries `undetected-chromedriver` first (requires local Chrome install), then `curl_cffi`. **Blocked on Streamlit Cloud** — only works locally. |
+| `fundamental.py` | `fetch_fundamental_stocks()` — scrapes Screener.in with a 16-condition quality filter (ROCE, ROE, D/E, OPM, Piotroski, promoter holding, etc.). Requires a free Screener.in account on first use. Returns a DataFrame with Screener.in columns + `NSE_Symbol` for charting. |
 
 ### `app.py` key sections
 
