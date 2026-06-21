@@ -85,13 +85,11 @@ def fetch_fundamental_stocks() -> pd.DataFrame:
 
     symbols = _extract_symbols(html)
 
+    # html5lib is pure-Python — works on all platforms including Streamlit Cloud
     try:
-        tables = pd.read_html(StringIO(html), flavor="lxml")
-    except Exception:
-        try:
-            tables = pd.read_html(StringIO(html))
-        except Exception as e:
-            raise RuntimeError(f"Could not parse Screener.in response: {e}") from e
+        tables = pd.read_html(StringIO(html), flavor="html5lib")
+    except Exception as e:
+        raise RuntimeError(f"Could not parse Screener.in response: {e}") from e
 
     if not tables:
         raise RuntimeError(
