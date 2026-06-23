@@ -259,6 +259,12 @@ def _sb_row(icon: str, label: str, count: int) -> str:
     badge = f'<span class="sb-badge">{count}</span>' if count > 0 else ""
     return f'<div class="sb-item"><span class="sb-lbl">{icon} {label}</span>{badge}</div>'
 
+def _get_secret(key: str, default: str = "") -> str:
+    try:
+        return st.secrets.get(key, default)
+    except Exception:
+        return default
+
 with st.sidebar:
     st.markdown(f"""
 <div class="sb-brand">
@@ -278,6 +284,30 @@ with st.sidebar:
 <div class="sb-div"></div>
 <div class="sb-live"><span class="sb-dot"></span>NSE feed LIVE</div>
 """, unsafe_allow_html=True)
+
+    with st.expander("⚡ Zerodha Kite Connect", expanded=False):
+        st.caption(
+            "Provides **real-time** option chain data from Zerodha — works on cloud. "
+            "Get your Access Token daily from [kite.zerodha.com](https://kite.zerodha.com)."
+        )
+        st.text_input(
+            "API Key", type="password", key="kite_api_key",
+            value=_get_secret("KITE_API_KEY", ""),
+            placeholder="From kite.zerodha.com/apps",
+        )
+        st.text_input(
+            "Access Token", type="password", key="kite_access_token",
+            value=_get_secret("KITE_ACCESS_TOKEN", ""),
+            placeholder="Daily token — refresh each morning",
+        )
+        _kite_ok = bool(
+            st.session_state.get("kite_api_key", "")
+            and st.session_state.get("kite_access_token", "")
+        )
+        if _kite_ok:
+            st.success("✅ Kite connected — live OI data active")
+        else:
+            st.info("Enter API Key + Access Token to enable real-time OI")
 
 
 # ── Scrolling ticker ──────────────────────────────────────────────────────────
@@ -788,7 +818,23 @@ def _build_oc_html(view_df: pd.DataFrame, atm: float) -> str:
 
 
 with tab5:
-    st.markdown("#### 🔗 Option Chain Insights — Live NSE Data")
+    _kite_key   = st.session_state.get("kite_api_key",   _get_secret("KITE_API_KEY", ""))
+    _kite_token = st.session_state.get("kite_access_token", _get_secret("KITE_ACCESS_TOKEN", ""))
+    _kite_live  = bool(_kite_key and _kite_token)
+
+    _src_badge = (
+        '<span style="background:rgba(0,212,170,0.12);border:1px solid rgba(0,212,170,0.35);'
+        'color:#00d4aa;font-size:0.7rem;font-weight:700;padding:2px 9px;border-radius:20px;'
+        'margin-left:10px;">⚡ ZERODHA KITE — REAL-TIME</span>'
+        if _kite_live else
+        '<span style="background:rgba(248,81,73,0.10);border:1px solid rgba(248,81,73,0.3);'
+        'color:#f85149;font-size:0.7rem;font-weight:700;padding:2px 9px;border-radius:20px;'
+        'margin-left:10px;">⚠ NSE SCRAPE — LOCAL ONLY</span>'
+    )
+    st.markdown(
+        f'<span style="font-size:1.1rem;font-weight:700;">🔗 Option Chain Insights</span>{_src_badge}',
+        unsafe_allow_html=True,
+    )
 
     oc1, oc2, oc3, oc4 = st.columns([2, 2, 2, 1])
 
@@ -812,9 +858,10 @@ with tab5:
 
     if load_oc:
         _fetch_ok = False
-        with st.spinner(f"Fetching {oc_symbol} option chain from NSE…"):
+        _spinner_src = "Zerodha Kite" if _kite_live else "NSE"
+        with st.spinner(f"Fetching {oc_symbol} option chain from {_spinner_src}…"):
             try:
-                oc_raw = fetch_option_chain(oc_symbol)
+                oc_raw = fetch_option_chain(oc_symbol, api_key=_kite_key, access_token=_kite_token)
                 st.session_state[cache_key] = oc_raw
                 st.session_state[ts_key]    = time.time()
                 _fetch_ok = True
@@ -904,6 +951,12 @@ with tab5:
             st.divider()
 
             # ── OI bar table ──────────────────────────────────────────────────
+            if _kite_live:
+                st.caption(
+                    "ℹ️ Zerodha Kite does not expose daily OI change — "
+                    "Change in OI columns will show 0. All OI levels, PCR, and Max Pain are live."
+                )
+
             atm_iloc = int((oc_df["Strike"] - atm).abs().values.argmin())
             r_start  = max(0, atm_iloc - n_strikes)
             r_end    = min(len(oc_df), atm_iloc + n_strikes + 1)
