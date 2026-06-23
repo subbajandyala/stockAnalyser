@@ -289,11 +289,7 @@ with st.sidebar:
 """, unsafe_allow_html=True)
 
     with st.expander("⚡ Zerodha Kite Connect", expanded=False):
-        st.caption(
-            "Provides **real-time** option chain data from Zerodha — works on cloud. "
-            "Get your Access Token daily from [kite.zerodha.com](https://kite.zerodha.com)."
-        )
-        st.text_input(
+        _sidebar_api_key = st.text_input(
             "API Key", type="password", key="kite_api_key",
             value=_get_secret("KITE_API_KEY", ""),
             placeholder="From kite.zerodha.com/apps",
@@ -310,7 +306,13 @@ with st.sidebar:
         if _kite_ok:
             st.success("✅ Kite connected — live OI data active")
         else:
+            _sidebar_key_for_link = st.session_state.get("kite_api_key", "") or _get_secret("KITE_API_KEY", "plz6ik09bgb62mey")
             st.info("Enter API Key + Access Token to enable real-time OI")
+            if _sidebar_key_for_link:
+                st.caption(
+                    f"🔑 [Generate today's token](https://kite.zerodha.com/connect/login?api_key={_sidebar_key_for_link}&v=3) "
+                    "→ login → copy `request_token` from URL → run exchange script"
+                )
 
 
 # ── Scrolling ticker ──────────────────────────────────────────────────────────
@@ -1316,5 +1318,17 @@ with tab7:
             if fo_rows:
                 fr = fo_view.iloc[fo_rows[0]]
                 chart_modal(str(fr["NSE_Symbol"]), str(fr["Symbol"]), "1D")
+        elif run_fo_btn:
+            st.warning(
+                "**Scan completed but no stocks were found.**\n\n"
+                "Most likely cause: **Kite Access Token has expired** (tokens expire daily at midnight IST).\n\n"
+                "**How to get a fresh token:**\n"
+                "1. Open the login URL in your browser: "
+                "`https://kite.zerodha.com/connect/login?api_key=plz6ik09bgb62mey&v=3`\n"
+                "2. Login → you'll be redirected to Google (or your redirect URL)\n"
+                "3. Copy the `request_token` value from the URL\n"
+                "4. Run the exchange script (Python) to convert it to an Access Token\n"
+                "5. Paste the new Access Token in the sidebar and click **🔍 Scan** again"
+            )
         else:
             st.info("Click **🔍 Scan** to analyse all F&O stocks. Takes 2–3 minutes.")

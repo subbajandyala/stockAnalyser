@@ -133,13 +133,19 @@ def run_fo_scan(
         batch = nfo_syms[start : start + batch_size]
         r = _req.get(f"{_KITE_BASE}/quote", headers=hdrs,
                      params={"i": batch}, timeout=30)
+        if r.status_code in (401, 403):
+            raise RuntimeError(
+                "Kite Access Token expired or invalid while fetching option quotes. "
+                "Generate a new token from kite.zerodha.com and re-enter it in the sidebar."
+            )
         if r.ok:
             quotes.update(r.json().get("data", {}))
         _cb(0.12 + 0.60 * (i + 1) / n_batches,
             f"Fetching option quotes… {min(start + batch_size, total)}/{total}")
 
     # 6. Analyse each stock
-    _cb(0.75, "Analysing signals…")
+    valid_quotes = sum(1 for q in quotes.values() if int(q.get("oi", 0)) > 0)
+    _cb(0.75, f"Analysing signals… ({valid_quotes} instruments with live OI)")
     results = []
 
     for name in stock_names:
@@ -218,10 +224,11 @@ def run_fo_scan(
             "NSE_Symbol":  f"{name}.NS",
         })
 
-    _cb(0.98, "Done!")
-
     if not results:
+        _cb(1.0, "⚠️ No results — check that Kite token is valid and market is open")
         return pd.DataFrame()
+
+    _cb(0.98, f"Done! Found signals for {len(results)} stocks")
 
     _order = {
         "STRONG BUY CE 📈": 0,
