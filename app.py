@@ -760,6 +760,52 @@ def _oc_signal(df: pd.DataFrame, spot: float, atm: float,
     return signal, score, details, max_ce_strike, max_pe_strike
 
 
+def _recommend_trade(signal: str, oc_df: pd.DataFrame, atm: float, expiry: str) -> dict | None:
+    if "NEUTRAL" in signal:
+        return None
+
+    is_ce     = "CE" in signal
+    is_strong = "STRONG" in signal
+
+    # Determine strike gap from data
+    strikes    = sorted(oc_df["Strike"].unique())
+    strike_gap = min(b - a for a, b in zip(strikes, strikes[1:])) if len(strikes) > 1 else 50
+
+    # ATM for strong signals, 1 OTM for regular signals
+    if is_strong:
+        rec_strike = atm
+    else:
+        rec_strike = atm + strike_gap if is_ce else atm - strike_gap
+
+    row = oc_df[oc_df["Strike"] == rec_strike]
+    if row.empty:
+        rec_strike = atm
+        row = oc_df[oc_df["Strike"] == atm]
+    if row.empty:
+        return None
+
+    ltp = float(row.iloc[0]["CE LTP" if is_ce else "PE LTP"])
+    if ltp <= 0.5:
+        ltp = float(row.iloc[0]["CE LTP" if is_ce else "PE LTP"])
+    if ltp <= 0.5:
+        return None
+
+    sl     = round(ltp * 0.65, 1)   # 35% below entry
+    target = round(ltp * 1.65, 1)   # 65% above entry
+    rr     = round((target - ltp) / (ltp - sl), 1)
+
+    return {
+        "strike":  rec_strike,
+        "type":    "CE" if is_ce else "PE",
+        "ltp":     ltp,
+        "expiry":  expiry,
+        "sl":      sl,
+        "target":  target,
+        "rr":      rr,
+        "strong":  is_strong,
+    }
+
+
 def _build_oc_html(view_df: pd.DataFrame, atm: float) -> str:
     if view_df.empty:
         return "<p style='color:#6e7681;padding:12px;'>No data available.</p>"
@@ -949,6 +995,38 @@ with tab5:
                 </tr></thead><tbody>{sig_rows}</tbody></table>""",
                 unsafe_allow_html=True,
             )
+
+            # ── Recommended Trade ─────────────────────────────────────────────
+            trade = _recommend_trade(sig, oc_df, atm, oc_expiry)
+            if trade:
+                t_color = "#00d4aa" if trade["type"] == "CE" else "#f85149"
+                t_bg    = "rgba(0,212,170,0.08)" if trade["type"] == "CE" else "rgba(248,81,73,0.08)"
+                badge   = "⚡ STRONG" if trade["strong"] else "📌"
+                st.markdown(
+                    f"""<div style="background:{t_bg};border:1.5px solid {t_color};
+                    border-radius:10px;padding:16px 22px;margin:10px 0 18px 0;">
+                    <div style="font-size:0.75rem;font-weight:700;color:{t_color};
+                    letter-spacing:1.5px;text-transform:uppercase;margin-bottom:8px;">
+                    {badge} Recommended Trade</div>
+                    <div style="font-size:1.25rem;font-weight:800;color:#e6edf3;">
+                    Buy {oc_symbol} <span style="color:{t_color};">{int(trade['strike'])} {trade['type']}</span>
+                    &nbsp;<span style="font-size:0.8rem;color:#8b949e;font-weight:400;">Expiry: {trade['expiry']}</span>
+                    </div>
+                    <div style="display:flex;gap:32px;margin-top:12px;flex-wrap:wrap;">
+                    <div><div style="font-size:0.68rem;color:#6e7681;text-transform:uppercase;letter-spacing:1px;">Entry (LTP)</div>
+                    <div style="font-size:1.1rem;font-weight:700;color:#e6edf3;">₹{trade['ltp']:.1f}</div></div>
+                    <div><div style="font-size:0.68rem;color:#6e7681;text-transform:uppercase;letter-spacing:1px;">Stop Loss</div>
+                    <div style="font-size:1.1rem;font-weight:700;color:#f85149;">₹{trade['sl']:.1f}</div></div>
+                    <div><div style="font-size:0.68rem;color:#6e7681;text-transform:uppercase;letter-spacing:1px;">Target</div>
+                    <div style="font-size:1.1rem;font-weight:700;color:#00d4aa;">₹{trade['target']:.1f}</div></div>
+                    <div><div style="font-size:0.68rem;color:#6e7681;text-transform:uppercase;letter-spacing:1px;">Risk:Reward</div>
+                    <div style="font-size:1.1rem;font-weight:700;color:#e6edf3;">1 : {trade['rr']}</div></div>
+                    </div>
+                    <div style="font-size:0.72rem;color:#6e7681;margin-top:10px;">
+                    ⚠️ For educational purposes only — not financial advice. Always use proper position sizing.
+                    </div></div>""",
+                    unsafe_allow_html=True,
+                )
 
             st.divider()
 
