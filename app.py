@@ -259,6 +259,12 @@ def _sb_row(icon: str, label: str, count: int) -> str:
     badge = f'<span class="sb-badge">{count}</span>' if count > 0 else ""
     return f'<div class="sb-item"><span class="sb-lbl">{icon} {label}</span>{badge}</div>'
 
+def _get_secret(key: str, default: str = "") -> str:
+    try:
+        return st.secrets.get(key, default)
+    except Exception:
+        return default
+
 with st.sidebar:
     st.markdown(f"""
 <div class="sb-brand">
@@ -278,6 +284,30 @@ with st.sidebar:
 <div class="sb-div"></div>
 <div class="sb-live"><span class="sb-dot"></span>NSE feed LIVE</div>
 """, unsafe_allow_html=True)
+
+    with st.expander("⚡ Zerodha Kite Connect", expanded=False):
+        st.caption(
+            "Provides **real-time** option chain data from Zerodha — works on cloud. "
+            "Get your Access Token daily from [kite.zerodha.com](https://kite.zerodha.com)."
+        )
+        st.text_input(
+            "API Key", type="password", key="kite_api_key",
+            value=_get_secret("KITE_API_KEY", ""),
+            placeholder="From kite.zerodha.com/apps",
+        )
+        st.text_input(
+            "Access Token", type="password", key="kite_access_token",
+            value=_get_secret("KITE_ACCESS_TOKEN", ""),
+            placeholder="Daily token — refresh each morning",
+        )
+        _kite_ok = bool(
+            st.session_state.get("kite_api_key", "")
+            and st.session_state.get("kite_access_token", "")
+        )
+        if _kite_ok:
+            st.success("✅ Kite connected — live OI data active")
+        else:
+            st.info("Enter API Key + Access Token to enable real-time OI")
 
 
 # ── Scrolling ticker ──────────────────────────────────────────────────────────
@@ -615,6 +645,121 @@ with tab4:
 
 
 # ── TAB 5 — Option Chain Insights ─────────────────────────────────────────────
+def _oc_signal(df: pd.DataFrame, spot: float, atm: float,
+               pcr: float, mp: float) -> tuple:
+    """
+    Returns (signal, score, details, max_ce_strike, max_pe_strike).
+    Analyses PCR, Max Pain, near-ATM OI buildup/unwinding, and key OI levels.
+    Positive score → bullish (BUY CE), negative → bearish (BUY PE).
+    """
+    score = 0
+    details: list[tuple] = []   # (indicator, value, verdict, explanation)
+
+    # ── 1. PCR ────────────────────────────────────────────────────────────────
+    if pcr >= 1.3:
+        score += 2
+        details.append(("PCR", f"{pcr:.2f}", "Bullish 🟢",
+                         "Heavy put writing = strong support floor under market"))
+    elif pcr >= 1.0:
+        score += 1
+        details.append(("PCR", f"{pcr:.2f}", "Mildly Bullish 🟡",
+                         "More puts than calls = mild support"))
+    elif pcr <= 0.7:
+        score -= 2
+        details.append(("PCR", f"{pcr:.2f}", "Bearish 🔴",
+                         "Heavy call writing = strong resistance ceiling on market"))
+    elif pcr < 1.0:
+        score -= 1
+        details.append(("PCR", f"{pcr:.2f}", "Mildly Bearish 🟡",
+                         "More calls than puts = mild resistance"))
+    else:
+        details.append(("PCR", f"{pcr:.2f}", "Neutral ⚪",
+                         "Balanced call/put OI"))
+
+    # ── 2. Max Pain vs Spot ───────────────────────────────────────────────────
+    mp_diff = (spot - mp) / mp * 100   # +ve → spot above MP (bearish pull)
+    if mp_diff > 1.0:
+        score -= 2
+        details.append(("Max Pain", f"Spot {spot:,.0f}  MP {mp:,.0f}  (+{mp_diff:.1f}%)", "Bearish 🔴",
+                         "Spot well above Max Pain — gravity pulls price down to MP"))
+    elif mp_diff > 0.3:
+        score -= 1
+        details.append(("Max Pain", f"Spot {spot:,.0f}  MP {mp:,.0f}  (+{mp_diff:.1f}%)", "Mildly Bearish 🟡",
+                         "Spot slightly above Max Pain — mild downward pull"))
+    elif mp_diff < -1.0:
+        score += 2
+        details.append(("Max Pain", f"Spot {spot:,.0f}  MP {mp:,.0f}  ({mp_diff:.1f}%)", "Bullish 🟢",
+                         "Spot well below Max Pain — gravity pulls price up to MP"))
+    elif mp_diff < -0.3:
+        score += 1
+        details.append(("Max Pain", f"Spot {spot:,.0f}  MP {mp:,.0f}  ({mp_diff:.1f}%)", "Mildly Bullish 🟡",
+                         "Spot slightly below Max Pain — mild upward pull"))
+    else:
+        details.append(("Max Pain", f"Spot ≈ MP {mp:,.0f}  ({mp_diff:.1f}%)", "Neutral ⚪",
+                         "Spot near Max Pain — range-bound, no directional bias"))
+
+    # ── 3. CE OI Change (above ATM — call resistance zone) ───────────────────
+    atm_i     = int((df["Strike"] - atm).abs().values.argmin())
+    above_atm = df.iloc[atm_i : atm_i + 8]       # ATM + 7 strikes above
+    below_atm = df.iloc[max(0, atm_i - 7) : atm_i + 1]  # ATM - 7 strikes below
+
+    ce_add  = float(above_atm[above_atm["CE Chng OI"] > 0]["CE Chng OI"].sum())
+    ce_shed = float(above_atm[above_atm["CE Chng OI"] < 0]["CE Chng OI"].sum())
+
+    if abs(ce_shed) > ce_add * 1.3 and abs(ce_shed) > 50_000:
+        score += 1
+        details.append(("CE OI (above ATM)", f"Unwinding {abs(ce_shed)/1000:.0f}K lots", "Bullish 🟢",
+                         "Call writers covering shorts above ATM — resistance weakening"))
+    elif ce_add > abs(ce_shed) * 1.3 and ce_add > 50_000:
+        score -= 1
+        details.append(("CE OI (above ATM)", f"Buildup +{ce_add/1000:.0f}K lots", "Bearish 🔴",
+                         "Fresh call writing above ATM — strong resistance building"))
+    else:
+        details.append(("CE OI (above ATM)", "Mixed / Low activity", "Neutral ⚪",
+                         "No clear CE OI trend above ATM"))
+
+    # ── 4. PE OI Change (below ATM — put support zone) ───────────────────────
+    pe_add  = float(below_atm[below_atm["PE Chng OI"] > 0]["PE Chng OI"].sum())
+    pe_shed = float(below_atm[below_atm["PE Chng OI"] < 0]["PE Chng OI"].sum())
+
+    if pe_add > abs(pe_shed) * 1.3 and pe_add > 50_000:
+        score += 1
+        details.append(("PE OI (below ATM)", f"Buildup +{pe_add/1000:.0f}K lots", "Bullish 🟢",
+                         "Fresh put writing below ATM — strong support building"))
+    elif abs(pe_shed) > pe_add * 1.3 and abs(pe_shed) > 50_000:
+        score -= 1
+        details.append(("PE OI (below ATM)", f"Unwinding {abs(pe_shed)/1000:.0f}K lots", "Bearish 🔴",
+                         "Put writers covering shorts below ATM — support weakening"))
+    else:
+        details.append(("PE OI (below ATM)", "Mixed / Low activity", "Neutral ⚪",
+                         "No clear PE OI trend below ATM"))
+
+    # ── 5. Key OI levels (highest CE OI = resistance, highest PE OI = support) ──
+    max_ce_strike = float(df.loc[df["CE OI"].idxmax(), "Strike"])
+    max_pe_strike = float(df.loc[df["PE OI"].idxmax(), "Strike"])
+
+    if spot > max_ce_strike:
+        score += 1
+        details.append(("Key Levels", f"Spot {spot:,.0f} > CE wall {max_ce_strike:,.0f}", "Bullish 🟢",
+                         "Spot broke above highest call OI — resistance cleared"))
+    elif spot < max_pe_strike:
+        score -= 1
+        details.append(("Key Levels", f"Spot {spot:,.0f} < PE wall {max_pe_strike:,.0f}", "Bearish 🔴",
+                         "Spot below highest put OI support — support broken"))
+    else:
+        details.append(("Key Levels", f"Resistance ₹{max_ce_strike:,.0f}  |  Support ₹{max_pe_strike:,.0f}", "Neutral ⚪",
+                         f"Spot {spot:,.0f} trading between key OI walls"))
+
+    # ── Final verdict ─────────────────────────────────────────────────────────
+    if   score >=  4: signal = "STRONG BUY CE 📈"
+    elif score >=  2: signal = "BUY CE 📈"
+    elif score <= -4: signal = "STRONG BUY PE 📉"
+    elif score <= -2: signal = "BUY PE 📉"
+    else:             signal = "NEUTRAL — WAIT ⚖️"
+
+    return signal, score, details, max_ce_strike, max_pe_strike
+
+
 def _build_oc_html(view_df: pd.DataFrame, atm: float) -> str:
     if view_df.empty:
         return "<p style='color:#6e7681;padding:12px;'>No data available.</p>"
@@ -673,7 +818,23 @@ def _build_oc_html(view_df: pd.DataFrame, atm: float) -> str:
 
 
 with tab5:
-    st.markdown("#### 🔗 Option Chain Insights — Live NSE Data")
+    _kite_key   = st.session_state.get("kite_api_key",   _get_secret("KITE_API_KEY", ""))
+    _kite_token = st.session_state.get("kite_access_token", _get_secret("KITE_ACCESS_TOKEN", ""))
+    _kite_live  = bool(_kite_key and _kite_token)
+
+    _src_badge = (
+        '<span style="background:rgba(0,212,170,0.12);border:1px solid rgba(0,212,170,0.35);'
+        'color:#00d4aa;font-size:0.7rem;font-weight:700;padding:2px 9px;border-radius:20px;'
+        'margin-left:10px;">⚡ ZERODHA KITE — REAL-TIME</span>'
+        if _kite_live else
+        '<span style="background:rgba(248,81,73,0.10);border:1px solid rgba(248,81,73,0.3);'
+        'color:#f85149;font-size:0.7rem;font-weight:700;padding:2px 9px;border-radius:20px;'
+        'margin-left:10px;">⚠ NSE SCRAPE — LOCAL ONLY</span>'
+    )
+    st.markdown(
+        f'<span style="font-size:1.1rem;font-weight:700;">🔗 Option Chain Insights</span>{_src_badge}',
+        unsafe_allow_html=True,
+    )
 
     oc1, oc2, oc3, oc4 = st.columns([2, 2, 2, 1])
 
@@ -697,9 +858,10 @@ with tab5:
 
     if load_oc:
         _fetch_ok = False
-        with st.spinner(f"Fetching {oc_symbol} option chain from NSE…"):
+        _spinner_src = "Zerodha Kite" if _kite_live else "NSE"
+        with st.spinner(f"Fetching {oc_symbol} option chain from {_spinner_src}…"):
             try:
-                oc_raw = fetch_option_chain(oc_symbol)
+                oc_raw = fetch_option_chain(oc_symbol, api_key=_kite_key, access_token=_kite_token)
                 st.session_state[cache_key] = oc_raw
                 st.session_state[ts_key]    = time.time()
                 _fetch_ok = True
@@ -734,9 +896,67 @@ with tab5:
             m5.metric("Total CE OI", f"{oc_df['CE OI'].sum() / 1_000:.0f}K lots")
             m6.metric("Total PE OI", f"{oc_df['PE OI'].sum() / 1_000:.0f}K lots")
 
+            # ── CE / PE Signal ────────────────────────────────────────────────
+            sig, sig_score, sig_details, max_ce_wall, max_pe_wall = _oc_signal(
+                oc_df, spot, atm, _pcr, _mp
+            )
+
+            if "STRONG BUY CE" in sig:
+                sig_color, sig_bg = "#00d4aa", "rgba(0,212,170,0.12)"
+            elif "BUY CE" in sig:
+                sig_color, sig_bg = "#58d68d", "rgba(88,214,141,0.10)"
+            elif "STRONG BUY PE" in sig:
+                sig_color, sig_bg = "#f85149", "rgba(248,81,73,0.14)"
+            elif "BUY PE" in sig:
+                sig_color, sig_bg = "#ff7043", "rgba(255,112,67,0.10)"
+            else:
+                sig_color, sig_bg = "#e6b800", "rgba(230,184,0,0.10)"
+
+            st.markdown(
+                f"""<div style="background:{sig_bg};border:1.5px solid {sig_color};
+                border-radius:10px;padding:18px 24px;margin:10px 0 18px 0;text-align:center;">
+                <div style="font-size:1.6rem;font-weight:700;color:{sig_color};letter-spacing:1px;">
+                    {sig}
+                </div>
+                <div style="color:#8b949e;font-size:0.82rem;margin-top:6px;">
+                    Composite OI Score: <strong style="color:{sig_color};">{sig_score:+d}</strong>
+                    &nbsp;·&nbsp; CE Resistance Wall: <strong style="color:#f85149;">₹{max_ce_wall:,.0f}</strong>
+                    &nbsp;·&nbsp; PE Support Wall: <strong style="color:#00d4aa;">₹{max_pe_wall:,.0f}</strong>
+                </div></div>""",
+                unsafe_allow_html=True,
+            )
+
+            # Signal breakdown table
+            sig_rows = "".join(
+                f"""<tr>
+                <td style="padding:6px 12px;color:#c9d1d9;white-space:nowrap;">{ind}</td>
+                <td style="padding:6px 12px;color:#e6edf3;font-weight:600;">{val}</td>
+                <td style="padding:6px 12px;">{verd}</td>
+                <td style="padding:6px 12px;color:#8b949e;font-size:0.82rem;">{expl}</td>
+                </tr>"""
+                for ind, val, verd, expl in sig_details
+            )
+            st.markdown(
+                f"""<table style="width:100%;border-collapse:collapse;background:#0d1117;
+                border-radius:8px;overflow:hidden;margin-bottom:12px;">
+                <thead><tr style="background:#161b22;">
+                <th style="padding:8px 12px;color:#00d4aa;text-align:left;">Indicator</th>
+                <th style="padding:8px 12px;color:#00d4aa;text-align:left;">Value</th>
+                <th style="padding:8px 12px;color:#00d4aa;text-align:left;">Verdict</th>
+                <th style="padding:8px 12px;color:#00d4aa;text-align:left;">Interpretation</th>
+                </tr></thead><tbody>{sig_rows}</tbody></table>""",
+                unsafe_allow_html=True,
+            )
+
             st.divider()
 
             # ── OI bar table ──────────────────────────────────────────────────
+            if _kite_live:
+                st.caption(
+                    "ℹ️ Zerodha Kite does not expose daily OI change — "
+                    "Change in OI columns will show 0. All OI levels, PCR, and Max Pain are live."
+                )
+
             atm_iloc = int((oc_df["Strike"] - atm).abs().values.argmin())
             r_start  = max(0, atm_iloc - n_strikes)
             r_end    = min(len(oc_df), atm_iloc + n_strikes + 1)
