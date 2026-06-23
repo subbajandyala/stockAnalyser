@@ -1260,15 +1260,24 @@ with tab7:
             fo_results = st.session_state.get("fo_results", pd.DataFrame())
 
         if not fo_results.empty:
+            # ── Filter ────────────────────────────────────────────────────────
+            _sig_opts = ["All"] + [s for s in ["STRONG BUY CE 📈", "BUY CE 📈",
+                                                "BUY PE 📉", "STRONG BUY PE 📉",
+                                                "NEUTRAL ⚖️"] if s in fo_results["Signal"].values]
+            _fo_filter = st.selectbox("Filter by Signal", _sig_opts, key="fo_filter")
+            fo_view = fo_results if _fo_filter == "All" else fo_results[fo_results["Signal"] == _fo_filter]
+
             # ── Metrics ───────────────────────────────────────────────────────
-            _fo_ce = len(fo_results[fo_results["Type"] == "CE"])
-            _fo_pe = len(fo_results[fo_results["Type"] == "PE"])
+            _fo_ce     = len(fo_results[fo_results["Type"] == "CE"])
+            _fo_pe     = len(fo_results[fo_results["Type"] == "PE"])
             _fo_strong = len(fo_results[fo_results["Signal"].str.startswith("STRONG")])
-            fm1, fm2, fm3, fm4 = st.columns(4)
-            fm1.metric("Total Signals",  len(fo_results))
-            fm2.metric("BUY CE Signals", _fo_ce,  delta=None)
-            fm3.metric("BUY PE Signals", _fo_pe,  delta=None)
-            fm4.metric("Strong Signals", _fo_strong)
+            _fo_neu    = len(fo_results[fo_results["Signal"] == "NEUTRAL ⚖️"])
+            fm1, fm2, fm3, fm4, fm5 = st.columns(5)
+            fm1.metric("Stocks Scanned", len(fo_results))
+            fm2.metric("BUY CE",         _fo_ce)
+            fm3.metric("BUY PE",         _fo_pe)
+            fm4.metric("Strong",         _fo_strong)
+            fm5.metric("Neutral",        _fo_neu)
 
             st.caption("👆 Click any row to open chart · Green = CE · Red = PE")
 
@@ -1280,9 +1289,9 @@ with tab7:
                 if "BUY PE"        in val: return "color:#ff7043;font-weight:600"
                 return ""
 
-            display_cols = [c for c in fo_results.columns if c not in ("NSE_Symbol", "Type")]
+            display_cols = [c for c in fo_view.columns if c not in ("NSE_Symbol", "Type")]
             styled_fo = (
-                fo_results[display_cols].style
+                fo_view[display_cols].style
                 .map(_fo_signal_style, subset=["Signal"])
                 .format({"Spot": "₹{:,.2f}", "PCR": "{:.2f}",
                          "MP Diff %": "{:+.2f}%",
@@ -1305,7 +1314,7 @@ with tab7:
 
             fo_rows = fo_sel.selection.get("rows", []) if fo_sel else []
             if fo_rows:
-                fr = fo_results.iloc[fo_rows[0]]
+                fr = fo_view.iloc[fo_rows[0]]
                 chart_modal(str(fr["NSE_Symbol"]), str(fr["Symbol"]), "1D")
         else:
             st.info("Click **🔍 Scan** to analyse all F&O stocks. Takes 2–3 minutes.")

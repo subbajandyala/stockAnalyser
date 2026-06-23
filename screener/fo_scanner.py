@@ -162,8 +162,7 @@ def run_fo_scan(
                 .reset_index(drop=True))
 
         score, signal, atm, pcr, max_pain = _score_stock(df, spot)
-        if signal == "NEUTRAL ⚖️":
-            continue
+        # Include all stocks — user can filter in the UI
 
         is_ce  = "CE" in signal
         strong = "STRONG" in signal
@@ -218,6 +217,7 @@ def run_fo_scan(
         "BUY CE 📈":        1,
         "BUY PE 📉":        2,
         "STRONG BUY PE 📉": 3,
+        "NEUTRAL ⚖️":       4,
     }
     df_out = pd.DataFrame(results)
     df_out["_rank"] = df_out["Signal"].map(_order).fillna(4)
