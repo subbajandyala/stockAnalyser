@@ -760,49 +760,58 @@ def _oc_signal(df: pd.DataFrame, spot: float, atm: float,
     return signal, score, details, max_ce_strike, max_pe_strike
 
 
-def _recommend_trade(signal: str, oc_df: pd.DataFrame, atm: float, expiry: str) -> dict | None:
-    if "NEUTRAL" in signal:
-        return None
-
-    is_ce     = "CE" in signal
-    is_strong = "STRONG" in signal
-
-    # Determine strike gap from data
+def _recommend_trade(signal: str, score: int, oc_df: pd.DataFrame, atm: float, expiry: str) -> dict:
     strikes    = sorted(oc_df["Strike"].unique())
     strike_gap = min(b - a for a, b in zip(strikes, strikes[1:])) if len(strikes) > 1 else 50
 
-    # ATM for strong signals, 1 OTM for regular signals
-    if is_strong:
-        rec_strike = atm
-    else:
-        rec_strike = atm + strike_gap if is_ce else atm - strike_gap
+    is_neutral = "NEUTRAL" in signal
+    is_ce      = "CE" in signal
+    is_strong  = "STRONG" in signal
 
+    # For neutral, show both ATM CE and PE
+    if is_neutral:
+        atm_row = oc_df[oc_df["Strike"] == atm]
+        ce_ltp  = float(atm_row.iloc[0]["CE LTP"]) if not atm_row.empty else 0
+        pe_ltp  = float(atm_row.iloc[0]["PE LTP"]) if not atm_row.empty else 0
+        return {
+            "neutral":    True,
+            "atm":        atm,
+            "ce_ltp":     ce_ltp,
+            "pe_ltp":     pe_ltp,
+            "expiry":     expiry,
+            "score":      score,
+        }
+
+    # ATM for strong, 1-OTM for regular
+    rec_strike = atm if is_strong else (atm + strike_gap if is_ce else atm - strike_gap)
     row = oc_df[oc_df["Strike"] == rec_strike]
     if row.empty:
         rec_strike = atm
         row = oc_df[oc_df["Strike"] == atm]
-    if row.empty:
-        return None
 
-    ltp = float(row.iloc[0]["CE LTP" if is_ce else "PE LTP"])
-    if ltp <= 0.5:
-        ltp = float(row.iloc[0]["CE LTP" if is_ce else "PE LTP"])
-    if ltp <= 0.5:
-        return None
+    ltp_col = "CE LTP" if is_ce else "PE LTP"
+    ltp     = float(row.iloc[0][ltp_col]) if not row.empty else 0
+    # fallback: ATM if OTM has no price
+    if ltp <= 0.5 and rec_strike != atm:
+        rec_strike = atm
+        row = oc_df[oc_df["Strike"] == atm]
+        ltp = float(row.iloc[0][ltp_col]) if not row.empty else 0
 
-    sl     = round(ltp * 0.65, 1)   # 35% below entry
-    target = round(ltp * 1.65, 1)   # 65% above entry
-    rr     = round((target - ltp) / (ltp - sl), 1)
+    sl     = round(ltp * 0.65, 1)
+    target = round(ltp * 1.65, 1)
+    rr     = round((target - ltp) / (ltp - sl), 1) if ltp > sl else 0
 
     return {
-        "strike":  rec_strike,
-        "type":    "CE" if is_ce else "PE",
-        "ltp":     ltp,
-        "expiry":  expiry,
-        "sl":      sl,
-        "target":  target,
-        "rr":      rr,
-        "strong":  is_strong,
+        "neutral":  False,
+        "strike":   rec_strike,
+        "type":     "CE" if is_ce else "PE",
+        "ltp":      ltp,
+        "expiry":   expiry,
+        "sl":       sl,
+        "target":   target,
+        "rr":       rr,
+        "strong":   is_strong,
+        "score":    score,
     }
 
 
@@ -997,11 +1006,36 @@ with tab5:
             )
 
             # ── Recommended Trade ─────────────────────────────────────────────
-            trade = _recommend_trade(sig, oc_df, atm, oc_expiry)
-            if trade:
+            trade = _recommend_trade(sig, sig_score, oc_df, atm, oc_expiry)
+            if trade.get("neutral"):
+                st.markdown(
+                    f"""<div style="background:rgba(230,184,0,0.07);border:1.5px solid rgba(230,184,0,0.35);
+                    border-radius:10px;padding:16px 22px;margin:10px 0 18px 0;">
+                    <div style="font-size:0.75rem;font-weight:700;color:#e6b800;letter-spacing:1.5px;
+                    text-transform:uppercase;margin-bottom:8px;">⚖️ No Clear Signal — Wait for Setup</div>
+                    <div style="color:#8b949e;font-size:0.88rem;margin-bottom:12px;">
+                    OI signals are mixed (score {trade['score']:+d}). ATM options for reference:</div>
+                    <div style="display:flex;gap:40px;flex-wrap:wrap;">
+                    <div><div style="font-size:0.68rem;color:#6e7681;text-transform:uppercase;letter-spacing:1px;">
+                    ATM CE ({int(trade['atm'])})</div>
+                    <div style="font-size:1.1rem;font-weight:700;color:#f85149;">₹{trade['ce_ltp']:.1f}</div></div>
+                    <div><div style="font-size:0.68rem;color:#6e7681;text-transform:uppercase;letter-spacing:1px;">
+                    ATM PE ({int(trade['atm'])})</div>
+                    <div style="font-size:1.1rem;font-weight:700;color:#00d4aa;">₹{trade['pe_ltp']:.1f}</div></div>
+                    <div><div style="font-size:0.68rem;color:#6e7681;text-transform:uppercase;letter-spacing:1px;">
+                    Expiry</div>
+                    <div style="font-size:1.1rem;font-weight:700;color:#e6edf3;">{trade['expiry']}</div></div>
+                    </div></div>""",
+                    unsafe_allow_html=True,
+                )
+            else:
                 t_color = "#00d4aa" if trade["type"] == "CE" else "#f85149"
                 t_bg    = "rgba(0,212,170,0.08)" if trade["type"] == "CE" else "rgba(248,81,73,0.08)"
                 badge   = "⚡ STRONG" if trade["strong"] else "📌"
+                ltp_str = f"₹{trade['ltp']:.1f}" if trade["ltp"] > 0.5 else "—"
+                sl_str  = f"₹{trade['sl']:.1f}"  if trade["ltp"] > 0.5 else "—"
+                tgt_str = f"₹{trade['target']:.1f}" if trade["ltp"] > 0.5 else "—"
+                rr_str  = f"1 : {trade['rr']}" if trade["ltp"] > 0.5 else "—"
                 st.markdown(
                     f"""<div style="background:{t_bg};border:1.5px solid {t_color};
                     border-radius:10px;padding:16px 22px;margin:10px 0 18px 0;">
@@ -1014,13 +1048,13 @@ with tab5:
                     </div>
                     <div style="display:flex;gap:32px;margin-top:12px;flex-wrap:wrap;">
                     <div><div style="font-size:0.68rem;color:#6e7681;text-transform:uppercase;letter-spacing:1px;">Entry (LTP)</div>
-                    <div style="font-size:1.1rem;font-weight:700;color:#e6edf3;">₹{trade['ltp']:.1f}</div></div>
+                    <div style="font-size:1.1rem;font-weight:700;color:#e6edf3;">{ltp_str}</div></div>
                     <div><div style="font-size:0.68rem;color:#6e7681;text-transform:uppercase;letter-spacing:1px;">Stop Loss</div>
-                    <div style="font-size:1.1rem;font-weight:700;color:#f85149;">₹{trade['sl']:.1f}</div></div>
+                    <div style="font-size:1.1rem;font-weight:700;color:#f85149;">{sl_str}</div></div>
                     <div><div style="font-size:0.68rem;color:#6e7681;text-transform:uppercase;letter-spacing:1px;">Target</div>
-                    <div style="font-size:1.1rem;font-weight:700;color:#00d4aa;">₹{trade['target']:.1f}</div></div>
+                    <div style="font-size:1.1rem;font-weight:700;color:#00d4aa;">{tgt_str}</div></div>
                     <div><div style="font-size:0.68rem;color:#6e7681;text-transform:uppercase;letter-spacing:1px;">Risk:Reward</div>
-                    <div style="font-size:1.1rem;font-weight:700;color:#e6edf3;">1 : {trade['rr']}</div></div>
+                    <div style="font-size:1.1rem;font-weight:700;color:#e6edf3;">{rr_str}</div></div>
                     </div>
                     <div style="font-size:0.72rem;color:#6e7681;margin-top:10px;">
                     ⚠️ For educational purposes only — not financial advice. Always use proper position sizing.
