@@ -92,11 +92,32 @@ def run_fo_scan(
         if progress_cb:
             progress_cb(pct, msg)
 
+    # 0. Pre-flight: validate token before doing anything
+    _cb(0.01, "Validating Kite token…")
+    _ping = _req.get(f"{_KITE_BASE}/user/profile", headers=hdrs, timeout=10)
+    if _ping.status_code in (401, 403):
+        raise RuntimeError(
+            "Kite Access Token is expired or invalid. "
+            "Generate a new token from kite.zerodha.com and re-enter it in the sidebar."
+        )
+
     # 1. NFO instrument master
     _cb(0.02, "Downloading F&O instrument list…")
     resp = _req.get(f"{_KITE_BASE}/instruments/NFO", headers=hdrs, timeout=30)
+    if resp.status_code in (401, 403):
+        raise RuntimeError(
+            "Kite Access Token is expired or invalid. "
+            "Generate a new token from kite.zerodha.com and re-enter it in the sidebar."
+        )
     resp.raise_for_status()
     instr = pd.read_csv(StringIO(resp.text))
+
+    # Validate CSV has expected columns (guards against error JSON being parsed as CSV)
+    if "instrument_type" not in instr.columns or len(instr) < 100:
+        raise RuntimeError(
+            f"NFO instrument list is invalid or empty ({len(instr)} rows). "
+            "Kite token may be expired — regenerate it and try again."
+        )
 
     # 2. Options only, nearest expiry
     opts = instr[instr["instrument_type"].isin(["CE", "PE"])].copy()
@@ -110,6 +131,12 @@ def run_fo_scan(
     if len(stock_names) > max_stocks:
         stock_names = stock_names[:max_stocks]
     opts = opts[opts["name"].isin(stock_names)]
+
+    if not stock_names:
+        raise RuntimeError(
+            "No F&O stock options found in NFO instruments. "
+            "Market may be closed or the instrument list is empty."
+        )
 
     _cb(0.08, f"Found {len(stock_names)} F&O stocks — fetching spot prices…")
 
