@@ -305,6 +305,29 @@ with st.sidebar:
         )
         if _kite_ok:
             st.success("✅ Kite connected — live OI data active")
+            if st.button("🔬 Test Connection", key="kite_test", use_container_width=True):
+                import requests as _tr
+                _hdr = {"X-Kite-Version": "3",
+                        "Authorization": f"token {st.session_state['kite_api_key']}:{st.session_state['kite_access_token']}"}
+                try:
+                    _p = _tr.get("https://api.kite.trade/user/profile", headers=_hdr, timeout=10)
+                    if _p.ok:
+                        _name = _p.json().get("data", {}).get("user_name", "?")
+                        st.success(f"✅ Token valid — logged in as {_name}")
+                    else:
+                        st.error(f"❌ Token rejected: {_p.status_code} — generate a new token")
+                except Exception as _te:
+                    st.error(f"Network error: {_te}")
+
+                try:
+                    _i = _tr.get("https://api.kite.trade/instruments/NFO", headers=_hdr, timeout=30)
+                    if _i.ok and "instrument_token" in _i.text[:200]:
+                        _rows = len(_i.text.strip().splitlines()) - 1
+                        st.info(f"📋 NFO instruments: {_rows:,} rows downloaded")
+                    else:
+                        st.error(f"❌ NFO instruments failed: status {_i.status_code} — first 200 chars: {_i.text[:200]}")
+                except Exception as _ie:
+                    st.error(f"Instruments error: {_ie}")
         else:
             _sidebar_key_for_link = st.session_state.get("kite_api_key", "") or _get_secret("KITE_API_KEY", "plz6ik09bgb62mey")
             st.info("Enter API Key + Access Token to enable real-time OI")
