@@ -18,6 +18,11 @@ def _batch_fetch(url: str, syms: list, hdrs: dict, batch: int = 400) -> dict:
     out: dict = {}
     for i in range(0, len(syms), batch):
         r = _req.get(url, headers=hdrs, params={"i": syms[i : i + batch]}, timeout=30)
+        if r.status_code in (401, 403):
+            raise RuntimeError(
+                "Kite Access Token expired or invalid. "
+                "Generate a new token from kite.zerodha.com and re-enter it in the sidebar."
+            )
         if r.ok:
             out.update(r.json().get("data", {}))
     return out
@@ -111,6 +116,12 @@ def run_fo_scan(
     # 4. Spot prices for all underlyings in one batch
     nse_syms = [f"NSE:{s}" for s in stock_names]
     spots    = _batch_fetch(f"{_KITE_BASE}/quote/ltp", nse_syms, hdrs)
+    valid_spots = sum(1 for v in spots.values() if float(v.get("last_price", 0)) > 0)
+    if valid_spots == 0:
+        raise RuntimeError(
+            f"Got 0 valid spot prices for {len(stock_names)} stocks. "
+            "Kite token may be expired — generate a new Access Token and re-enter in sidebar."
+        )
 
     # 5. Option quotes — batched
     nfo_syms = ("NFO:" + opts["tradingsymbol"]).tolist()
