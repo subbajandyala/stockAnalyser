@@ -253,7 +253,7 @@ _ma_count    = len(st.session_state.get("ma_results",    pd.DataFrame()))
 _cross_count = len(st.session_state.get("cross_results", pd.DataFrame()))
 _ma50_count  = len(st.session_state.get("ma50_results",  pd.DataFrame()))
 _fund_count  = len(st.session_state.get("fund_results",  pd.DataFrame()))
-_oc_loaded   = any(k in st.session_state for k in ("oc_NIFTY", "oc_BANKNIFTY", "oc_FINNIFTY", "oc_MIDCPNIFTY"))
+_oc_loaded   = any(k in st.session_state for k in ("oc_NIFTY", "oc_BANKNIFTY", "oc_FINNIFTY", "oc_MIDCPNIFTY", "oc_SENSEX", "oc_BANKEX"))
 
 def _sb_row(icon: str, label: str, count: int) -> str:
     badge = f'<span class="sb-badge">{count}</span>' if count > 0 else ""
@@ -839,7 +839,9 @@ with tab5:
     oc1, oc2, oc3, oc4 = st.columns([2, 2, 2, 1])
 
     with oc1:
-        oc_symbol = st.selectbox("Index", ["NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY"], key="oc_symbol")
+        oc_symbol = st.selectbox("Index", ["NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX", "BANKEX"], key="oc_symbol")
+        if oc_symbol in ("SENSEX", "BANKEX") and not _kite_live:
+            st.caption("⚠️ SENSEX/BANKEX require Zerodha Kite — connect in sidebar")
 
     cache_key = f"oc_{oc_symbol}"
     ts_key    = f"oc_{oc_symbol}_ts"

@@ -14,7 +14,13 @@ _KITE_INDEX = {
     "BANKNIFTY":  "NSE:NIFTY BANK",
     "FINNIFTY":   "NSE:NIFTY FIN SERVICE",
     "MIDCPNIFTY": "NSE:NIFTY MID SELECT",
+    "SENSEX":     "BSE:SENSEX",
+    "BANKEX":     "BSE:BANKEX",
 }
+_KITE_EXCHANGE = {
+    "SENSEX": "BFO",
+    "BANKEX": "BFO",
+}  # defaults to NFO for all others
 
 
 def _fetch_via_kite(symbol: str, api_key: str, access_token: str) -> dict:
@@ -24,8 +30,10 @@ def _fetch_via_kite(symbol: str, api_key: str, access_token: str) -> dict:
         "Authorization":  f"token {api_key}:{access_token}",
     }
 
-    # 1. NFO instrument master
-    resp = _req.get(f"{_KITE_BASE}/instruments/NFO", headers=hdrs, timeout=30)
+    exchange = _KITE_EXCHANGE.get(symbol, "NFO")
+
+    # 1. Instrument master (NFO for NSE indices, BFO for BSE indices)
+    resp = _req.get(f"{_KITE_BASE}/instruments/{exchange}", headers=hdrs, timeout=30)
     resp.raise_for_status()
     instr = pd.read_csv(StringIO(resp.text))
 
@@ -49,7 +57,7 @@ def _fetch_via_kite(symbol: str, api_key: str, access_token: str) -> dict:
     spot = float(ltp_resp.json()["data"][idx_sym]["last_price"])
 
     # 5. Fetch OI + volume + LTP in batches of 400 instruments
-    nfo_syms = ("NFO:" + opts["tradingsymbol"]).tolist()
+    nfo_syms = (exchange + ":" + opts["tradingsymbol"]).tolist()
     quotes: dict = {}
     for i in range(0, len(nfo_syms), 400):
         q_resp = _req.get(f"{_KITE_BASE}/quote", headers=hdrs,
@@ -61,7 +69,7 @@ def _fetch_via_kite(symbol: str, api_key: str, access_token: str) -> dict:
     #    Note: Kite quote API does not expose daily OI change → set to 0.
     rows: dict = {}
     for _, row in opts.iterrows():
-        ts_key  = f"NFO:{row['tradingsymbol']}"
+        ts_key  = f"{exchange}:{row['tradingsymbol']}"
         q       = quotes.get(ts_key, {})
         exp_str = row["expiry_dt"].strftime("%d-%b-%Y").upper()
         key     = (float(row["strike"]), exp_str)
