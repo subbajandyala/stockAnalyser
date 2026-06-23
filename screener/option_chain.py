@@ -108,7 +108,29 @@ def _api_path(symbol: str) -> str:
     return f"/api/option-chain-equities?symbol={symbol}"
 
 
-# ── Primary: undetected-chromedriver ─────────────────────────────────────────
+# ── Fastest: plain requests session (works on most local IPs) ─────────────────
+
+def _fetch_via_requests(symbol: str) -> dict:
+    session = _req.Session()
+    session.headers.update(_HEADERS)
+    try:
+        session.get(_NSE, timeout=12)
+        time.sleep(1)
+        session.get(f"{_NSE}/option-chain", timeout=12)
+        time.sleep(1)
+    except Exception:
+        pass
+    resp = session.get(
+        f"{_NSE}{_api_path(symbol)}",
+        headers={"Referer": f"{_NSE}/option-chain",
+                 "X-Requested-With": "XMLHttpRequest"},
+        timeout=20,
+    )
+    resp.raise_for_status()
+    data = resp.json()
+    if not data.get("records"):
+        raise RuntimeError("NSE returned empty data")
+    return data
 # Uses real Chrome but patches the binary so Akamai's JS fingerprint checks
 # cannot detect automation.  Once on the page, fires the API fetch from inside
 # the browser context so all Akamai cookies are included automatically.
@@ -197,6 +219,12 @@ def fetch_option_chain(symbol: str,
         return _fetch_via_kite(symbol, api_key, access_token)
 
     last_err = None
+
+    # Try plain requests session first (fastest, works on most local IPs)
+    try:
+        return _fetch_via_requests(symbol)
+    except Exception as e:
+        last_err = e
 
     # Try Chrome with bot-detection patches (works locally)
     try:
