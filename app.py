@@ -14,6 +14,7 @@ from screener.option_chain import (
     atm_strike, calc_pcr, calc_max_pain,
 )
 from screener.fundamental import fetch_fundamental_stocks
+from screener.fo_scanner import run_fo_scan
 
 
 st.set_page_config(page_title="MarketPulse", layout="wide", page_icon="🐂")
@@ -253,6 +254,7 @@ _ma_count    = len(st.session_state.get("ma_results",    pd.DataFrame()))
 _cross_count = len(st.session_state.get("cross_results", pd.DataFrame()))
 _ma50_count  = len(st.session_state.get("ma50_results",  pd.DataFrame()))
 _fund_count  = len(st.session_state.get("fund_results",  pd.DataFrame()))
+_fo_count    = len(st.session_state.get("fo_results",    pd.DataFrame()))
 _oc_loaded   = any(k in st.session_state for k in ("oc_NIFTY", "oc_BANKNIFTY", "oc_FINNIFTY", "oc_MIDCPNIFTY", "oc_SENSEX", "oc_BANKEX"))
 
 def _sb_row(icon: str, label: str, count: int) -> str:
@@ -281,6 +283,7 @@ with st.sidebar:
 {_sb_row("📊", "Fundamentals", _fund_count)}
 <div class="sb-sec">TOOLS</div>
 {_sb_row("🔗", "Option Chain", 1 if _oc_loaded else 0)}
+{_sb_row("🎯", "F&O Scanner", _fo_count)}
 <div class="sb-div"></div>
 <div class="sb-live"><span class="sb-dot"></span>NSE feed LIVE</div>
 """, unsafe_allow_html=True)
@@ -393,13 +396,14 @@ st.markdown(
 st.divider()
 
 # ── Tabs ──────────────────────────────────────────────────────────────────────
-tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
+tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
     "📰 News + Breakout",
     "🔁 20 MA Retracement",
     "📈 EMA Crossover",
     "🛡️ 50 MA Support",
     "🔗 Option Chain Insights",
     "📊 Fundamentals",
+    "🎯 F&O Scanner",
 ])
 
 # ── TAB 1 ─────────────────────────────────────────────────────────────────────
@@ -1213,3 +1217,95 @@ with tab6:
                 chart_modal(str(fr["NSE_Symbol"]), str(fr["Company"]), "1D")
     else:
         st.info("🔎 Click **Run** above to screen NIFTY 500 stocks by fundamental quality.")
+
+
+# ── TAB 7 — F&O Scanner ───────────────────────────────────────────────────────
+with tab7:
+    _fo_kite_key   = st.session_state.get("kite_api_key",   _get_secret("KITE_API_KEY", ""))
+    _fo_kite_token = st.session_state.get("kite_access_token", _get_secret("KITE_ACCESS_TOKEN", ""))
+    _fo_kite_live  = bool(_fo_kite_key and _fo_kite_token)
+
+    st.markdown("#### 🎯 F&O Options Scanner — CE/PE Signals Across All Stocks")
+
+    with st.container(border=True):
+        foc1, foc2 = st.columns([6, 1])
+        foc1.markdown(
+            '<small style="color:#8b949e;">'
+            "Scans all NSE F&O stocks · Nearest expiry · Signals based on PCR, Max Pain & OI walls"
+            " · Requires Zerodha Kite credentials in sidebar"
+            "</small>",
+            unsafe_allow_html=True,
+        )
+        run_fo_btn = foc2.button("🔍 Scan", type="primary",
+                                 use_container_width=True, key="run_fo",
+                                 disabled=not _fo_kite_live)
+
+    if not _fo_kite_live:
+        st.warning("⚡ Connect Zerodha Kite in the sidebar to enable F&O scanning.")
+    else:
+        if run_fo_btn:
+            _fo_prog = st.progress(0, text="Starting F&O scan…")
+            try:
+                fo_results = run_fo_scan(
+                    _fo_kite_key,
+                    _fo_kite_token,
+                    progress_cb=lambda p, m: _fo_prog.progress(p, text=m),
+                )
+                st.session_state["fo_results"] = fo_results
+                _fo_prog.progress(1.0, text="Done!")
+            except Exception as _e:
+                st.error(f"F&O scan failed: {_e}")
+                fo_results = pd.DataFrame()
+        else:
+            fo_results = st.session_state.get("fo_results", pd.DataFrame())
+
+        if not fo_results.empty:
+            # ── Metrics ───────────────────────────────────────────────────────
+            _fo_ce = len(fo_results[fo_results["Type"] == "CE"])
+            _fo_pe = len(fo_results[fo_results["Type"] == "PE"])
+            _fo_strong = len(fo_results[fo_results["Signal"].str.startswith("STRONG")])
+            fm1, fm2, fm3, fm4 = st.columns(4)
+            fm1.metric("Total Signals",  len(fo_results))
+            fm2.metric("BUY CE Signals", _fo_ce,  delta=None)
+            fm3.metric("BUY PE Signals", _fo_pe,  delta=None)
+            fm4.metric("Strong Signals", _fo_strong)
+
+            st.caption("👆 Click any row to open chart · Green = CE · Red = PE")
+
+            # ── Style signal column ───────────────────────────────────────────
+            def _fo_signal_style(val: str) -> str:
+                if "STRONG BUY CE" in val: return "color:#00d4aa;font-weight:800"
+                if "BUY CE"        in val: return "color:#58d68d;font-weight:600"
+                if "STRONG BUY PE" in val: return "color:#f85149;font-weight:800"
+                if "BUY PE"        in val: return "color:#ff7043;font-weight:600"
+                return ""
+
+            display_cols = [c for c in fo_results.columns if c not in ("NSE_Symbol", "Type")]
+            styled_fo = (
+                fo_results[display_cols].style
+                .map(_fo_signal_style, subset=["Signal"])
+                .format({"Spot": "₹{:,.2f}", "PCR": "{:.2f}",
+                         "MP Diff %": "{:+.2f}%",
+                         "LTP": lambda v: f"₹{v:.1f}" if v else "—",
+                         "SL":  lambda v: f"₹{v:.1f}" if v else "—",
+                         "Target": lambda v: f"₹{v:.1f}" if v else "—",
+                         "R:R": lambda v: f"1:{v}" if v else "—"})
+            )
+            fo_sel = st.dataframe(
+                styled_fo,
+                use_container_width=True,
+                height=540,
+                on_select="rerun",
+                selection_mode="single-row",
+                key="fo_table",
+            )
+
+            csv_fo = fo_results.to_csv(index=False).encode("utf-8")
+            st.download_button("⬇️ Export CSV", csv_fo, "fo_scanner.csv", "text/csv", key="dl_fo")
+
+            fo_rows = fo_sel.selection.get("rows", []) if fo_sel else []
+            if fo_rows:
+                fr = fo_results.iloc[fo_rows[0]]
+                chart_modal(str(fr["NSE_Symbol"]), str(fr["Symbol"]), "1D")
+        else:
+            st.info("Click **🔍 Scan** to analyse all F&O stocks. Takes 2–3 minutes.")
