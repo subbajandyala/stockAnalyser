@@ -988,9 +988,10 @@ with tab5:
                 fig_oi.add_trace(go.Bar(x=str_x, y=chart_df["CE OI"].tolist(), name="CE OI", marker_color="#f85149", opacity=0.85))
                 fig_oi.add_trace(go.Bar(x=str_x, y=chart_df["PE OI"].tolist(), name="PE OI", marker_color="#00d4aa", opacity=0.85))
                 if atm_x in str_x:
-                    fig_oi.add_vline(x=atm_x, line_dash="dash", line_color="#00d4aa",
-                                     annotation_text="ATM", annotation_font_color="#00d4aa",
-                                     annotation_position="top")
+                    fig_oi.add_vline(x=atm_x, line_dash="dash", line_color="#00d4aa")
+                    fig_oi.add_annotation(x=atm_x, y=1, yref="paper", text="ATM",
+                                          font=dict(color="#00d4aa", size=11), showarrow=False,
+                                          yanchor="bottom")
                 fig_oi.update_layout(
                     barmode="group", template="plotly_dark",
                     plot_bgcolor="#0a0e1a", paper_bgcolor="#0a0e1a",
@@ -1016,9 +1017,10 @@ with tab5:
                     marker_color=["#00d4aa" if v >= 0 else "#ff7043" for v in pe_chng], opacity=0.85,
                 ))
                 if atm_x in str_x:
-                    fig_chng.add_vline(x=atm_x, line_dash="dash", line_color="#00d4aa",
-                                       annotation_text="ATM", annotation_font_color="#00d4aa",
-                                       annotation_position="top")
+                    fig_chng.add_vline(x=atm_x, line_dash="dash", line_color="#00d4aa")
+                    fig_chng.add_annotation(x=atm_x, y=1, yref="paper", text="ATM",
+                                            font=dict(color="#00d4aa", size=11), showarrow=False,
+                                            yanchor="bottom")
                 fig_chng.update_layout(
                     barmode="group", template="plotly_dark",
                     plot_bgcolor="#0a0e1a", paper_bgcolor="#0a0e1a",
