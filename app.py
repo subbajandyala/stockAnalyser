@@ -20,6 +20,7 @@ from screener.sensex_option_moves import (
     get_sensex_expiry_fridays,
     run_preexpiry_analysis,
     analyze_expiry_day_patterns,
+    run_oi_buildup_scanner,
 )
 
 
@@ -1481,6 +1482,237 @@ with tab8:
             st.caption(
                 "⚠️ Exit price = intrinsic value at Max Pain. Actual exit depends on where "
                 "Sensex closes at expiry — this is a probability-based estimate, not a guarantee."
+            )
+
+    st.divider()
+
+    # ── POSITION BUILDUP RADAR ────────────────────────────────────────────────
+    st.markdown("##### 🔭 Position Buildup Radar — Detect Accumulation Before the Move")
+    st.markdown(
+        '<small style="color:#8b949e;">'
+        "Live Volume/OI analysis on near-ATM SENSEX options · "
+        "<b>Vol/OI ratio &gt; 0.3</b> = fresh positions opened today (not old OI) · "
+        "<b>High volume + tiny LTP move</b> = stealth accumulation (smart money entering quietly) · "
+        "Near-ATM CE vs PE volume imbalance reveals likely direction · Requires Kite"
+        "</small>",
+        unsafe_allow_html=True,
+    )
+
+    if not _em_kite_live:
+        st.warning("⚡ Connect Zerodha Kite in the sidebar to enable Position Buildup Radar.")
+    else:
+        _bd_col1, _bd_col2 = st.columns([5, 1])
+        _run_buildup = _bd_col2.button(
+            "🔭 Scan Buildup", type="primary",
+            use_container_width=True, key="run_buildup",
+        )
+        if _run_buildup:
+            with st.spinner("Scanning live OI + volume for position buildup…"):
+                try:
+                    _bd_result = run_oi_buildup_scanner(_em_kite_key, _em_kite_token)
+                    st.session_state["oi_buildup"] = _bd_result
+                except Exception as _bde:
+                    st.error(f"Buildup scan failed: {_bde}")
+
+        if "oi_buildup" in st.session_state:
+            _bd      = st.session_state["oi_buildup"]
+            _bd_dir  = _bd["direction"]
+            _bd_dir_c = (
+                "#00d4aa" if "BULLISH" in _bd_dir
+                else "#f85149" if "BEARISH" in _bd_dir
+                else "#e6b800"
+            )
+            _bd_dir_rgb = (
+                "0,212,170" if "BULLISH" in _bd_dir
+                else "248,81,73" if "BEARISH" in _bd_dir
+                else "230,184,0"
+            )
+
+            # ── Key metrics ──────────────────────────────────────────────────
+            _bd_m1, _bd_m2, _bd_m3, _bd_m4, _bd_m5 = st.columns(5)
+            _bd_m1.metric("Sensex (Live)",         f"{_bd['spot']:,.2f}")
+            _bd_m2.metric("ATM Strike",             f"{int(_bd['atm']):,}")
+            _bd_m3.metric("CE Vol (±5 strikes)",    f"{int(_bd['ce_vol_total']):,}")
+            _bd_m4.metric("PE Vol (±5 strikes)",    f"{int(_bd['pe_vol_total']):,}")
+            _bd_m5.metric(
+                "CE/PE Vol Ratio",
+                f"{_bd['vol_ratio']:.2f}",
+                "Bullish" if _bd["vol_ratio"] > 1.3 else (
+                    "Bearish" if _bd["vol_ratio"] < 0.7 else "Neutral"
+                ),
+            )
+
+            # ── Direction signal card ─────────────────────────────────────────
+            st.markdown(
+                f"""<div style="background:rgba({_bd_dir_rgb},0.1);
+                border:1.5px solid {_bd_dir_c};border-radius:10px;
+                padding:14px 20px;margin:10px 0 16px;">
+                <div style="font-size:1.4rem;font-weight:800;color:{_bd_dir_c};">
+                    {_bd_dir}
+                </div>
+                <div style="color:#8b949e;font-size:0.85rem;margin-top:4px;">
+                    Near-ATM CE Volume: <strong style="color:#f85149;">{int(_bd['ce_vol_total']):,}</strong>
+                    &nbsp;·&nbsp;
+                    Near-ATM PE Volume: <strong style="color:#00d4aa;">{int(_bd['pe_vol_total']):,}</strong>
+                    &nbsp;·&nbsp;
+                    Expiry: <strong style="color:#e6edf3;">{_bd['expiry']}</strong>
+                </div></div>""",
+                unsafe_allow_html=True,
+            )
+
+            # ── Hot zones table ───────────────────────────────────────────────
+            _hz = _bd.get("hot_zones", pd.DataFrame())
+            if not _hz.empty:
+                st.markdown("**🔥 Hot Buildup Zones — Ranked by Accumulation Score**")
+                st.caption(
+                    "Buildup Score ≥ 6 = very hot zone  ·  "
+                    "Stealth = high volume + small price move  ·  "
+                    "Fresh = high Vol/OI ratio (new positions today)"
+                )
+
+                def _hz_score_style(val):
+                    try:
+                        v = int(val)
+                        if v >= 6: return "color:#00d4aa;font-weight:800"
+                        if v >= 4: return "color:#58d68d;font-weight:700"
+                        if v >= 2: return "color:#f0b429;font-weight:600"
+                    except Exception:
+                        pass
+                    return ""
+
+                def _hz_netvol_style(val):
+                    try:
+                        v = float(val)
+                        return ("color:#f85149;font-weight:600" if v > 0
+                                else "color:#00d4aa;font-weight:600")
+                    except Exception:
+                        return ""
+
+                def _hz_voloi_style(val):
+                    try:
+                        v = float(val)
+                        if v > 0.30: return "color:#00d4aa;font-weight:700"
+                        if v > 0.15: return "color:#f0b429;font-weight:600"
+                    except Exception:
+                        pass
+                    return ""
+
+                _hz_styled = (
+                    _hz.style
+                    .map(_hz_score_style,  subset=["Buildup Score"])
+                    .map(_hz_netvol_style, subset=["Net Vol (C-P)"])
+                    .map(_hz_voloi_style,  subset=["CE Vol/OI", "PE Vol/OI"])
+                    .format({
+                        "Strike":        "{:,.0f}",
+                        "ATM Dist":      "{:.0f} pts",
+                        "CE OI":         "{:,}",
+                        "CE Vol":        "{:,}",
+                        "CE Vol/OI":     "{:.3f}",
+                        "CE LTP":        "₹{:.1f}",
+                        "CE LTP Chg %":  "{:+.2f}%",
+                        "PE OI":         "{:,}",
+                        "PE Vol":        "{:,}",
+                        "PE Vol/OI":     "{:.3f}",
+                        "PE LTP":        "₹{:.1f}",
+                        "PE LTP Chg %":  "{:+.2f}%",
+                        "Net Vol (C-P)": "{:+,}",
+                        "Buildup Score": "{:d}",
+                    })
+                )
+                st.dataframe(_hz_styled, use_container_width=True, hide_index=True)
+
+            # ── Charts ────────────────────────────────────────────────────────
+            _bd_plot = _bd.get("chain_df", pd.DataFrame())
+            if not _bd_plot.empty:
+                _bd_plot = _bd_plot[_bd_plot["ATM Dist"] <= 1000].copy()
+                if not _bd_plot.empty:
+                    _str_x  = _bd_plot["Strike"].astype(int).astype(str).tolist()
+                    _atm_x  = str(int(_bd["atm"]))
+
+                    _bc1, _bc2 = st.columns(2)
+
+                    with _bc1:
+                        st.markdown("**CE vs PE Volume near ATM**")
+                        _fig_vol = go.Figure()
+                        _fig_vol.add_trace(go.Bar(
+                            x=_str_x, y=_bd_plot["CE Vol"].tolist(),
+                            name="CE Volume", marker_color="#f85149", opacity=0.85,
+                        ))
+                        _fig_vol.add_trace(go.Bar(
+                            x=_str_x, y=_bd_plot["PE Vol"].tolist(),
+                            name="PE Volume", marker_color="#00d4aa", opacity=0.85,
+                        ))
+                        if _atm_x in _str_x:
+                            _fig_vol.add_vline(x=_atm_x, line_dash="dash", line_color="#00d4aa")
+                            _fig_vol.add_annotation(
+                                x=_atm_x, y=1, yref="paper", text="ATM",
+                                font=dict(color="#00d4aa", size=11),
+                                showarrow=False, yanchor="bottom",
+                            )
+                        _fig_vol.update_layout(
+                            barmode="group", template="plotly_dark",
+                            plot_bgcolor="#0a0e1a", paper_bgcolor="#0a0e1a",
+                            height=300, margin=dict(t=10, b=50, l=10, r=10),
+                            legend=dict(orientation="h", y=1.05, x=0,
+                                        font=dict(color="#c9d1d9"),
+                                        bgcolor="rgba(0,0,0,0)"),
+                            xaxis=dict(tickfont=dict(color="#8b949e", size=9),
+                                       showgrid=False, tickangle=-45),
+                            yaxis=dict(tickfont=dict(color="#8b949e"),
+                                       gridcolor="#1a2035", title="Contracts"),
+                        )
+                        st.plotly_chart(_fig_vol, use_container_width=True)
+
+                    with _bc2:
+                        st.markdown("**Vol/OI Ratio — Freshness Indicator**")
+                        _fig_ratio = go.Figure()
+                        _fig_ratio.add_trace(go.Bar(
+                            x=_str_x, y=_bd_plot["CE Vol/OI"].tolist(),
+                            name="CE Vol/OI", marker_color="#f85149", opacity=0.85,
+                        ))
+                        _fig_ratio.add_trace(go.Bar(
+                            x=_str_x, y=_bd_plot["PE Vol/OI"].tolist(),
+                            name="PE Vol/OI", marker_color="#00d4aa", opacity=0.85,
+                        ))
+                        _fig_ratio.add_hline(
+                            y=0.3, line_dash="dot", line_color="#f0b429",
+                            annotation_text="High Freshness (0.3)",
+                            annotation_font=dict(color="#f0b429", size=10),
+                            annotation_position="right",
+                        )
+                        if _atm_x in _str_x:
+                            _fig_ratio.add_vline(x=_atm_x, line_dash="dash",
+                                                 line_color="#00d4aa")
+                        _fig_ratio.update_layout(
+                            barmode="group", template="plotly_dark",
+                            plot_bgcolor="#0a0e1a", paper_bgcolor="#0a0e1a",
+                            height=300, margin=dict(t=10, b=50, l=10, r=10),
+                            legend=dict(orientation="h", y=1.05, x=0,
+                                        font=dict(color="#c9d1d9"),
+                                        bgcolor="rgba(0,0,0,0)"),
+                            xaxis=dict(tickfont=dict(color="#8b949e", size=9),
+                                       showgrid=False, tickangle=-45),
+                            yaxis=dict(tickfont=dict(color="#8b949e"),
+                                       gridcolor="#1a2035", title="Vol / OI",
+                                       title_font=dict(color="#8b949e")),
+                        )
+                        st.plotly_chart(_fig_ratio, use_container_width=True)
+
+            # ── How to read legend ────────────────────────────────────────────
+            st.markdown(
+                """<div style="background:#0f1523;border:1px solid #1a2035;
+                border-radius:8px;padding:14px 18px;margin-top:6px;">
+                <div style="color:#00d4aa;font-size:0.73rem;font-weight:700;
+                text-transform:uppercase;letter-spacing:1px;margin-bottom:8px;">
+                📖 How to Read This</div>
+                <div style="color:#8b949e;font-size:0.83rem;line-height:1.8;">
+                <b style="color:#c9d1d9;">Vol/OI &gt; 0.30</b> — More than 30% of existing OI traded today → fresh position opening, active accumulation<br>
+                <b style="color:#c9d1d9;">High Vol + Small LTP Move (&lt;5%)</b> — Stealth accumulation: large activity with no price reaction → smart money absorbing supply quietly<br>
+                <b style="color:#c9d1d9;">CE Vol &gt;&gt; PE Vol near ATM</b> — Aggressive call buying / put writing → bulls expect a rally<br>
+                <b style="color:#c9d1d9;">PE Vol &gt;&gt; CE Vol near ATM</b> — Aggressive put buying / call writing → bears expect a fall<br>
+                <b style="color:#c9d1d9;">Buildup Score ≥ 6</b> — Very high confidence accumulation zone → watch this strike for an explosive move
+                </div></div>""",
+                unsafe_allow_html=True,
             )
 
     st.divider()

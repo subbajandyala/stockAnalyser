@@ -570,6 +570,187 @@ def run_preexpiry_analysis(api_key: str, access_token: str) -> dict:
     }
 
 
+# ── Position Buildup Radar — detect accumulation before the move ─────────────
+
+def run_oi_buildup_scanner(api_key: str, access_token: str) -> dict:
+    """
+    Scan live near-ATM SENSEX options for OI + volume accumulation patterns.
+
+    Key signals
+    -----------
+    Vol/OI ratio > 0.3  : >30% of existing OI traded today → fresh position opening
+    High vol + tiny LTP move (<5%) : stealth accumulation — smart money entering quietly
+    CE vol >> PE vol near ATM : bullish bias (aggressive call buying / put writing)
+    PE vol >> CE vol near ATM : bearish bias (aggressive put buying / call writing)
+
+    Returns
+    -------
+    spot, expiry, atm,
+    chain_df   : full near-ATM DataFrame (±15 strikes)
+    near_df    : ±5 strikes (used for direction)
+    hot_zones  : top 10 strikes ranked by buildup score
+    direction  : "📈 BULLISH …" | "📉 BEARISH …" | "⚖️ NEUTRAL …"
+    ce_vol_total, pe_vol_total, vol_ratio (near ATM)
+    """
+    hdrs = _kite_headers(api_key, access_token)
+
+    # 1. BFO instruments master
+    resp = requests.get(f"{_KITE_BASE}/instruments/BFO", headers=hdrs, timeout=30)
+    resp.raise_for_status()
+    instr = pd.read_csv(StringIO(resp.text))
+    instr["expiry_dt"] = pd.to_datetime(instr["expiry"], errors="coerce")
+
+    # 2. SENSEX options, nearest expiry
+    opts = instr[
+        (instr["name"] == "SENSEX") &
+        (instr["instrument_type"].isin(["CE", "PE"]))
+    ].copy()
+    if opts.empty:
+        raise RuntimeError("No SENSEX options found in BFO instruments master.")
+
+    nearest_expiry = opts["expiry_dt"].min()
+    opts = opts[opts["expiry_dt"] == nearest_expiry].copy()
+    expiry_label = nearest_expiry.strftime("%d %b %Y (%A)")
+
+    # 3. Live SENSEX spot
+    ltp_resp = requests.get(
+        f"{_KITE_BASE}/quote/ltp", headers=hdrs,
+        params={"i": "BSE:SENSEX"}, timeout=10,
+    )
+    ltp_resp.raise_for_status()
+    spot = float(ltp_resp.json()["data"]["BSE:SENSEX"]["last_price"])
+    atm  = float(round(spot / 100) * 100)
+
+    # 4. Fetch FULL quotes (with volume + OHLC) for ±15 strikes around ATM
+    near_opts = opts[abs(opts["strike"].astype(float) - atm) <= 1500].copy()
+    bfo_syms  = ("BFO:" + near_opts["tradingsymbol"]).tolist()
+    quotes: dict = {}
+    for i in range(0, len(bfo_syms), 400):
+        q_resp = requests.get(
+            f"{_KITE_BASE}/quote", headers=hdrs,
+            params={"i": bfo_syms[i: i + 400]}, timeout=30,
+        )
+        if q_resp.ok:
+            quotes.update(q_resp.json().get("data", {}))
+
+    # 5. Build per-strike DataFrame
+    rows: dict = {}
+    for _, row in near_opts.iterrows():
+        strike = float(row["strike"])
+        itype  = row["instrument_type"]
+        key    = f"BFO:{row['tradingsymbol']}"
+        q      = quotes.get(key, {})
+        if strike not in rows:
+            rows[strike] = {
+                "Strike":  strike,
+                "CE OI": 0, "CE Vol": 0, "CE LTP": 0.0, "CE Open": 0.0,
+                "PE OI": 0, "PE Vol": 0, "PE LTP": 0.0, "PE Open": 0.0,
+            }
+        rows[strike][f"{itype} OI"]   = int(q.get("oi", 0))
+        rows[strike][f"{itype} Vol"]  = int(q.get("volume", 0))
+        rows[strike][f"{itype} LTP"]  = float(q.get("last_price", 0.0))
+        ohlc = q.get("ohlc") or {}
+        rows[strike][f"{itype} Open"] = float(ohlc.get("open", 0.0))
+
+    if not rows:
+        raise RuntimeError("No quote data received for near-ATM SENSEX options.")
+
+    df = (pd.DataFrame(list(rows.values()))
+          .sort_values("Strike")
+          .reset_index(drop=True))
+
+    # 6. Derived columns
+    def _ratio(num: float, den: float) -> float:
+        return round(num / den, 3) if den > 0 else 0.0
+
+    def _ltp_chg(ltp: float, opn: float) -> float:
+        return round((ltp - opn) / opn * 100, 2) if opn > 0 else 0.0
+
+    df["CE Vol/OI"]     = df.apply(lambda r: _ratio(r["CE Vol"],  r["CE OI"]),  axis=1)
+    df["PE Vol/OI"]     = df.apply(lambda r: _ratio(r["PE Vol"],  r["PE OI"]),  axis=1)
+    df["CE LTP Chg %"]  = df.apply(lambda r: _ltp_chg(r["CE LTP"], r["CE Open"]), axis=1)
+    df["PE LTP Chg %"]  = df.apply(lambda r: _ltp_chg(r["PE LTP"], r["PE Open"]), axis=1)
+    df["Net Vol (C-P)"] = (df["CE Vol"] - df["PE Vol"]).astype(int)
+    df["ATM Dist"]      = (df["Strike"] - atm).abs()
+
+    # 7. Buildup score per strike
+    def _score(row) -> tuple:
+        score = 0
+        tags  = []
+
+        # Fresh OI: vol/OI ratio
+        if row["CE Vol/OI"] > 0.30:
+            score += 2; tags.append("CE Fresh")
+        elif row["CE Vol/OI"] > 0.15:
+            score += 1
+        if row["PE Vol/OI"] > 0.30:
+            score += 2; tags.append("PE Fresh")
+        elif row["PE Vol/OI"] > 0.15:
+            score += 1
+
+        # Stealth accumulation: high volume but LTP barely moved
+        if row["CE Vol"] > 200 and abs(row["CE LTP Chg %"]) < 5:
+            score += 2; tags.append("CE Stealth")
+        if row["PE Vol"] > 200 and abs(row["PE LTP Chg %"]) < 5:
+            score += 2; tags.append("PE Stealth")
+
+        # Directional imbalance
+        total = row["CE Vol"] + row["PE Vol"]
+        if total > 100:
+            if row["CE Vol"] > row["PE Vol"] * 2:
+                score += 1; tags.append("CE Dominant")
+            elif row["PE Vol"] > row["CE Vol"] * 2:
+                score += 1; tags.append("PE Dominant")
+
+        # ATM proximity bonus
+        if row["ATM Dist"] <= 200:
+            score += 1
+
+        return score, (", ".join(tags) if tags else "—")
+
+    scored = df.apply(_score, axis=1, result_type="expand")
+    df["Buildup Score"]  = scored[0].astype(int)
+    df["Buildup Signal"] = scored[1]
+
+    # 8. Near-ATM aggregate (±500 pts = 5 strikes)
+    near_df      = df[df["ATM Dist"] <= 500].copy()
+    ce_vol_total = float(near_df["CE Vol"].sum())
+    pe_vol_total = float(near_df["PE Vol"].sum())
+    vol_ratio    = round(ce_vol_total / pe_vol_total, 2) if pe_vol_total > 0 else 0.0
+
+    if ce_vol_total > pe_vol_total * 1.5:
+        direction = "📈 BULLISH — CE Accumulation near ATM"
+    elif pe_vol_total > ce_vol_total * 1.5:
+        direction = "📉 BEARISH — PE Accumulation near ATM"
+    else:
+        direction = "⚖️ NEUTRAL — Balanced activity near ATM"
+
+    # 9. Hot zones table (top 10, ±7 strikes, ranked by buildup score)
+    _cols = [
+        "Strike", "ATM Dist",
+        "CE OI", "CE Vol", "CE Vol/OI", "CE LTP", "CE LTP Chg %",
+        "PE OI", "PE Vol", "PE Vol/OI", "PE LTP", "PE LTP Chg %",
+        "Net Vol (C-P)", "Buildup Score", "Buildup Signal",
+    ]
+    hot_zones = (df[df["ATM Dist"] <= 700]
+                 .sort_values(["Buildup Score", "CE Vol"], ascending=[False, False])
+                 .head(10)[_cols]
+                 .reset_index(drop=True))
+
+    return {
+        "spot":         spot,
+        "expiry":       expiry_label,
+        "atm":          atm,
+        "chain_df":     df,
+        "near_df":      near_df,
+        "hot_zones":    hot_zones,
+        "direction":    direction,
+        "ce_vol_total": ce_vol_total,
+        "pe_vol_total": pe_vol_total,
+        "vol_ratio":    vol_ratio,
+    }
+
+
 # ── Expiry day intraday pattern analysis ──────────────────────────────────────
 
 _SESSIONS = [
