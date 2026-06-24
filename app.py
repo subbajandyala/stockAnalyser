@@ -18,6 +18,7 @@ from screener.fo_scanner import run_fo_scan
 from screener.sensex_option_moves import (
     run_sensex_option_moves_scan,
     get_sensex_expiry_fridays,
+    run_preexpiry_analysis,
 )
 
 
@@ -1371,10 +1372,123 @@ with tab8:
     _em_kite_live  = bool(_em_kite_key and _em_kite_token)
 
     st.markdown("#### 🚀 Sensex Weekly Expiry — Option Moves (2:15 PM → 3:15 PM)")
+
+    # ── PRE-EXPIRY ANALYSIS (live today → predict Friday) ────────────────────
+    st.markdown("##### 🎯 Pre-Expiry Radar — Tomorrow's Rocket Candidates (Live)")
     st.markdown(
         '<small style="color:#8b949e;">'
-        "Analyses the last 5 Sensex expiry Fridays · Finds options that moved ≥500% in the final hour "
-        "· Index data via yfinance (^BSESN) · Option prices are <b>estimated</b> using an expiry-day model "
+        "Uses today's <b>live</b> SENSEX option chain (BFO via Kite) · "
+        "Finds options you can buy <b>today</b> that would move ≥200% if Sensex closes at Max Pain on expiry day · "
+        "Entry = current LTP · Exit = intrinsic value at Max Pain · Requires Kite credentials"
+        "</small>",
+        unsafe_allow_html=True,
+    )
+
+    if not _em_kite_live:
+        st.warning("⚡ Connect Zerodha Kite in the sidebar to enable live pre-expiry analysis.")
+    else:
+        _pre_col1, _pre_col2 = st.columns([5, 1])
+        _run_pre = _pre_col2.button("🔄 Load Live Chain", type="primary",
+                                    use_container_width=True, key="run_pre_expiry")
+        if _run_pre:
+            with st.spinner("Fetching live SENSEX option chain from BFO…"):
+                try:
+                    _pre_result = run_preexpiry_analysis(_em_kite_key, _em_kite_token)
+                    st.session_state["pre_expiry"] = _pre_result
+                except Exception as _pe:
+                    st.error(f"Failed: {_pe}")
+
+        if "pre_expiry" in st.session_state:
+            _pr = st.session_state["pre_expiry"]
+            _gap   = _pr["gap_pts"]
+            _dir_c = "#00d4aa" if _gap > 0 else "#f85149"
+            _dir_a = "▲" if _gap > 0 else "▼"
+
+            # ── Key metrics ──────────────────────────────────────────────────
+            _pm1, _pm2, _pm3, _pm4, _pm5, _pm6 = st.columns(6)
+            _pm1.metric("Sensex (Live)",  f"{_pr['spot']:,.2f}")
+            _pm2.metric("Max Pain",       f"{_pr['max_pain']:,.0f}",
+                        f"{_dir_a} {abs(_gap):,.0f} pts to target")
+            _pm3.metric("PCR",            f"{_pr['pcr']:.2f}",
+                        "Bullish" if _pr['pcr'] >= 1.2 else ("Bearish" if _pr['pcr'] < 0.8 else "Neutral"))
+            _pm4.metric("ATM Strike",     f"{_pr['atm']:,.0f}")
+            _pm5.metric("CE Wall (Res.)", f"{_pr['ce_wall']:,.0f}")
+            _pm6.metric("PE Wall (Sup.)", f"{_pr['pe_wall']:,.0f}")
+
+            # ── Direction signal ─────────────────────────────────────────────
+            st.markdown(
+                f"""<div style="background:rgba({('0,212,170' if _gap > 0 else '248,81,73')},0.1);
+                border:1.5px solid {_dir_c};border-radius:10px;
+                padding:14px 20px;margin:10px 0 16px;">
+                <div style="font-size:1.4rem;font-weight:800;color:{_dir_c};">
+                    {_dir_a} {_pr['direction']}
+                </div>
+                <div style="color:#8b949e;font-size:0.85rem;margin-top:4px;">
+                    Sensex needs to move <strong style="color:{_dir_c};">
+                    {abs(_gap):,.0f} pts</strong>
+                    ({abs(_gap)/_pr['spot']*100:.2f}%) to reach Max Pain
+                    <strong style="color:#e6edf3;">{_pr['max_pain']:,.0f}</strong>
+                    by expiry <strong style="color:#e6edf3;">{_pr['expiry']}</strong>
+                </div></div>""",
+                unsafe_allow_html=True,
+            )
+
+            # ── Rocket candidates table ───────────────────────────────────────
+            _rkt = _pr.get("rockets_df", pd.DataFrame())
+            if _rkt.empty:
+                st.info("No options found with ≥200% estimated move to Max Pain. "
+                        "Market may already be very close to Max Pain.")
+            else:
+                st.markdown(
+                    f"**{len(_rkt)} option(s)** you can buy TODAY that would move "
+                    f"significantly if Sensex expires at Max Pain ({_pr['max_pain']:,.0f}):"
+                )
+
+                def _pre_type_style(val):
+                    return ("color:#f85149;font-weight:700" if val == "CE"
+                            else "color:#00d4aa;font-weight:700")
+
+                def _pre_pct_style(val):
+                    try:
+                        v = float(val)
+                        if v >= 1000: return "color:#00d4aa;font-weight:800;font-size:1.05rem"
+                        if v >= 500:  return "color:#58d68d;font-weight:700"
+                        if v >= 200:  return "color:#f0b429;font-weight:600"
+                    except Exception:
+                        pass
+                    return ""
+
+                _styled_pre = (
+                    _rkt.style
+                    .map(_pre_type_style,  subset=["Type"])
+                    .map(_pre_pct_style,   subset=["Est. % Move"])
+                    .format({
+                        "Strike":          "{:,}",
+                        "Entry (LTP)":     "₹{:.2f}",
+                        "Exit @ Max Pain": "₹{:.2f}",
+                        "Est. % Move":     "{:,.1f}%",
+                    })
+                )
+                st.dataframe(_styled_pre, use_container_width=True, hide_index=True)
+                st.download_button(
+                    "⬇️ Export Rocket Candidates CSV",
+                    _rkt.to_csv(index=False).encode("utf-8"),
+                    "sensex_preexpiry_rockets.csv", "text/csv",
+                    key="dl_pre_rockets",
+                )
+
+            st.caption(
+                "⚠️ Exit price = intrinsic value at Max Pain. Actual exit depends on where "
+                "Sensex closes at expiry — this is a probability-based estimate, not a guarantee."
+            )
+
+    st.divider()
+
+    # ── HISTORICAL SCAN (past 5 weeks) ────────────────────────────────────────
+    st.markdown("##### 📅 Historical Expiry Analysis — Past 5 Weeks")
+    st.markdown(
+        '<small style="color:#8b949e;">'
+        "Index data via yfinance (^BSESN) · Option prices are <b>estimated</b> using an expiry-day model "
         "(intrinsic value + decaying time premium) · Kite credentials unlock actual option candle data "
         "for any expiry still in the BFO master"
         "</small>",

@@ -405,3 +405,166 @@ def run_sensex_option_moves_scan(
 
     summary_df = pd.DataFrame(summary_rows)
     return summary_df, weekly_data, actual_df
+
+
+# ── Pre-expiry analysis: use today's live OI to find Friday rockets ───────────
+
+def run_preexpiry_analysis(api_key: str, access_token: str) -> dict:
+    """
+    Fetch live SENSEX BFO option chain for the nearest upcoming Friday expiry.
+    Uses current real LTP prices as entry points and estimates exit value at Max Pain.
+
+    Returns a dict with:
+      spot, expiry, max_pain, pcr, atm,
+      ce_wall, pe_wall, direction, gap_pts,
+      chain_df      – full option chain
+      rockets_df    – options likely to move 500%+ if Sensex closes at Max Pain
+    """
+    hdrs = _kite_headers(api_key, access_token)
+
+    # 1. BFO instruments master
+    resp = requests.get(f"{_KITE_BASE}/instruments/BFO", headers=hdrs, timeout=30)
+    resp.raise_for_status()
+    instr = pd.read_csv(StringIO(resp.text))
+
+    instr["expiry_dt"] = pd.to_datetime(instr["expiry"], errors="coerce")
+
+    # 2. Filter SENSEX CE/PE, find nearest expiry
+    opts = instr[
+        (instr["name"] == "SENSEX") &
+        (instr["instrument_type"].isin(["CE", "PE"]))
+    ].copy()
+
+    if opts.empty:
+        raise RuntimeError("No SENSEX options found in BFO instruments master.")
+
+    nearest_expiry = opts["expiry_dt"].min()
+    opts = opts[opts["expiry_dt"] == nearest_expiry].copy()
+    expiry_label = nearest_expiry.strftime("%d %b %Y (%A)")
+
+    # 3. Live spot price
+    ltp_resp = requests.get(
+        f"{_KITE_BASE}/quote/ltp",
+        headers=hdrs,
+        params={"i": "BSE:SENSEX"},
+        timeout=10,
+    )
+    ltp_resp.raise_for_status()
+    spot = float(ltp_resp.json()["data"]["BSE:SENSEX"]["last_price"])
+
+    # 4. Fetch live quotes for all options in batches
+    bfo_syms = ("BFO:" + opts["tradingsymbol"]).tolist()
+    quotes: dict = {}
+    for i in range(0, len(bfo_syms), 400):
+        batch = bfo_syms[i: i + 400]
+        q_resp = requests.get(
+            f"{_KITE_BASE}/quote",
+            headers=hdrs,
+            params={"i": batch},
+            timeout=30,
+        )
+        if q_resp.ok:
+            quotes.update(q_resp.json().get("data", {}))
+
+    # 5. Build chain DataFrame
+    rows: dict = {}
+    for _, row in opts.iterrows():
+        strike = float(row["strike"])
+        itype  = row["instrument_type"]
+        key    = f"BFO:{row['tradingsymbol']}"
+        q      = quotes.get(key, {})
+        if strike not in rows:
+            rows[strike] = {"Strike": strike,
+                            "CE OI": 0, "CE LTP": 0.0,
+                            "PE OI": 0, "PE LTP": 0.0}
+        rows[strike][f"{itype} OI"]  = int(q.get("oi", 0))
+        rows[strike][f"{itype} LTP"] = float(q.get("last_price", 0.0))
+
+    chain_df = (pd.DataFrame(list(rows.values()))
+                .sort_values("Strike")
+                .reset_index(drop=True))
+
+    # 6. Max Pain
+    s_arr = chain_df["Strike"].values
+    ce_oi = chain_df["CE OI"].values.astype(float)
+    pe_oi = chain_df["PE OI"].values.astype(float)
+    pain  = [
+        float((ce_oi * np.maximum(0, s - s_arr)).sum() +
+              (pe_oi * np.maximum(0, s_arr - s)).sum())
+        for s in s_arr
+    ]
+    max_pain = float(s_arr[int(np.argmin(pain))])
+
+    # 7. PCR, ATM, walls
+    total_ce  = float(chain_df["CE OI"].sum())
+    total_pe  = float(chain_df["PE OI"].sum())
+    pcr       = round(total_pe / total_ce, 2) if total_ce else 0.0
+    atm       = float(chain_df.loc[(chain_df["Strike"] - spot).abs().idxmin(), "Strike"])
+    ce_wall   = float(chain_df.loc[chain_df["CE OI"].idxmax(), "Strike"])
+    pe_wall   = float(chain_df.loc[chain_df["PE OI"].idxmax(), "Strike"])
+    gap_pts   = max_pain - spot          # +ve → market must rally; -ve → must fall
+    direction = "▲ RALLY to Max Pain" if gap_pts > 0 else "▼ FALL to Max Pain"
+
+    # 8. Rocket candidates — options that benefit if Sensex closes at Max Pain
+    rockets = []
+    for _, row in chain_df.iterrows():
+        strike   = float(row["Strike"])
+        ce_entry = float(row["CE LTP"])
+        pe_entry = float(row["PE LTP"])
+
+        # CE: profitable if market rallies to max_pain
+        ce_exit = max(0.0, max_pain - strike)
+        if ce_entry > 0.10:
+            ce_pct = (ce_exit - ce_entry) / ce_entry * 100
+            if ce_pct >= 200:
+                rockets.append({
+                    "Type":       "CE",
+                    "Strike":     int(strike),
+                    "Entry (LTP)": round(ce_entry, 2),
+                    "Exit @ Max Pain": round(ce_exit, 2),
+                    "Est. % Move": round(ce_pct, 1),
+                    "Moneyness":  (
+                        f"OTM {strike - spot:.0f}pts" if strike > spot
+                        else f"ITM {spot - strike:.0f}pts" if strike < spot
+                        else "ATM"
+                    ),
+                })
+
+        # PE: profitable if market falls to max_pain
+        pe_exit = max(0.0, strike - max_pain)
+        if pe_entry > 0.10:
+            pe_pct = (pe_exit - pe_entry) / pe_entry * 100
+            if pe_pct >= 200:
+                rockets.append({
+                    "Type":       "PE",
+                    "Strike":     int(strike),
+                    "Entry (LTP)": round(pe_entry, 2),
+                    "Exit @ Max Pain": round(pe_exit, 2),
+                    "Est. % Move": round(pe_pct, 1),
+                    "Moneyness":  (
+                        f"OTM {spot - strike:.0f}pts" if strike < spot
+                        else f"ITM {strike - spot:.0f}pts" if strike > spot
+                        else "ATM"
+                    ),
+                })
+
+    rockets_df = pd.DataFrame(rockets) if rockets else pd.DataFrame()
+    if not rockets_df.empty:
+        rockets_df = (rockets_df
+                      .sort_values("Est. % Move", ascending=False)
+                      .reset_index(drop=True))
+
+    return {
+        "spot":        spot,
+        "expiry":      expiry_label,
+        "expiry_dt":   nearest_expiry,
+        "max_pain":    max_pain,
+        "pcr":         pcr,
+        "atm":         atm,
+        "ce_wall":     ce_wall,
+        "pe_wall":     pe_wall,
+        "gap_pts":     gap_pts,
+        "direction":   direction,
+        "chain_df":    chain_df,
+        "rockets_df":  rockets_df,
+    }
