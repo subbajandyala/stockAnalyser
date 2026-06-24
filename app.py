@@ -15,6 +15,10 @@ from screener.option_chain import (
 )
 from screener.fundamental import fetch_fundamental_stocks
 from screener.fo_scanner import run_fo_scan
+from screener.sensex_option_moves import (
+    run_sensex_option_moves_scan,
+    get_sensex_expiry_fridays,
+)
 
 
 st.set_page_config(page_title="MarketPulse", layout="wide", page_icon="🐂")
@@ -256,6 +260,7 @@ _ma50_count  = len(st.session_state.get("ma50_results",  pd.DataFrame()))
 _fund_count  = len(st.session_state.get("fund_results",  pd.DataFrame()))
 _fo_count    = len(st.session_state.get("fo_results",    pd.DataFrame()))
 _oc_loaded   = any(k in st.session_state for k in ("oc_NIFTY", "oc_BANKNIFTY", "oc_FINNIFTY", "oc_MIDCPNIFTY", "oc_SENSEX", "oc_BANKEX"))
+_em_count    = len(st.session_state.get("em_summary",    pd.DataFrame()))
 
 def _sb_row(icon: str, label: str, count: int) -> str:
     badge = f'<span class="sb-badge">{count}</span>' if count > 0 else ""
@@ -284,6 +289,7 @@ with st.sidebar:
 <div class="sb-sec">TOOLS</div>
 {_sb_row("🔗", "Option Chain", 1 if _oc_loaded else 0)}
 {_sb_row("🎯", "F&O Scanner", _fo_count)}
+{_sb_row("🚀", "Sensex Expiry Moves", _em_count)}
 <div class="sb-div"></div>
 <div class="sb-live"><span class="sb-dot"></span>NSE feed LIVE</div>
 """, unsafe_allow_html=True)
@@ -421,7 +427,7 @@ st.markdown(
 st.divider()
 
 # ── Tabs ──────────────────────────────────────────────────────────────────────
-tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
+tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8 = st.tabs([
     "📰 News + Breakout",
     "🔁 20 MA Retracement",
     "📈 EMA Crossover",
@@ -429,6 +435,7 @@ tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
     "🔗 Option Chain Insights",
     "📊 Fundamentals",
     "🎯 F&O Scanner",
+    "🚀 Sensex Expiry Moves",
 ])
 
 # ── TAB 1 ─────────────────────────────────────────────────────────────────────
@@ -1355,3 +1362,228 @@ with tab7:
             )
         else:
             st.info("Click **🔍 Scan** to analyse all F&O stocks. Takes 2–3 minutes.")
+
+
+# ── TAB 8 — Sensex Expiry Moves ───────────────────────────────────────────────
+with tab8:
+    _em_kite_key   = st.session_state.get("kite_api_key",      _get_secret("KITE_API_KEY", ""))
+    _em_kite_token = st.session_state.get("kite_access_token", _get_secret("KITE_ACCESS_TOKEN", ""))
+    _em_kite_live  = bool(_em_kite_key and _em_kite_token)
+
+    st.markdown("#### 🚀 Sensex Weekly Expiry — Option Moves (2:15 PM → 3:15 PM)")
+    st.markdown(
+        '<small style="color:#8b949e;">'
+        "Analyses the last 5 Sensex expiry Fridays · Finds options that moved ≥500% in the final hour "
+        "· Index data via yfinance (^BSESN) · Option prices are <b>estimated</b> using an expiry-day model "
+        "(intrinsic value + decaying time premium) · Kite credentials unlock actual option candle data "
+        "for any expiry still in the BFO master"
+        "</small>",
+        unsafe_allow_html=True,
+    )
+
+    with st.container(border=True):
+        emc1, emc2, emc3 = st.columns([2, 2, 2])
+        em_weeks   = emc1.slider("Expiry weeks to scan", 1, 5, 5, key="em_weeks")
+        em_thresh  = emc2.slider("Min % move threshold", 200, 2000, 500, step=100, key="em_thresh")
+        run_em_btn = emc3.button(
+            "🔍 Run Expiry Analysis", type="primary",
+            use_container_width=True, key="run_em",
+        )
+        if not _em_kite_live:
+            emc1.caption("💡 Zerodha Kite optional — index data uses yfinance")
+        else:
+            emc1.caption("⚡ Kite connected — will also try actual BFO option candles")
+
+    _em_fridays = get_sensex_expiry_fridays(5)
+    _em_friday_strs = "  ·  ".join(d.strftime("%d %b") for d in _em_fridays)
+    st.caption(f"📅 Scanning expiry dates: {_em_friday_strs}")
+
+    if run_em_btn:
+        _em_prog = st.progress(0, text="Starting Sensex expiry analysis…")
+        try:
+            _em_summary, _em_weekly, _em_actual = run_sensex_option_moves_scan(
+                n_weeks=em_weeks,
+                pct_threshold=float(em_thresh),
+                api_key=_em_kite_key,
+                access_token=_em_kite_token,
+                progress_cb=lambda p, m: _em_prog.progress(p, text=m),
+            )
+            st.session_state["em_summary"] = _em_summary
+            st.session_state["em_weekly"]  = _em_weekly
+            st.session_state["em_actual"]  = _em_actual
+            st.session_state["em_thresh"]  = em_thresh
+        except Exception as _eme:
+            st.error(f"Scan failed: {_eme}")
+        _em_prog.empty()
+
+    if "em_summary" in st.session_state:
+        em_sum_df: pd.DataFrame = st.session_state["em_summary"]
+        em_weekly_data          = st.session_state.get("em_weekly", [])
+        em_actual_df: pd.DataFrame = st.session_state.get("em_actual", pd.DataFrame())
+        em_thresh_used          = st.session_state.get("em_thresh", 500)
+
+        # ── Summary table ─────────────────────────────────────────────────────
+        st.markdown("##### 📊 Sensex Movement — 2:15 PM to 3:15 PM on Each Expiry")
+
+        def _em_dir_style(val: str) -> str:
+            if "▲" in str(val): return "color:#00d4aa;font-weight:700"
+            if "▼" in str(val): return "color:#f85149;font-weight:700"
+            return ""
+
+        def _em_move_style(val: str) -> str:
+            try:
+                v = float(str(val).replace("%", "").replace("+", ""))
+                if v > 0: return "color:#00d4aa;font-weight:600"
+                if v < 0: return "color:#f85149;font-weight:600"
+            except Exception:
+                pass
+            return ""
+
+        styled_sum = (em_sum_df.style
+                      .map(_em_dir_style, subset=["Direction"])
+                      .map(_em_move_style, subset=["Pts Move", "% Move"]))
+        st.dataframe(styled_sum, use_container_width=True, hide_index=True)
+
+        st.divider()
+
+        # ── Per-date detail ───────────────────────────────────────────────────
+        st.markdown(f"##### 🎯 Estimated Rocket Options (≥{em_thresh_used}% move) — Per Expiry")
+        st.markdown(
+            '<small style="color:#6e7681;">Option prices at 2:15 PM are <i>estimated</i> '
+            "using an expiry-day model (intrinsic value + decaying time premium). "
+            "The move % reflects what an option buyer holding from 2:15 PM to 3:15 PM would have seen. "
+            "Actual prices depend on IV, supply/demand, and exact Sensex level at 2:15 PM.</small>",
+            unsafe_allow_html=True,
+        )
+
+        for wk in em_weekly_data:
+            if "error" in wk and "spot_open" not in wk:
+                with st.expander(f"📅 {wk['date'].strftime('%d %b %Y (%A)')} — ⚠️ No data", expanded=False):
+                    st.warning(wk.get("error", "Data unavailable"))
+                continue
+
+            date_label  = wk["date"].strftime("%d %b %Y (%A)")
+            pts_move    = wk.get("pts_move", 0)
+            pct_move    = wk.get("pct_move", 0)
+            rocket_df: pd.DataFrame = wk.get("rocket_df", pd.DataFrame())
+            move_arrow  = "▲" if pts_move > 0 else "▼"
+            move_color  = "#00d4aa" if pts_move > 0 else "#f85149"
+
+            expander_label = (
+                f"📅 {date_label}  |  "
+                f"Sensex {wk['spot_open']:,.2f} → {wk['spot_close']:,.2f}  "
+                f"({move_arrow} {abs(pts_move):,.2f} pts / {abs(pct_move):.3f}%)  |  "
+                f"{'🚀 ' + str(len(rocket_df)) + ' rocket option(s)' if not rocket_df.empty else 'No 500%+ options'}"
+            )
+
+            with st.expander(expander_label, expanded=(not rocket_df.empty)):
+                ic1, ic2, ic3, ic4, ic5 = st.columns(5)
+                ic1.metric("Sensex @ 2:15", f"{wk['spot_open']:,.2f}")
+                ic2.metric("Sensex @ 3:15", f"{wk['spot_close']:,.2f}",
+                           f"{'+' if pts_move >= 0 else ''}{pts_move:,.2f} pts",
+                           delta_color="normal" if pts_move >= 0 else "inverse")
+                ic3.metric("High in window", f"{wk['spot_high']:,.2f}")
+                ic4.metric("Low in window",  f"{wk['spot_low']:,.2f}")
+                ic5.metric("ATM at 2:15",    f"{wk['atm']:,}")
+
+                if rocket_df.empty:
+                    st.info(
+                        f"No estimated option moves ≥{em_thresh_used}% for this expiry. "
+                        f"Sensex only moved {abs(pts_move):.0f} pts — not enough to generate "
+                        "large OTM option moves in this window."
+                    )
+                else:
+                    st.markdown(
+                        f'<span style="color:{move_color};font-weight:700;font-size:1.1rem;">'
+                        f"{move_arrow} {'RALLY' if pts_move > 0 else 'SELL-OFF'}: "
+                        f"+{abs(pts_move):,.0f} pts ({abs(pct_move):.3f}%) in final hour"
+                        "</span>",
+                        unsafe_allow_html=True,
+                    )
+                    st.markdown(
+                        f"**{len(rocket_df)} option(s)** estimated to move ≥{em_thresh_used}% "
+                        f"buying from 2:15 PM to 3:15 PM:"
+                    )
+
+                    def _em_type_style(val: str) -> str:
+                        return ("color:#f85149;font-weight:700" if val == "CE"
+                                else "color:#00d4aa;font-weight:700")
+
+                    def _em_pct_style(val) -> str:
+                        try:
+                            v = float(val)
+                            if v >= 1000: return "color:#00d4aa;font-weight:800;font-size:1.05rem"
+                            if v >= 500:  return "color:#58d68d;font-weight:700"
+                        except Exception:
+                            pass
+                        return ""
+
+                    styled_rockets = (
+                        rocket_df.style
+                        .map(_em_type_style, subset=["Type"])
+                        .map(_em_pct_style, subset=["Est. % Move"])
+                        .format({
+                            "Strike":          "{:,}",
+                            "Est. @ 2:15 PM":  "₹{:.2f}",
+                            "Est. @ 3:15 PM":  "₹{:.2f}",
+                            "Est. % Move":     "{:,.1f}%",
+                        })
+                    )
+                    st.dataframe(styled_rockets, use_container_width=True, hide_index=True)
+
+                    csv_rkt = rocket_df.to_csv(index=False).encode("utf-8")
+                    st.download_button(
+                        f"⬇️ Export {date_label} CSV",
+                        csv_rkt,
+                        f"sensex_rockets_{wk['date'].strftime('%Y%m%d')}.csv",
+                        "text/csv",
+                        key=f"dl_rkt_{wk['date']}",
+                    )
+
+        # ── Actual Kite data (if any) ─────────────────────────────────────────
+        if not em_actual_df.empty:
+            st.divider()
+            st.markdown("##### ⚡ Actual Option Data from Kite BFO (live candles)")
+            st.success(
+                f"Found **{len(em_actual_df)} option(s)** with ≥{em_thresh_used}% "
+                "actual price move from Kite BFO instruments master."
+            )
+
+            def _act_type_style(val: str) -> str:
+                return "color:#f85149;font-weight:700" if val == "CE" else "color:#00d4aa;font-weight:700"
+
+            styled_actual = (
+                em_actual_df.style
+                .map(_act_type_style, subset=["Type"])
+                .format({
+                    "Strike":      "{:,}",
+                    "Open @ 2:15": "₹{:.2f}",
+                    "Peak":        "₹{:.2f}",
+                    "% Move":      "{:,.1f}%",
+                    "Volume":      "{:,}",
+                })
+            )
+            st.dataframe(styled_actual, use_container_width=True, hide_index=True)
+            csv_act = em_actual_df.to_csv(index=False).encode("utf-8")
+            st.download_button("⬇️ Export Actual Data CSV", csv_act,
+                               "sensex_actual_movers.csv", "text/csv", key="dl_em_actual")
+
+        elif _em_kite_live and "em_summary" in st.session_state:
+            st.divider()
+            st.caption(
+                "ℹ️ No actual option data found in Kite BFO master for past expiry dates — "
+                "expired options are removed from the instruments master within 1–2 days. "
+                "The estimated moves above are based on Sensex index candles."
+            )
+
+    else:
+        st.info(
+            "🔎 Click **Run Expiry Analysis** to scan the last 5 Sensex expiry Fridays.\n\n"
+            "**What this shows:**\n"
+            "- Sensex index movement between 2:15 PM and 3:15 PM on each expiry Friday\n"
+            "- Which CE/PE options (estimated) would have moved ≥500% in that window\n"
+            "- The 'rocket' options are typically near-OTM strikes that go deep ITM "
+            "during a sharp final-hour move\n\n"
+            "⚡ *Zerodha Kite credentials are optional but unlock actual BFO option candle data "
+            "for any expiry still in the instruments master.*"
+        )
