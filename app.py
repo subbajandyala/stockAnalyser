@@ -19,6 +19,7 @@ from screener.sensex_option_moves import (
     run_sensex_option_moves_scan,
     get_sensex_expiry_fridays,
     run_preexpiry_analysis,
+    analyze_expiry_day_patterns,
 )
 
 
@@ -1481,6 +1482,204 @@ with tab8:
                 "⚠️ Exit price = intrinsic value at Max Pain. Actual exit depends on where "
                 "Sensex closes at expiry — this is a probability-based estimate, not a guarantee."
             )
+
+    st.divider()
+
+    # ── PATTERN ANALYSIS (9:15 AM → 3:30 PM) ─────────────────────────────────
+    st.markdown("##### 📈 Expiry Day Pattern Analysis — 9:15 AM to 3:30 PM (Last 4 Weeks)")
+    st.markdown(
+        '<small style="color:#8b949e;">'
+        "Full-day 5-min Sensex candles for last 4 expiry Fridays · "
+        "Finds recurring intraday patterns: when does the big move happen? "
+        "Which session dominates? Does the final hour reverse or continue the trend?"
+        "</small>",
+        unsafe_allow_html=True,
+    )
+
+    _pat_col1, _pat_col2 = st.columns([5, 1])
+    _run_pat = _pat_col2.button("📊 Analyse Patterns", type="primary",
+                                use_container_width=True, key="run_pattern")
+    if _run_pat:
+        with st.spinner("Fetching 4 expiry Fridays of intraday data…"):
+            try:
+                _pat = analyze_expiry_day_patterns(
+                    n_weeks=4,
+                    api_key=_em_kite_key,
+                    access_token=_em_kite_token,
+                )
+                st.session_state["expiry_patterns"] = _pat
+            except Exception as _pe:
+                st.error(f"Pattern analysis failed: {_pe}")
+
+    if "expiry_patterns" in st.session_state:
+        _pat = st.session_state["expiry_patterns"]
+        _days       = _pat.get("days", [])
+        _pattern_df = _pat.get("pattern_df", pd.DataFrame())
+        _slot_df    = _pat.get("slot_df",    pd.DataFrame())
+        _session_df = _pat.get("session_df", pd.DataFrame())
+
+        if not _days:
+            st.warning("No intraday data found for the last 4 expiry Fridays.")
+        else:
+            # ── 1. Day summary table ──────────────────────────────────────────
+            st.markdown("**Day-level summary**")
+
+            def _pat_dir_style(val):
+                if "▲" in str(val): return "color:#00d4aa;font-weight:700"
+                if "▼" in str(val): return "color:#f85149;font-weight:700"
+                return ""
+
+            def _pat_move_style(val):
+                try:
+                    v = float(str(val).replace("%","").replace("+",""))
+                    return ("color:#00d4aa;font-weight:600" if v > 0
+                            else "color:#f85149;font-weight:600" if v < 0 else "")
+                except Exception:
+                    return ""
+
+            _pat_show_cols = ["Date","Open","Close","Day Move (pts)","Day Move %",
+                              "Day Direction","Day Range (pts)","High set at",
+                              "Low set at","Final Hr Range","Final Hr % of Day"]
+            _pat_show = [c for c in _pat_show_cols if c in _pattern_df.columns]
+            _pat_styled = (_pattern_df[_pat_show].style
+                           .map(_pat_dir_style, subset=["Day Direction"])
+                           .map(_pat_move_style, subset=["Day Move %"])
+                           .format({"Day Move %": "{:+.3f}%",
+                                    "Final Hr % of Day": "{:.1f}%"}))
+            st.dataframe(_pat_styled, use_container_width=True, hide_index=True)
+
+            # ── 2. Normalised overlay chart ───────────────────────────────────
+            st.markdown("**Normalised intraday chart — all 4 expiry Fridays (open = 0%)**")
+            _colors = ["#00d4aa", "#f85149", "#f0b429", "#82aaff"]
+            _fig_norm = go.Figure()
+            for _i, _d in enumerate(_days):
+                _norm_s = _d["norm"]
+                _ts     = [t.strftime("%H:%M") for t in _norm_s.index]
+                _fig_norm.add_trace(go.Scatter(
+                    x=_ts, y=_norm_s.values,
+                    name=_d["label"],
+                    line=dict(color=_colors[_i % len(_colors)], width=2),
+                    mode="lines",
+                ))
+            _fig_norm.add_hline(y=0, line_dash="dash", line_color="#4a5568", line_width=1)
+            # Shade final hour
+            _fig_norm.add_vrect(x0="14:15", x1="15:30",
+                                fillcolor="rgba(0,212,170,0.06)",
+                                layer="below", line_width=0,
+                                annotation_text="Final Hour",
+                                annotation_position="top left",
+                                annotation_font=dict(color="#00d4aa", size=11))
+            _fig_norm.update_layout(
+                template="plotly_dark", plot_bgcolor="#0a0e1a",
+                paper_bgcolor="#0a0e1a", height=380,
+                margin=dict(t=20, b=50, l=10, r=10),
+                xaxis=dict(tickfont=dict(color="#8b949e", size=9),
+                           showgrid=False, tickangle=-45,
+                           tickvals=["09:15","10:15","11:15","12:15",
+                                     "13:15","14:15","15:15","15:30"]),
+                yaxis=dict(tickfont=dict(color="#8b949e"),
+                           gridcolor="#1a2035", title="Move from Open (%)",
+                           title_font=dict(color="#8b949e")),
+                legend=dict(orientation="h", y=1.05, x=0,
+                            font=dict(color="#c9d1d9"),
+                            bgcolor="rgba(0,0,0,0)"),
+            )
+            st.plotly_chart(_fig_norm, use_container_width=True)
+
+            # ── 3. Hourly slot analysis ───────────────────────────────────────
+            if not _slot_df.empty:
+                _pcol1, _pcol2 = st.columns(2)
+
+                with _pcol1:
+                    st.markdown("**Average move % per hour slot (all expiry days)**")
+                    _slot_colors = [
+                        "#00d4aa" if float(v) > 0 else "#f85149"
+                        for v in _slot_df["Avg Move %"]
+                    ]
+                    _fig_slot = go.Figure(go.Bar(
+                        x=_slot_df["Slot"].tolist(),
+                        y=_slot_df["Avg Move %"].round(3).tolist(),
+                        marker_color=_slot_colors,
+                        text=[f"{v:+.3f}%" for v in _slot_df["Avg Move %"]],
+                        textposition="outside",
+                        textfont=dict(color="#c9d1d9", size=10),
+                    ))
+                    _fig_slot.update_layout(
+                        template="plotly_dark", plot_bgcolor="#0a0e1a",
+                        paper_bgcolor="#0a0e1a", height=300,
+                        margin=dict(t=10, b=60, l=10, r=10),
+                        xaxis=dict(tickfont=dict(color="#8b949e", size=9),
+                                   showgrid=False, tickangle=-30),
+                        yaxis=dict(tickfont=dict(color="#8b949e"),
+                                   gridcolor="#1a2035"),
+                    )
+                    st.plotly_chart(_fig_slot, use_container_width=True)
+
+                with _pcol2:
+                    st.markdown("**Average range % per hour (volatility by slot)**")
+                    _fig_rng = go.Figure(go.Bar(
+                        x=_slot_df["Slot"].tolist(),
+                        y=_slot_df["Avg Range %"].round(3).tolist(),
+                        marker_color="#f0b429",
+                        text=[f"{v:.3f}%" for v in _slot_df["Avg Range %"]],
+                        textposition="outside",
+                        textfont=dict(color="#c9d1d9", size=10),
+                    ))
+                    _fig_rng.update_layout(
+                        template="plotly_dark", plot_bgcolor="#0a0e1a",
+                        paper_bgcolor="#0a0e1a", height=300,
+                        margin=dict(t=10, b=60, l=10, r=10),
+                        xaxis=dict(tickfont=dict(color="#8b949e", size=9),
+                                   showgrid=False, tickangle=-30),
+                        yaxis=dict(tickfont=dict(color="#8b949e"),
+                                   gridcolor="#1a2035"),
+                    )
+                    st.plotly_chart(_fig_rng, use_container_width=True)
+
+                # Slot table with up/down count
+                _slot_show = _slot_df.copy()
+                _slot_show["Avg Move %"]  = _slot_show["Avg Move %"].round(3)
+                _slot_show["Avg Range %"] = _slot_show["Avg Range %"].round(3)
+                st.dataframe(_slot_show, use_container_width=True, hide_index=True)
+
+            # ── 4. Key pattern observations ───────────────────────────────────
+            if not _pattern_df.empty:
+                st.divider()
+                st.markdown("**🔍 Pattern Observations**")
+
+                _n        = len(_pattern_df)
+                _bull     = (_pattern_df["Day Direction"].str.contains("▲")).sum()
+                _bear     = _n - _bull
+                _fin_avg  = _pattern_df["Final Hr % of Day"].mean()
+                _fin_max  = _pattern_df["Final Hr % of Day"].max()
+                _high_pm  = (_pattern_df["High set at"] >= "14:00").sum()
+                _low_pm   = (_pattern_df["Low set at"]  >= "14:00").sum()
+
+                _obs_cols = st.columns(4)
+                _obs_cols[0].metric("Bullish days",  f"{_bull}/{_n}",
+                                    "▲ bias" if _bull > _bear else "▼ bias")
+                _obs_cols[1].metric("Bearish days",  f"{_bear}/{_n}")
+                _obs_cols[2].metric("Avg final-hour % of day range",
+                                    f"{_fin_avg:.1f}%", f"max {_fin_max:.1f}%")
+                _obs_cols[3].metric("Day High/Low set after 2PM",
+                                    f"{max(_high_pm, _low_pm)}/{_n} days")
+
+                # Natural language observations
+                _obs = []
+                if _fin_avg > 30:
+                    _obs.append(f"🔥 **Final hour dominates** — on average **{_fin_avg:.0f}%** of the day's range is made in the 2:15–3:30 PM session.")
+                if _bull >= 3:
+                    _obs.append(f"📈 **Bullish bias on expiry** — {_bull} out of {_n} recent expiry Fridays closed higher than they opened.")
+                elif _bear >= 3:
+                    _obs.append(f"📉 **Bearish bias on expiry** — {_bear} out of {_n} recent expiry Fridays closed lower than they opened.")
+                if _high_pm >= 2 or _low_pm >= 2:
+                    _obs.append(f"⏰ **Extremes set late** — day's high or low was set after 2 PM on {max(_high_pm,_low_pm)}/{_n} days, confirming the final-hour dominance.")
+                if not _slot_df.empty:
+                    _max_vol_slot = _slot_df.loc[_slot_df["Avg Range %"].idxmax(), "Slot"]
+                    _obs.append(f"⚡ **Most volatile slot**: {_max_vol_slot} has the highest average range across all 4 expiry days.")
+
+                for _o in _obs:
+                    st.markdown(f"- {_o}")
 
     st.divider()
 

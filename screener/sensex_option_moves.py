@@ -568,3 +568,176 @@ def run_preexpiry_analysis(api_key: str, access_token: str) -> dict:
         "chain_df":    chain_df,
         "rockets_df":  rockets_df,
     }
+
+
+# ── Expiry day intraday pattern analysis ──────────────────────────────────────
+
+_SESSIONS = [
+    ("Open Auction",   "09:15", "09:30"),
+    ("Morning",        "09:30", "11:30"),
+    ("Midday",         "11:30", "13:30"),
+    ("Pre-close",      "13:30", "14:15"),
+    ("Final Hour",     "14:15", "15:30"),
+]
+
+_SLOTS = [
+    ("09:15", "10:15"),
+    ("10:15", "11:15"),
+    ("11:15", "12:15"),
+    ("12:15", "13:15"),
+    ("13:15", "14:15"),
+    ("14:15", "15:15"),
+    ("15:15", "15:30"),
+]
+
+
+def analyze_expiry_day_patterns(n_weeks: int = 4,
+                                 api_key: str = "",
+                                 access_token: str = "") -> dict:
+    """
+    Fetch full-day 5-min Sensex candles for the last n expiry Fridays
+    and extract intraday behaviour patterns.
+
+    Returns
+    -------
+    days          : list[dict]  — per-day raw candles + key stats
+    session_df    : pd.DataFrame — session-level breakdown (all days)
+    slot_df       : pd.DataFrame — hourly avg move + direction across days
+    pattern_df    : pd.DataFrame — one row per day, key pattern fields
+    """
+    fridays = get_sensex_expiry_fridays(n_weeks)
+    days         = []
+    session_rows = []
+    slot_rows    = []
+    pattern_rows = []
+
+    for date in fridays:
+        df, source = fetch_sensex_candles(date, api_key, access_token)
+        if df.empty:
+            continue
+
+        full_day = df.between_time("09:15", "15:30")
+        if full_day.empty or len(full_day) < 5:
+            continue
+
+        open_price  = float(full_day["open"].iloc[0])
+        close_price = float(full_day["close"].iloc[-1])
+        day_high    = float(full_day["high"].max())
+        day_low     = float(full_day["low"].min())
+        day_range   = day_high - day_low
+        day_move    = close_price - open_price
+        day_pct     = day_move / open_price * 100
+        day_label   = date.strftime("%d %b")
+
+        # Normalised series (open = 0%)
+        norm = ((full_day["close"] - open_price) / open_price * 100).round(3)
+
+        # When was the day's high/low set?
+        high_time = full_day["high"].idxmax().strftime("%H:%M")
+        low_time  = full_day["low"].idxmin().strftime("%H:%M")
+
+        # Session breakdown
+        for s_name, s_start, s_end in _SESSIONS:
+            seg = full_day.between_time(s_start, s_end)
+            if seg.empty:
+                continue
+            s_open  = float(seg["open"].iloc[0])
+            s_close = float(seg["close"].iloc[-1])
+            s_high  = float(seg["high"].max())
+            s_low   = float(seg["low"].min())
+            s_move  = s_close - s_open
+            s_range = s_high - s_low
+            session_rows.append({
+                "Date":      day_label,
+                "Session":   s_name,
+                "Open":      round(s_open, 2),
+                "Close":     round(s_close, 2),
+                "Move (pts)": round(s_move, 2),
+                "Move %":    round(s_move / s_open * 100, 3),
+                "Range (pts)": round(s_range, 2),
+                "Range %":   round(s_range / s_open * 100, 3),
+                "Direction": "▲" if s_move > 0 else "▼",
+            })
+
+        # Hourly slot stats
+        for slot_start, slot_end in _SLOTS:
+            seg = full_day.between_time(slot_start, slot_end)
+            if seg.empty:
+                continue
+            s_open  = float(seg["open"].iloc[0])
+            s_close = float(seg["close"].iloc[-1])
+            s_range = float(seg["high"].max()) - float(seg["low"].min())
+            slot_rows.append({
+                "Date":      day_label,
+                "Slot":      f"{slot_start}–{slot_end}",
+                "Move %":    round((s_close - s_open) / s_open * 100, 3),
+                "Range %":   round(s_range / s_open * 100, 3),
+                "Direction": "▲" if s_close > s_open else "▼",
+            })
+
+        # Final-hour contribution to total range
+        final = full_day.between_time("14:15", "15:30")
+        final_range = (float(final["high"].max()) - float(final["low"].min())) if not final.empty else 0
+        final_pct_of_range = (final_range / day_range * 100) if day_range else 0
+
+        pattern_rows.append({
+            "Date":              day_label,
+            "Open":              round(open_price, 2),
+            "Close":             round(close_price, 2),
+            "Day Move (pts)":    round(day_move, 2),
+            "Day Move %":        round(day_pct, 3),
+            "Day Direction":     "▲ Bullish" if day_move > 0 else "▼ Bearish",
+            "Day High":          round(day_high, 2),
+            "Day Low":           round(day_low, 2),
+            "Day Range (pts)":   round(day_range, 2),
+            "High set at":       high_time,
+            "Low set at":        low_time,
+            "Final Hr Range":    round(final_range, 2),
+            "Final Hr % of Day": round(final_pct_of_range, 1),
+            "Source":            source,
+        })
+
+        days.append({
+            "date":    date,
+            "label":   day_label,
+            "df":      full_day,
+            "norm":    norm,
+            "open":    open_price,
+            "close":   close_price,
+            "high":    day_high,
+            "low":     day_low,
+            "move":    day_move,
+            "pct":     day_pct,
+        })
+
+        time.sleep(0.5)
+
+    session_df = pd.DataFrame(session_rows)
+    pattern_df = pd.DataFrame(pattern_rows)
+
+    # Average slot move across all days
+    if slot_rows:
+        slot_raw = pd.DataFrame(slot_rows)
+        slot_df  = (slot_raw.groupby("Slot", sort=False)
+                    .agg(
+                        Avg_Move=("Move %",  "mean"),
+                        Avg_Range=("Range %", "mean"),
+                        Up_Days=("Direction", lambda x: (x == "▲").sum()),
+                        Down_Days=("Direction", lambda x: (x == "▼").sum()),
+                    )
+                    .reset_index()
+                    .rename(columns={
+                        "Avg_Move":  "Avg Move %",
+                        "Avg_Range": "Avg Range %",
+                        "Up_Days":   "▲ Up days",
+                        "Down_Days": "▼ Down days",
+                    }))
+    else:
+        slot_df = pd.DataFrame()
+
+    return {
+        "days":        days,
+        "session_df":  session_df,
+        "slot_df":     slot_df,
+        "pattern_df":  pattern_df,
+    }
