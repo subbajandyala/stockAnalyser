@@ -22,6 +22,25 @@ from screener.sensex_option_moves import (
     analyze_expiry_day_patterns,
     run_oi_buildup_scanner,
 )
+from screener.trending_oi import (
+    fetch_instruments  as toi_fetch_instruments,
+    get_expiries       as toi_get_expiries,
+    get_spot           as toi_get_spot,
+    get_atm_strikes    as toi_get_atm_strikes,
+    fetch_snapshot     as toi_fetch_snapshot,
+    compute_row        as toi_compute_row,
+    check_alerts       as toi_check_alerts,
+    send_telegram      as toi_send_telegram,
+    ind_fmt            as toi_ind_fmt,
+    SYMBOLS            as TOI_SYMBOLS,
+    INTERVALS          as TOI_INTERVALS,
+)
+
+try:
+    from streamlit_autorefresh import st_autorefresh as _st_autorefresh
+    _HAS_AUTOREFRESH = True
+except ImportError:
+    _HAS_AUTOREFRESH = False
 
 
 st.set_page_config(page_title="MarketPulse", layout="wide", page_icon="🐂")
@@ -264,6 +283,7 @@ _fund_count  = len(st.session_state.get("fund_results",  pd.DataFrame()))
 _fo_count    = len(st.session_state.get("fo_results",    pd.DataFrame()))
 _oc_loaded   = any(k in st.session_state for k in ("oc_NIFTY", "oc_BANKNIFTY", "oc_FINNIFTY", "oc_MIDCPNIFTY", "oc_SENSEX", "oc_BANKEX"))
 _em_count    = len(st.session_state.get("em_summary",    pd.DataFrame()))
+_toi_count   = len(st.session_state.get("toi_rows",     []))
 
 def _sb_row(icon: str, label: str, count: int) -> str:
     badge = f'<span class="sb-badge">{count}</span>' if count > 0 else ""
@@ -293,6 +313,7 @@ with st.sidebar:
 {_sb_row("🔗", "Option Chain", 1 if _oc_loaded else 0)}
 {_sb_row("🎯", "F&O Scanner", _fo_count)}
 {_sb_row("🚀", "Sensex Expiry Moves", _em_count)}
+{_sb_row("📡", "Trending OI", _toi_count)}
 <div class="sb-div"></div>
 <div class="sb-live"><span class="sb-dot"></span>NSE feed LIVE</div>
 """, unsafe_allow_html=True)
@@ -430,7 +451,7 @@ st.markdown(
 st.divider()
 
 # ── Tabs ──────────────────────────────────────────────────────────────────────
-tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8 = st.tabs([
+tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9 = st.tabs([
     "📰 News + Breakout",
     "🔁 20 MA Retracement",
     "📈 EMA Crossover",
@@ -439,6 +460,7 @@ tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8 = st.tabs([
     "📊 Fundamentals",
     "🎯 F&O Scanner",
     "🚀 Sensex Expiry Moves",
+    "📡 Trending OI",
 ])
 
 # ── TAB 1 ─────────────────────────────────────────────────────────────────────
@@ -2132,3 +2154,359 @@ with tab8:
             "⚡ *Zerodha Kite credentials are optional but unlock actual BFO option candle data "
             "for any expiry still in the instruments master.*"
         )
+
+
+# ── TAB 9 — Trending OI ───────────────────────────────────────────────────────
+
+def _build_toi_html(rows: list) -> str:
+    """Build NiftyTrader-style Trending OI HTML table from computed row list."""
+    if not rows:
+        return "<p style='color:#6e7681;padding:12px;'>No data yet — click Snapshot Now or enable Auto-refresh.</p>"
+
+    hdr = (
+        '<div class="oc-wrap"><table class="oc-tbl">'
+        '<thead><tr>'
+        '<th class="c">TIME</th>'
+        '<th class="r">SPOT</th>'
+        '<th class="r">CALLS CHNG OI</th>'
+        '<th class="r">PUTS CHNG OI</th>'
+        '<th class="r">DIFF. IN OI</th>'
+        '<th class="c">DIFF %</th>'
+        '<th class="c">DIR OF CHNG</th>'
+        '<th class="r">CHNG IN DIR</th>'
+        '<th class="c">PCR</th>'
+        '<th class="c">COI PCR</th>'
+        '<th class="c">VOL PCR</th>'
+        '<th class="c">SENTIMENT</th>'
+        '</tr></thead><tbody>'
+    )
+
+    rows_html = []
+    for i, r in enumerate(reversed(rows)):
+        is_latest = i == 0
+        row_bg = ' style="background:rgba(0,212,170,0.06);"' if is_latest else ""
+
+        dir_val = r["dir_chng"]
+        dir_cls = "cup" if dir_val == "▲" else ("cdn" if dir_val == "▼" else "")
+
+        sent     = r["sentiment"]
+        sent_col = "#00d4aa" if sent == "Bullish" else ("#f85149" if sent == "Bearish" else "#e6b800")
+
+        cid     = r["chng_in_dir"]
+        cid_sgn = "+" if cid > 0 else ""
+        cid_cls = "cup" if cid > 0 else ("cdn" if cid < 0 else "")
+
+        dp      = r["diff_pct"]
+        dp_cls  = "cup" if dp > 0 else ("cdn" if dp < 0 else "")
+
+        rows_html.append(
+            f'<tr{row_bg}>'
+            f'<td class="c">{r["time"]}</td>'
+            f'<td class="r">{r["spot"]:,.2f}</td>'
+            f'<td class="r">{toi_ind_fmt(r["ce_chng_oi"])}</td>'
+            f'<td class="r">{toi_ind_fmt(r["pe_chng_oi"])}</td>'
+            f'<td class="r">{toi_ind_fmt(r["diff_oi"])}</td>'
+            f'<td class="c"><span class="{dp_cls}">{dp:+.1f}%</span></td>'
+            f'<td class="c"><span class="{dir_cls}" style="font-size:1rem;">{dir_val}</span></td>'
+            f'<td class="r"><span class="{cid_cls}">{cid_sgn}{toi_ind_fmt(cid)}</span></td>'
+            f'<td class="c">{r["pcr"]:.3f}</td>'
+            f'<td class="c">{r["coi_pcr"]:.3f}</td>'
+            f'<td class="c">{r["vol_pcr"]:.3f}</td>'
+            f'<td class="c"><span style="color:{sent_col};font-weight:700;">{sent}</span></td>'
+            f'</tr>'
+        )
+
+    return hdr + "".join(rows_html) + "</tbody></table></div>"
+
+
+with tab9:
+    _toi_kite_key   = st.session_state.get("kite_api_key",      _get_secret("KITE_API_KEY", ""))
+    _toi_kite_token = st.session_state.get("kite_access_token", _get_secret("KITE_ACCESS_TOKEN", ""))
+    _toi_kite_live  = bool(_toi_kite_key and _toi_kite_token)
+
+    st.markdown("#### 📡 Trending OI Data")
+    st.markdown(
+        '<small style="color:#8b949e;">'
+        "Replicates NiftyTrader's Trending OI table · "
+        "Polls Zerodha Kite every 1 / 3 / 5 / 15 min · "
+        "OI change computed from day-start baseline snapshot · "
+        "Works for NIFTY, BANKNIFTY, SENSEX, BANKEX, FINNIFTY, MIDCPNIFTY"
+        "</small>",
+        unsafe_allow_html=True,
+    )
+
+    if not _toi_kite_live:
+        st.warning("⚡ Connect Zerodha Kite in the sidebar to enable Trending OI tracking.")
+    else:
+        # ── Controls ──────────────────────────────────────────────────────────
+        tc1, tc2, tc3, tc4, tc5 = st.columns([2, 2, 2, 2, 2])
+
+        _toi_symbol = tc1.selectbox("Index", TOI_SYMBOLS, key="toi_symbol",
+                                    index=TOI_SYMBOLS.index("SENSEX"))
+        _toi_iname  = tc2.selectbox("Interval", list(TOI_INTERVALS.keys()),
+                                    key="toi_interval_name",
+                                    index=list(TOI_INTERVALS.keys()).index("5 Min"))
+        _toi_n      = tc3.slider("Strikes ±ATM", 3, 10, 5, key="toi_n_strikes")
+
+        _toi_instr_key = f"toi_instr_{_toi_symbol}"
+        _toi_instr_df  = st.session_state.get(_toi_instr_key)
+        _toi_expiries  = toi_get_expiries(_toi_instr_df) if _toi_instr_df is not None else []
+        _toi_exp_opts  = _toi_expiries if _toi_expiries else ["— initialize first —"]
+        _toi_expiry    = tc4.selectbox("Expiry", _toi_exp_opts, key="toi_expiry",
+                                       disabled=not _toi_expiries)
+
+        _toi_init_btn = tc5.button("🚀 Initialize", type="primary",
+                                   use_container_width=True, key="toi_init")
+
+        ar1, ar2, ar3 = st.columns([2, 3, 5])
+        _toi_auto      = ar1.checkbox("Auto-refresh", value=False, key="toi_auto")
+        _toi_threshold = int(ar2.number_input(
+            "OI Alert Threshold", min_value=10_000, max_value=10_000_000,
+            value=500_000, step=50_000, key="toi_threshold",
+        ))
+
+        _toi_isec = TOI_INTERVALS[_toi_iname]
+
+        # ── Initialize handler ────────────────────────────────────────────────
+        if _toi_init_btn:
+            with st.spinner(f"Downloading {_toi_symbol} instruments…"):
+                try:
+                    _instr = toi_fetch_instruments(_toi_kite_key, _toi_kite_token, _toi_symbol)
+                    st.session_state[_toi_instr_key] = _instr
+                    _toi_instr_df = _instr
+                    _toi_expiries = toi_get_expiries(_instr)
+                except Exception as _ie:
+                    st.error(f"Instruments download failed: {_ie}")
+                    st.stop()
+
+            if not _toi_expiries:
+                st.error("No upcoming expiries found for this symbol.")
+                st.stop()
+
+            _use_exp = _toi_expiry if (_toi_expiry and _toi_expiry in _toi_expiries) else _toi_expiries[0]
+
+            with st.spinner("Taking day-start baseline snapshot…"):
+                try:
+                    _spot0   = toi_get_spot(_toi_kite_key, _toi_kite_token, _toi_symbol)
+                    _strikes = toi_get_atm_strikes(_spot0, _toi_symbol, _toi_n)
+                    _ds      = toi_fetch_snapshot(
+                        _toi_kite_key, _toi_kite_token,
+                        _toi_symbol, _use_exp, _strikes, _toi_instr_df,
+                    )
+                    st.session_state["toi_day_start"]    = _ds
+                    st.session_state["toi_strikes"]      = _strikes
+                    st.session_state["toi_init_symbol"]  = _toi_symbol
+                    st.session_state["toi_init_expiry"]  = _use_exp
+                    st.session_state["toi_rows"]         = []
+                    st.session_state["toi_initialized"]  = True
+                    st.session_state["toi_last_fetch"]   = 0.0
+                    st.success(
+                        f"✅ Initialized for {_toi_symbol} · {len(_strikes)} strikes · "
+                        f"Expiry {_use_exp} · Spot baseline {_spot0:,.2f}. "
+                        f"Enable Auto-refresh or click Snapshot Now to record the first row."
+                    )
+                    st.rerun()
+                except Exception as _se:
+                    st.error(f"Baseline snapshot failed: {_se}")
+                    st.stop()
+
+        # ── Live tracking section ─────────────────────────────────────────────
+        _initialized = st.session_state.get("toi_initialized", False)
+        _init_sym    = st.session_state.get("toi_init_symbol", "")
+
+        if _initialized and _init_sym == _toi_symbol:
+            # ── Auto-refresh widget ───────────────────────────────────────────
+            if _toi_auto:
+                if _HAS_AUTOREFRESH:
+                    _st_autorefresh(interval=_toi_isec * 1000, key="toi_ar")
+                else:
+                    st.warning(
+                        "Auto-refresh package not installed. "
+                        "Add `streamlit-autorefresh>=1.0.0` to requirements.txt and redeploy."
+                    )
+
+            # ── Auto-snapshot on timer ────────────────────────────────────────
+            _last_fetch = st.session_state.get("toi_last_fetch", 0.0)
+            if _toi_auto and (time.time() - _last_fetch >= _toi_isec * 0.9):
+                try:
+                    _snap = toi_fetch_snapshot(
+                        _toi_kite_key, _toi_kite_token,
+                        _toi_symbol,
+                        st.session_state["toi_init_expiry"],
+                        st.session_state["toi_strikes"],
+                        st.session_state.get(_toi_instr_key),
+                    )
+                    _prev = st.session_state.get("toi_rows", [])
+                    _row  = toi_compute_row(_snap, st.session_state["toi_day_start"],
+                                            _prev[-1] if _prev else None)
+                    _prev.append(_row)
+                    st.session_state["toi_rows"]       = _prev
+                    st.session_state["toi_last_fetch"] = time.time()
+                    _alerts = toi_check_alerts(_row, _toi_threshold)
+                    for _a in _alerts:
+                        st.toast(_a, icon="🚨")
+                    _tg_tok  = st.session_state.get("toi_tg_token", "")
+                    _tg_chat = st.session_state.get("toi_tg_chat", "")
+                    if _alerts and _tg_tok and _tg_chat:
+                        toi_send_telegram("\n".join(_alerts), _tg_tok, _tg_chat)
+                except Exception as _ae:
+                    st.warning(f"Auto-snapshot failed: {_ae}")
+
+            # ── Manual snapshot button ────────────────────────────────────────
+            _snap_c1, _snap_c2, _snap_c3 = st.columns([5, 2, 2])
+            _snap_c2.caption(
+                f"Last: {int(time.time() - st.session_state.get('toi_last_fetch', time.time()))}s ago"
+                if st.session_state.get("toi_last_fetch", 0) > 0 else "No snapshot yet"
+            )
+            _manual_snap = _snap_c3.button("📸 Snapshot Now", key="toi_manual",
+                                           use_container_width=True)
+            if _manual_snap:
+                with st.spinner("Taking snapshot…"):
+                    try:
+                        _snap = toi_fetch_snapshot(
+                            _toi_kite_key, _toi_kite_token,
+                            _toi_symbol,
+                            st.session_state["toi_init_expiry"],
+                            st.session_state["toi_strikes"],
+                            st.session_state.get(_toi_instr_key),
+                        )
+                        _prev = st.session_state.get("toi_rows", [])
+                        _row  = toi_compute_row(_snap, st.session_state["toi_day_start"],
+                                                _prev[-1] if _prev else None)
+                        _prev.append(_row)
+                        st.session_state["toi_rows"]       = _prev
+                        st.session_state["toi_last_fetch"] = time.time()
+                        _alerts = toi_check_alerts(_row, _toi_threshold)
+                        for _a in _alerts:
+                            st.toast(_a, icon="🚨")
+                        _tg_tok  = st.session_state.get("toi_tg_token", "")
+                        _tg_chat = st.session_state.get("toi_tg_chat", "")
+                        if _alerts and _tg_tok and _tg_chat:
+                            toi_send_telegram("\n".join(_alerts), _tg_tok, _tg_chat)
+                        st.rerun()
+                    except Exception as _me:
+                        st.error(f"Snapshot failed: {_me}")
+
+            # ── Selected strikes chips ────────────────────────────────────────
+            _stks = st.session_state.get("toi_strikes", [])
+            _exp  = st.session_state.get("toi_init_expiry", "")
+            st.markdown(
+                f'<div style="margin:6px 0 12px;">'
+                f'<span style="color:#6e7681;font-size:0.74rem;font-weight:700;'
+                f'text-transform:uppercase;letter-spacing:1px;">Tracking Strikes ({_exp}): </span>'
+                + "".join(
+                    f'<span style="background:rgba(0,212,170,0.12);'
+                    f'border:1px solid rgba(0,212,170,0.25);color:#00d4aa;'
+                    f'font-size:0.71rem;font-weight:700;padding:2px 8px;'
+                    f'border-radius:12px;margin:0 3px;">{s:,}</span>'
+                    for s in sorted(_stks)
+                )
+                + "</div>",
+                unsafe_allow_html=True,
+            )
+
+            # ── Trending OI table ─────────────────────────────────────────────
+            _toi_rows = st.session_state.get("toi_rows", [])
+
+            if _toi_rows:
+                _lat = _toi_rows[-1]
+                _sent_col = (
+                    "#00d4aa" if _lat["sentiment"] == "Bullish"
+                    else "#f85149" if _lat["sentiment"] == "Bearish"
+                    else "#e6b800"
+                )
+                _lm1, _lm2, _lm3, _lm4, _lm5, _lm6 = st.columns(6)
+                _lm1.metric("Spot",         f"{_lat['spot']:,.2f}", f"@ {_lat['time']}")
+                _lm2.metric("PCR",          f"{_lat['pcr']:.3f}")
+                _lm3.metric("COI PCR",      f"{_lat['coi_pcr']:.3f}")
+                _lm4.metric("VOL PCR",      f"{_lat['vol_pcr']:.3f}")
+                _lm5.metric("Diff OI",      toi_ind_fmt(_lat["diff_oi"]))
+                _lm6.metric("Rows",         len(_toi_rows))
+
+                st.markdown(
+                    f'<div style="background:rgba({("0,212,170" if _lat["sentiment"]=="Bullish" else "248,81,73" if _lat["sentiment"]=="Bearish" else "230,184,0")},0.08);'
+                    f'border:1.5px solid {_sent_col};border-radius:10px;'
+                    f'padding:12px 20px;margin:10px 0 14px;">'
+                    f'<span style="font-size:1.3rem;font-weight:800;color:{_sent_col};">'
+                    f'{_lat["sentiment"].upper()} &nbsp;·&nbsp; '
+                    f'<span style="font-size:0.9rem;font-weight:600;color:#c9d1d9;">'
+                    f'Dir: <span style="color:{"#00d4aa" if _lat["dir_chng"]=="▲" else "#f85149" if _lat["dir_chng"]=="▼" else "#8b949e"};">{_lat["dir_chng"]}</span>'
+                    f' &nbsp; Diff OI: {toi_ind_fmt(_lat["diff_oi"])} '
+                    f'({_lat["diff_pct"]:+.1f}%)'
+                    f'</span></span></div>',
+                    unsafe_allow_html=True,
+                )
+
+                st.markdown(
+                    '<span style="color:#6e7681;font-size:0.72rem;">Most recent row on top · '
+                    'Highlighted row = latest snapshot</span>',
+                    unsafe_allow_html=True,
+                )
+                st.markdown(_build_toi_html(_toi_rows), unsafe_allow_html=True)
+
+                _toi_dl = pd.DataFrame([
+                    {k: v for k, v in r.items() if k not in ("per_strike", "strike_deltas")}
+                    for r in _toi_rows
+                ])
+                st.download_button(
+                    "⬇️ Export CSV",
+                    _toi_dl.to_csv(index=False).encode("utf-8"),
+                    f"trending_oi_{_toi_symbol}.csv",
+                    "text/csv",
+                    key="dl_toi",
+                )
+
+                # ── Reset button ──────────────────────────────────────────────
+                if st.button("🔄 Reset / New Day-Start Baseline", key="toi_reset"):
+                    for _k in ("toi_initialized", "toi_day_start", "toi_rows",
+                               "toi_last_fetch", "toi_init_symbol", "toi_init_expiry",
+                               "toi_strikes"):
+                        st.session_state.pop(_k, None)
+                    st.rerun()
+
+            else:
+                st.info(
+                    "📸 Click **Snapshot Now** above or enable **Auto-refresh** to collect the first data row.\n\n"
+                    f"Tracking **{len(_stks)} strikes** around ATM for **{_toi_symbol}** expiry **{_exp}**."
+                )
+
+            # ── Telegram / alert settings ─────────────────────────────────────
+            with st.expander("🔔 Telegram Alert Settings", expanded=False):
+                st.text_input("Bot Token", type="password", key="toi_tg_token",
+                              placeholder="From @BotFather — leave blank to disable")
+                st.text_input("Chat ID", key="toi_tg_chat",
+                              placeholder="e.g. -1001234567890 (from @userinfobot)")
+                st.caption(
+                    "Alerts fire when: Aggregate Diff OI spike ≥ threshold, "
+                    "or any per-strike CE/PE delta ≥ threshold."
+                )
+                if st.button("🧪 Test Telegram", key="toi_tg_test"):
+                    _ok = toi_send_telegram(
+                        "✅ MarketPulse Trending OI — Telegram alerts are working!",
+                        st.session_state.get("toi_tg_token", ""),
+                        st.session_state.get("toi_tg_chat", ""),
+                    )
+                    st.success("Message sent!") if _ok else st.error(
+                        "Failed — check Bot Token and Chat ID."
+                    )
+
+        elif _initialized and _init_sym != _toi_symbol:
+            st.info(
+                f"⚠️ Currently tracking **{_init_sym}**. "
+                f"Click **Initialize** to switch to **{_toi_symbol}** "
+                "(this resets the day-start baseline)."
+            )
+        else:
+            st.info(
+                "📡 **How to start Trending OI tracking:**\n\n"
+                "1. Select the **index** and **interval** above\n"
+                "2. Click **🚀 Initialize** — downloads instruments and takes a day-start baseline snapshot\n"
+                "3. Enable **Auto-refresh** to poll automatically every interval, "
+                "or click **📸 Snapshot Now** for a manual snapshot\n"
+                "4. The table grows with each snapshot, showing cumulative OI change from day-start\n\n"
+                "**Column guide:**  "
+                "CALLS CHNG OI / PUTS CHNG OI = cumulative CE/PE OI change since day-start  ·  "
+                "DIFF. IN OI = PUTS − CALLS change  ·  "
+                "COI PCR = PUTS CHNG OI / CALLS CHNG OI  ·  "
+                "SENTIMENT = Bullish if COI PCR ≥ 1.2 or rising, Bearish if ≤ 0.8 or falling"
+            )
