@@ -2245,7 +2245,7 @@ with tab9:
                                     index=TOI_SYMBOLS.index("SENSEX"))
         _toi_iname  = tc2.selectbox("Interval", list(TOI_INTERVALS.keys()),
                                     key="toi_interval_name",
-                                    index=list(TOI_INTERVALS.keys()).index("5 Min"))
+                                    index=list(TOI_INTERVALS.keys()).index("1 Min"))
         _toi_n      = tc3.slider("Strikes ±ATM", 3, 10, 5, key="toi_n_strikes")
 
         _toi_instr_key = f"toi_instr_{_toi_symbol}"
