@@ -28,6 +28,7 @@ import pandas as pd
 import requests
 
 _KITE_BASE = "https://api.kite.trade"
+_IST = datetime.timezone(datetime.timedelta(hours=5, minutes=30))
 
 SYMBOLS = ["NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX", "BANKEX"]
 
@@ -196,7 +197,7 @@ def fetch_snapshot(
         per_strike[strike][f"{itype}_vol"] = int(q.get("volume", 0))
 
     return {
-        "ts":           datetime.datetime.now(),
+        "ts":           datetime.datetime.now(_IST),
         "spot":         spot,
         "per_strike":   per_strike,
         "total_ce_oi":  sum(v["ce_oi"]  for v in per_strike.values()),
