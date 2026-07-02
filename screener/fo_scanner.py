@@ -119,24 +119,40 @@ def run_fo_scan(
             "Kite token may be expired — regenerate it and try again."
         )
 
-    # 2. Options only, nearest expiry
+    # 2. Options only, nearest expiry that has STOCK (non-index) options
     opts = instr[instr["instrument_type"].isin(["CE", "PE"])].copy()
-    opts["expiry_dt"] = pd.to_datetime(opts["expiry"])
-    nearest = opts["expiry_dt"].min()
-    opts = opts[opts["expiry_dt"] == nearest].copy()
-    expiry_str = nearest.strftime("%d-%b-%Y").upper()
+    opts["expiry_dt"] = pd.to_datetime(opts["expiry"], errors="coerce")
+    opts = opts.dropna(subset=["expiry_dt"])      # remove any unparseable dates
 
-    # 3. Filter to stock options only (exclude indices)
-    stock_names = sorted(set(opts["name"].unique()) - _INDEX_NAMES)
-    if len(stock_names) > max_stocks:
-        stock_names = stock_names[:max_stocks]
-    opts = opts[opts["name"].isin(stock_names)]
-
-    if not stock_names:
+    if opts.empty:
         raise RuntimeError(
-            "No F&O stock options found in NFO instruments. "
-            "Market may be closed or the instrument list is empty."
+            f"NFO instruments downloaded ({len(instr)} rows) but no CE/PE options found. "
+            "Check that the Kite token is valid and the market is open."
         )
+
+    # Walk expiries from nearest to find one that has actual stock options
+    nearest = None
+    stock_names = []
+    for expiry_dt in sorted(opts["expiry_dt"].unique()):
+        _slice = opts[opts["expiry_dt"] == expiry_dt]
+        _names = sorted(set(_slice["name"].unique()) - _INDEX_NAMES)
+        if _names:
+            nearest = expiry_dt
+            stock_names = _names
+            break
+
+    if nearest is None or not stock_names:
+        all_expiries = sorted(opts["expiry_dt"].unique())
+        all_names    = sorted(set(opts["name"].unique()) - _INDEX_NAMES)
+        raise RuntimeError(
+            f"No F&O stock options found across {len(all_expiries)} expiry date(s) in NFO instruments. "
+            f"Expiries seen: {[str(e.date()) for e in all_expiries[:5]]}. "
+            f"Non-index names found: {len(all_names)}. "
+            "Market may be closed, or it is a holiday — stock F&O options are absent from the instrument list."
+        )
+
+    expiry_str = nearest.strftime("%d-%b-%Y").upper()
+    opts = opts[(opts["expiry_dt"] == nearest) & (opts["name"].isin(stock_names))].copy()
 
     _cb(0.08, f"Found {len(stock_names)} F&O stocks — fetching spot prices…")
 
