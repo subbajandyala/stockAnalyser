@@ -35,6 +35,7 @@ from screener.trending_oi import (
     SYMBOLS            as TOI_SYMBOLS,
     INTERVALS          as TOI_INTERVALS,
 )
+from screener.smart_alerts import run_smart_signal
 
 try:
     from streamlit_autorefresh import st_autorefresh as _st_autorefresh
@@ -284,6 +285,7 @@ _fo_count    = len(st.session_state.get("fo_results",    pd.DataFrame()))
 _oc_loaded   = any(k in st.session_state for k in ("oc_NIFTY", "oc_BANKNIFTY", "oc_FINNIFTY", "oc_MIDCPNIFTY", "oc_SENSEX", "oc_BANKEX"))
 _em_count    = len(st.session_state.get("em_summary",    pd.DataFrame()))
 _toi_count   = len(st.session_state.get("toi_rows",     []))
+_sa_count    = len(st.session_state.get("sa_history",   []))
 
 def _sb_row(icon: str, label: str, count: int) -> str:
     badge = f'<span class="sb-badge">{count}</span>' if count > 0 else ""
@@ -314,6 +316,7 @@ with st.sidebar:
 {_sb_row("🎯", "F&O Scanner", _fo_count)}
 {_sb_row("🚀", "Sensex Expiry Moves", _em_count)}
 {_sb_row("📡", "Trending OI", _toi_count)}
+{_sb_row("💡", "Smart Alerts", _sa_count)}
 <div class="sb-div"></div>
 <div class="sb-live"><span class="sb-dot"></span>NSE feed LIVE</div>
 """, unsafe_allow_html=True)
@@ -451,7 +454,7 @@ st.markdown(
 st.divider()
 
 # ── Tabs ──────────────────────────────────────────────────────────────────────
-tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9 = st.tabs([
+tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10 = st.tabs([
     "📰 News + Breakout",
     "🔁 20 MA Retracement",
     "📈 EMA Crossover",
@@ -461,6 +464,7 @@ tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9 = st.tabs([
     "🎯 F&O Scanner",
     "🚀 Sensex Expiry Moves",
     "📡 Trending OI",
+    "💡 Smart Alerts",
 ])
 
 # ── TAB 1 ─────────────────────────────────────────────────────────────────────
@@ -2547,3 +2551,360 @@ with tab9:
                 "COI PCR = PUTS CHNG OI / CALLS CHNG OI  ·  "
                 "SENTIMENT = Bullish if COI PCR ≥ 1.2 or rising, Bearish if ≤ 0.8 or falling"
             )
+
+
+# ── TAB 10 — Smart Alerts ─────────────────────────────────────────────────────
+with tab10:
+    _sa_kite_key   = st.session_state.get("kite_api_key",      _get_secret("KITE_API_KEY", ""))
+    _sa_kite_token = st.session_state.get("kite_access_token", _get_secret("KITE_ACCESS_TOKEN", ""))
+    _sa_kite_live  = bool(_sa_kite_key and _sa_kite_token)
+
+    st.markdown("#### 💡 Smart Option Buying Signal")
+    st.markdown(
+        '<small style="color:#8b949e;">'
+        "Aggregates live Kite OI · PCR · Max Pain · COI PCR trend · Move Verdict · Vol PCR · OI walls "
+        "→ single BUY CE / BUY PE / WAIT recommendation with strike, entry, SL and target"
+        "</small>",
+        unsafe_allow_html=True,
+    )
+
+    if not _sa_kite_live:
+        st.warning("⚡ Connect Zerodha Kite in the sidebar to enable Smart Alerts.")
+    else:
+        # ── Controls ──────────────────────────────────────────────────────────
+        _sac1, _sac2, _sac3, _sac4 = st.columns([2, 2, 2, 2])
+
+        _sa_symbol = _sac1.selectbox("Index", TOI_SYMBOLS, key="sa_symbol",
+                                     index=TOI_SYMBOLS.index("SENSEX"))
+
+        _sa_instr_key = f"toi_instr_{_sa_symbol}"
+        _sa_instr_df  = st.session_state.get(_sa_instr_key)
+        _sa_expiries  = toi_get_expiries(_sa_instr_df) if _sa_instr_df is not None else []
+        _sa_exp_opts  = _sa_expiries if _sa_expiries else ["— load instruments first —"]
+
+        _sa_expiry = _sac2.selectbox("Expiry", _sa_exp_opts, key="sa_expiry",
+                                     disabled=not _sa_expiries)
+
+        _sa_auto_int = _sac3.selectbox("Auto-scan interval",
+                                       ["1 Min", "3 Min", "5 Min"],
+                                       key="sa_interval", index=0)
+        _sa_isec = {"1 Min": 60, "3 Min": 180, "5 Min": 300}[_sa_auto_int]
+
+        _sa_load_btn = _sac4.button("📥 Load Instruments", type="primary",
+                                    use_container_width=True, key="sa_load")
+
+        if _sa_load_btn:
+            with st.spinner(f"Downloading {_sa_symbol} instruments…"):
+                try:
+                    _instr = toi_fetch_instruments(_sa_kite_key, _sa_kite_token, _sa_symbol)
+                    st.session_state[_sa_instr_key] = _instr
+                    _sa_instr_df = _instr
+                    _sa_expiries = toi_get_expiries(_instr)
+                    st.success(
+                        f"✅ {_sa_symbol} instruments loaded · {len(_sa_expiries)} expiries found"
+                    )
+                    st.rerun()
+                except Exception as _ile:
+                    st.error(f"Instruments download failed: {_ile}")
+
+        if _sa_instr_df is None:
+            st.info(
+                "📥 Click **Load Instruments** to download option instruments from Kite.\n\n"
+                "💡 **Tip:** If you already initialized Trending OI for the same symbol, "
+                "instruments are shared — just select an expiry and analyze."
+            )
+        elif _sa_expiries and _sa_expiry and _sa_expiry != "— load instruments first —":
+            # ── Auto-refresh ──────────────────────────────────────────────────
+            if _HAS_AUTOREFRESH:
+                _st_autorefresh(interval=_sa_isec * 1000, key="sa_ar")
+
+            # ── Helper: run signal ────────────────────────────────────────────
+            def _run_sa_signal():
+                _toi_rows = st.session_state.get("toi_rows", [])
+                if st.session_state.get("toi_init_symbol") != _sa_symbol:
+                    _toi_rows = []
+                return run_smart_signal(
+                    _sa_kite_key, _sa_kite_token,
+                    _sa_symbol, _sa_expiry,
+                    _sa_instr_df,
+                    _toi_rows if _toi_rows else None,
+                )
+
+            def _record_signal(sig: dict):
+                _sa_hist = st.session_state.get("sa_history", [])
+                _sa_hist.append({
+                    "ts":     sig["ts"].strftime("%H:%M"),
+                    "signal": sig.get("signal", "WAIT"),
+                    "score":  sig.get("score", 0),
+                    "spot":   sig.get("spot", 0),
+                    "strike": sig.get("strike"),
+                    "ltp":    sig.get("ltp"),
+                })
+                st.session_state["sa_history"] = _sa_hist[-30:]
+
+            def _maybe_alert(sig: dict):
+                _sa_signal = sig.get("signal", "WAIT")
+                if _sa_signal == "WAIT":
+                    return
+                _sa_strike = sig.get("strike", "—")
+                _sa_ltp    = sig.get("ltp") or 0
+                _amsg = (
+                    f"💡 *{_sa_signal}* · {_sa_symbol} "
+                    f"{_sa_strike} @ ₹{_sa_ltp:.1f} "
+                    f"· Score {sig['score']:+d} "
+                    f"· Spot {sig['spot']:,.2f}"
+                )
+                st.toast(_amsg, icon="💡")
+                _tg_tok  = st.session_state.get("toi_tg_token", "")
+                _tg_chat = st.session_state.get("toi_tg_chat", "")
+                if _tg_tok and _tg_chat:
+                    toi_send_telegram(_amsg, _tg_tok, _tg_chat)
+
+            # ── Auto-analyze on timer ─────────────────────────────────────────
+            _sa_last = st.session_state.get("sa_last_fetch", 0.0)
+            if time.time() - _sa_last >= _sa_isec * 0.9:
+                try:
+                    _sig = _run_sa_signal()
+                    st.session_state["sa_last_signal"] = _sig
+                    st.session_state["sa_last_fetch"]  = time.time()
+                    _record_signal(_sig)
+                    _maybe_alert(_sig)
+                except Exception as _sae:
+                    st.warning(f"Signal analysis failed: {_sae}")
+
+            # ── Manual analyze button ─────────────────────────────────────────
+            _sa_bc1, _sa_bc2, _sa_bc3 = st.columns([4, 2, 2])
+            _sa_elapsed = int(time.time() - st.session_state.get("sa_last_fetch", time.time()))
+            _sa_bc2.caption(
+                f"Last: {_sa_elapsed}s ago"
+                if st.session_state.get("sa_last_fetch", 0) > 0 else "Not yet analyzed"
+            )
+            _sa_manual = _sa_bc3.button("🔍 Analyze Now", type="primary",
+                                        use_container_width=True, key="sa_manual")
+            if _sa_manual:
+                with st.spinner("Fetching live OI data…"):
+                    try:
+                        _sig = _run_sa_signal()
+                        st.session_state["sa_last_signal"] = _sig
+                        st.session_state["sa_last_fetch"]  = time.time()
+                        _record_signal(_sig)
+                        _maybe_alert(_sig)
+                        st.rerun()
+                    except Exception as _sme:
+                        st.error(f"Analysis failed: {_sme}")
+
+            # ── Display latest signal ─────────────────────────────────────────
+            _sa_sig = st.session_state.get("sa_last_signal")
+            if _sa_sig:
+                if "error" in _sa_sig:
+                    st.error(f"Signal error: {_sa_sig['error']}")
+                else:
+                    _signal = _sa_sig.get("signal", "WAIT")
+                    _score  = _sa_sig.get("score", 0)
+                    _conf   = _sa_sig.get("confidence", "LOW")
+
+                    if "STRONG BUY CE" in _signal:
+                        _sig_color, _sig_bg = "#00d4aa", "rgba(0,212,170,0.12)"
+                    elif "BUY CE" in _signal:
+                        _sig_color, _sig_bg = "#58d68d", "rgba(88,214,141,0.10)"
+                    elif "STRONG BUY PE" in _signal:
+                        _sig_color, _sig_bg = "#f85149", "rgba(248,81,73,0.14)"
+                    elif "BUY PE" in _signal:
+                        _sig_color, _sig_bg = "#ff7043", "rgba(255,112,67,0.10)"
+                    else:
+                        _sig_color, _sig_bg = "#e6b800", "rgba(230,184,0,0.08)"
+
+                    _sa_strike = _sa_sig.get("strike")
+                    _sa_ltp    = _sa_sig.get("ltp") or 0
+                    _sa_sl     = _sa_sig.get("sl")
+                    _sa_tgt    = _sa_sig.get("target")
+                    _sa_rr     = _sa_sig.get("rr")
+                    _sa_opt    = _sa_sig.get("option_type", "")
+
+                    _sub_line = (
+                        f"<br><span style='font-size:1.05rem;font-weight:700;color:#e6edf3;'>"
+                        f"Buy {_sa_symbol} "
+                        f"<span style='color:{_sig_color};'>{_sa_strike} {_sa_opt}</span>"
+                        f"</span>"
+                        if _signal != "WAIT" and _sa_strike else ""
+                    )
+
+                    # ── Signal card ───────────────────────────────────────────
+                    st.markdown(
+                        f"""<div style="background:{_sig_bg};border:2px solid {_sig_color};
+                        border-radius:12px;padding:20px 28px;margin:14px 0 6px;text-align:center;">
+                        <div style="font-size:2rem;font-weight:900;color:{_sig_color};
+                        letter-spacing:1.5px;">{_signal}</div>
+                        <div style="color:#8b949e;font-size:0.82rem;margin-top:6px;">
+                            Confidence: <strong style="color:{_sig_color};">{_conf}</strong>
+                            &nbsp;·&nbsp; Score: <strong style="color:{_sig_color};">{_score:+d}</strong>
+                            &nbsp;·&nbsp; Spot: <strong style="color:#e6edf3;">{_sa_sig['spot']:,.2f}</strong>
+                            &nbsp;·&nbsp; Max Pain: <strong style="color:#e6edf3;">{_sa_sig.get('max_pain','—')}</strong>
+                        </div>{_sub_line}</div>""",
+                        unsafe_allow_html=True,
+                    )
+
+                    # ── Trade setup card ──────────────────────────────────────
+                    if _signal != "WAIT" and _sa_ltp and _sa_ltp > 0.5:
+                        _tcolor = "#00d4aa" if "CE" in _signal else "#f85149"
+                        ltp_s   = f"₹{_sa_ltp:.1f}"
+                        sl_s    = f"₹{_sa_sl:.1f}"  if _sa_sl  else "—"
+                        tgt_s   = f"₹{_sa_tgt:.1f}" if _sa_tgt else "—"
+                        rr_s    = f"1 : {_sa_rr}"    if _sa_rr  else "—"
+                        st.markdown(
+                            f"""<div style="background:rgba(255,255,255,0.03);border:1px solid #1a2035;
+                            border-radius:10px;padding:14px 22px;margin:4px 0 14px;">
+                            <div style="font-size:0.68rem;color:#6e7681;text-transform:uppercase;
+                            letter-spacing:1.2px;margin-bottom:10px;font-weight:700;">Trade Setup</div>
+                            <div style="display:flex;gap:36px;flex-wrap:wrap;align-items:flex-start;">
+                            <div><div style="font-size:0.68rem;color:#6e7681;text-transform:uppercase;
+                            letter-spacing:1px;">Strike</div>
+                            <div style="font-size:1.2rem;font-weight:800;color:{_tcolor};">{_sa_strike}</div></div>
+                            <div><div style="font-size:0.68rem;color:#6e7681;text-transform:uppercase;
+                            letter-spacing:1px;">Entry (LTP)</div>
+                            <div style="font-size:1.2rem;font-weight:800;color:#e6edf3;">{ltp_s}</div></div>
+                            <div><div style="font-size:0.68rem;color:#6e7681;text-transform:uppercase;
+                            letter-spacing:1px;">Stop Loss</div>
+                            <div style="font-size:1.2rem;font-weight:800;color:#f85149;">{sl_s}</div></div>
+                            <div><div style="font-size:0.68rem;color:#6e7681;text-transform:uppercase;
+                            letter-spacing:1px;">Target</div>
+                            <div style="font-size:1.2rem;font-weight:800;color:#00d4aa;">{tgt_s}</div></div>
+                            <div><div style="font-size:0.68rem;color:#6e7681;text-transform:uppercase;
+                            letter-spacing:1px;">Risk:Reward</div>
+                            <div style="font-size:1.2rem;font-weight:800;color:#e6edf3;">{rr_s}</div></div>
+                            <div><div style="font-size:0.68rem;color:#6e7681;text-transform:uppercase;
+                            letter-spacing:1px;">Expiry</div>
+                            <div style="font-size:1.1rem;font-weight:700;color:#adbac7;">{_sa_expiry}</div></div>
+                            </div>
+                            <div style="font-size:0.72rem;color:#6e7681;margin-top:10px;">
+                            ⚠️ For educational purposes only — not financial advice. Always use proper position sizing.
+                            </div></div>""",
+                            unsafe_allow_html=True,
+                        )
+
+                    # ── OI summary metrics ────────────────────────────────────
+                    _sm1, _sm2, _sm3, _sm4, _sm5, _sm6 = st.columns(6)
+                    _sm1.metric("Spot",     f"{_sa_sig['spot']:,.2f}")
+                    _sm2.metric("ATM",      f"{_sa_sig.get('atm', '—')}")
+                    _sm3.metric("PCR",      f"{_sa_sig.get('pcr', 0):.3f}")
+                    _sm4.metric("Max Pain", f"{_sa_sig.get('max_pain', '—')}")
+                    _sm5.metric("CE Wall",  f"{_sa_sig.get('max_ce_wall', '—')}")
+                    _sm6.metric("PE Wall",  f"{_sa_sig.get('max_pe_wall', '—')}")
+
+                    # ── Factor breakdown ──────────────────────────────────────
+                    st.markdown("**Factor Breakdown**")
+                    _factors = _sa_sig.get("factors", [])
+                    if _factors:
+                        _dir_badge = {
+                            "BULL": (
+                                '<span style="background:rgba(0,212,170,0.15);border:1px solid #00d4aa;'
+                                'color:#00d4aa;font-size:0.68rem;font-weight:800;padding:2px 8px;'
+                                'border-radius:8px;">▲ BULL</span>'
+                            ),
+                            "BEAR": (
+                                '<span style="background:rgba(248,81,73,0.12);border:1px solid rgba(248,81,73,0.5);'
+                                'color:#f85149;font-size:0.68rem;font-weight:700;padding:2px 8px;'
+                                'border-radius:8px;">▼ BEAR</span>'
+                            ),
+                            "NEUTRAL": (
+                                '<span style="background:rgba(230,184,0,0.1);border:1px solid rgba(230,184,0,0.3);'
+                                'color:#e6b800;font-size:0.68rem;font-weight:600;padding:2px 8px;'
+                                'border-radius:8px;">— NEUTRAL</span>'
+                            ),
+                        }
+
+                        def _pts_badge(p: int) -> str:
+                            if p > 0:
+                                return f'<span style="color:#00d4aa;font-weight:800;">{p:+d}</span>'
+                            if p < 0:
+                                return f'<span style="color:#f85149;font-weight:800;">{p:+d}</span>'
+                            return '<span style="color:#6e7681;">0</span>'
+
+                        _factor_rows = "".join(
+                            f'<tr>'
+                            f'<td style="padding:6px 12px;color:#c9d1d9;white-space:nowrap;">{f["name"]}</td>'
+                            f'<td style="padding:6px 12px;color:#e6edf3;font-weight:600;">{f["value"]}</td>'
+                            f'<td style="padding:6px 12px;">{_dir_badge.get(f["direction"], f["direction"])}</td>'
+                            f'<td style="padding:6px 12px;text-align:right;">{_pts_badge(f["points"])}</td>'
+                            f'<td style="padding:6px 12px;color:#8b949e;font-size:0.82rem;">{f["reason"]}</td>'
+                            f'</tr>'
+                            for f in _factors
+                        )
+                        st.markdown(
+                            f"""<table style="width:100%;border-collapse:collapse;background:#0d1117;
+                            border-radius:8px;overflow:hidden;margin-bottom:12px;">
+                            <thead><tr style="background:#161b22;">
+                            <th style="padding:8px 12px;color:#00d4aa;text-align:left;">Factor</th>
+                            <th style="padding:8px 12px;color:#00d4aa;text-align:left;">Value</th>
+                            <th style="padding:8px 12px;color:#00d4aa;text-align:left;">Direction</th>
+                            <th style="padding:8px 12px;color:#00d4aa;text-align:right;">Points</th>
+                            <th style="padding:8px 12px;color:#00d4aa;text-align:left;">Interpretation</th>
+                            </tr></thead><tbody>{_factor_rows}</tbody></table>""",
+                            unsafe_allow_html=True,
+                        )
+
+                    # ── Tip: initialize Trending OI for extra signals ──────────
+                    _sa_toi_rows = st.session_state.get("toi_rows", [])
+                    if not _sa_toi_rows or st.session_state.get("toi_init_symbol") != _sa_symbol:
+                        st.info(
+                            f"💡 **Unlock 5 more signals:** Initialize Trending OI (Tab 9) for "
+                            f"**{_sa_symbol}** to add COI PCR, Vol PCR, Move Verdict, "
+                            "Sentiment and Diff OI Trend to the score."
+                        )
+
+            else:
+                st.info(
+                    "🔍 Click **Analyze Now** to get a live option buying signal.\n\n"
+                    "**What this checks:**\n"
+                    "- **PCR** — Put-call ratio (heavy put OI = bullish support)\n"
+                    "- **Max Pain** — Gravitational pull toward max pain strike\n"
+                    "- **OI Walls** — Heaviest CE (resistance) and PE (support) strikes\n"
+                    "- **COI PCR** — Change in OI PCR trend (from Trending OI)\n"
+                    "- **Vol PCR** — Volume put/call ratio\n"
+                    "- **Move Verdict** — GOOD/FAKE OI flow confirmation\n"
+                    "- **Sentiment** — Institutional bias from COI PCR trend\n"
+                    "- **Diff OI Trend** — Put-Call OI divergence direction\n\n"
+                    "**Score guide:** ≥ +6 = STRONG BUY CE · ≥ +4 = BUY CE · "
+                    "≤ −6 = STRONG BUY PE · ≤ −4 = BUY PE · |score| < 4 = WAIT"
+                )
+
+            # ── Signal history ────────────────────────────────────────────────
+            _sa_hist_disp = st.session_state.get("sa_history", [])
+            if len(_sa_hist_disp) > 1:
+                st.divider()
+                st.markdown("**Signal History** (most recent first)")
+                _hist_rows_html = "".join(
+                    f'<tr>'
+                    f'<td style="padding:5px 12px;color:#8b949e;">{h["ts"]}</td>'
+                    f'<td style="padding:5px 12px;font-weight:700;color:'
+                    f'{"#00d4aa" if "CE" in h["signal"] else "#f85149" if "PE" in h["signal"] else "#e6b800"}'
+                    f';">{h["signal"]}</td>'
+                    f'<td style="padding:5px 12px;color:#e6edf3;">{h["spot"]:,.2f}</td>'
+                    f'<td style="padding:5px 12px;font-weight:700;color:'
+                    f'{"#00d4aa" if h["score"] > 0 else "#f85149" if h["score"] < 0 else "#6e7681"}'
+                    f';">{h["score"]:+d}</td>'
+                    f'<td style="padding:5px 12px;color:#c9d1d9;">{h["strike"] if h["strike"] else "—"}</td>'
+                    f'<td style="padding:5px 12px;color:#c9d1d9;">'
+                    f'{"₹" + str(round(h["ltp"], 1)) if h["ltp"] else "—"}</td>'
+                    f'</tr>'
+                    for h in reversed(_sa_hist_disp[-20:])
+                )
+                st.markdown(
+                    f"""<table style="width:100%;border-collapse:collapse;background:#0d1117;
+                    border-radius:8px;overflow:hidden;margin-bottom:12px;">
+                    <thead><tr style="background:#161b22;">
+                    <th style="padding:8px 12px;color:#6e7681;text-align:left;
+                    font-size:0.72rem;text-transform:uppercase;letter-spacing:.6px;">Time</th>
+                    <th style="padding:8px 12px;color:#6e7681;text-align:left;
+                    font-size:0.72rem;text-transform:uppercase;letter-spacing:.6px;">Signal</th>
+                    <th style="padding:8px 12px;color:#6e7681;text-align:left;
+                    font-size:0.72rem;text-transform:uppercase;letter-spacing:.6px;">Spot</th>
+                    <th style="padding:8px 12px;color:#6e7681;text-align:left;
+                    font-size:0.72rem;text-transform:uppercase;letter-spacing:.6px;">Score</th>
+                    <th style="padding:8px 12px;color:#6e7681;text-align:left;
+                    font-size:0.72rem;text-transform:uppercase;letter-spacing:.6px;">Strike</th>
+                    <th style="padding:8px 12px;color:#6e7681;text-align:left;
+                    font-size:0.72rem;text-transform:uppercase;letter-spacing:.6px;">LTP</th>
+                    </tr></thead><tbody>{_hist_rows_html}</tbody></table>""",
+                    unsafe_allow_html=True,
+                )
