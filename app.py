@@ -2178,6 +2178,7 @@ def _build_toi_html(rows: list) -> str:
         '<th class="c">COI PCR</th>'
         '<th class="c">VOL PCR</th>'
         '<th class="c">SENTIMENT</th>'
+        '<th class="c">VERDICT</th>'
         '</tr></thead><tbody>'
     )
 
@@ -2199,6 +2200,24 @@ def _build_toi_html(rows: list) -> str:
         dp      = r["diff_pct"]
         dp_cls  = "cup" if dp > 0 else ("cdn" if dp < 0 else "")
 
+        # Verdict badge
+        verdict = r.get("verdict", "—")
+        reason  = r.get("verdict_reason", "").replace('"', "&quot;")
+        if verdict == "GOOD":
+            vbadge = (
+                f'<span title="{reason}" style="background:rgba(0,212,170,0.18);'
+                f'border:1px solid #00d4aa;color:#00d4aa;font-size:0.7rem;font-weight:800;'
+                f'padding:2px 8px;border-radius:10px;letter-spacing:.5px;cursor:help;">GOOD ✓</span>'
+            )
+        elif verdict == "FAKE":
+            vbadge = (
+                f'<span title="{reason}" style="background:rgba(248,81,73,0.12);'
+                f'border:1px solid rgba(248,81,73,0.5);color:#f85149;font-size:0.7rem;font-weight:700;'
+                f'padding:2px 8px;border-radius:10px;letter-spacing:.5px;cursor:help;">FAKE ✗</span>'
+            )
+        else:
+            vbadge = f'<span style="color:#4a5568;font-size:0.75rem;">—</span>'
+
         rows_html.append(
             f'<tr{row_bg}>'
             f'<td class="c">{r["time"]}</td>'
@@ -2213,6 +2232,7 @@ def _build_toi_html(rows: list) -> str:
             f'<td class="c">{r["coi_pcr"]:.3f}</td>'
             f'<td class="c">{r["vol_pcr"]:.3f}</td>'
             f'<td class="c"><span style="color:{sent_col};font-weight:700;">{sent}</span></td>'
+            f'<td class="c">{vbadge}</td>'
             f'</tr>'
         )
 
@@ -2342,13 +2362,25 @@ with tab9:
                     _prev.append(_row)
                     st.session_state["toi_rows"]       = _prev
                     st.session_state["toi_last_fetch"] = time.time()
-                    _alerts = toi_check_alerts(_row, _toi_threshold)
-                    for _a in _alerts:
-                        st.toast(_a, icon="🚨")
                     _tg_tok  = st.session_state.get("toi_tg_token", "")
                     _tg_chat = st.session_state.get("toi_tg_chat", "")
-                    if _alerts and _tg_tok and _tg_chat:
-                        toi_send_telegram("\n".join(_alerts), _tg_tok, _tg_chat)
+                    # OI spike alerts (threshold-based)
+                    _oi_alerts = toi_check_alerts(_row, _toi_threshold)
+                    for _a in _oi_alerts:
+                        st.toast(_a, icon="🚨")
+                    if _oi_alerts and _tg_tok and _tg_chat:
+                        toi_send_telegram("\n".join(_oi_alerts), _tg_tok, _tg_chat)
+                    # GOOD verdict alert — actionable signal
+                    if _row.get("verdict") == "GOOD":
+                        _vmsg = (
+                            f"✅ *GOOD move* at {_row['time']} — "
+                            f"Spot {_row['spot']:,.2f} · "
+                            f"Diff OI {toi_ind_fmt(_row['diff_oi'])} · "
+                            f"{_row['verdict_reason']}"
+                        )
+                        st.toast(_vmsg, icon="✅")
+                        if _tg_tok and _tg_chat:
+                            toi_send_telegram(_vmsg, _tg_tok, _tg_chat)
                 except Exception as _ae:
                     st.warning(f"Auto-snapshot failed: {_ae}")
 
@@ -2376,13 +2408,25 @@ with tab9:
                         _prev.append(_row)
                         st.session_state["toi_rows"]       = _prev
                         st.session_state["toi_last_fetch"] = time.time()
-                        _alerts = toi_check_alerts(_row, _toi_threshold)
-                        for _a in _alerts:
-                            st.toast(_a, icon="🚨")
                         _tg_tok  = st.session_state.get("toi_tg_token", "")
                         _tg_chat = st.session_state.get("toi_tg_chat", "")
-                        if _alerts and _tg_tok and _tg_chat:
-                            toi_send_telegram("\n".join(_alerts), _tg_tok, _tg_chat)
+                        # OI spike alerts (threshold-based)
+                        _oi_alerts = toi_check_alerts(_row, _toi_threshold)
+                        for _a in _oi_alerts:
+                            st.toast(_a, icon="🚨")
+                        if _oi_alerts and _tg_tok and _tg_chat:
+                            toi_send_telegram("\n".join(_oi_alerts), _tg_tok, _tg_chat)
+                        # GOOD verdict alert — actionable signal
+                        if _row.get("verdict") == "GOOD":
+                            _vmsg = (
+                                f"✅ *GOOD move* at {_row['time']} — "
+                                f"Spot {_row['spot']:,.2f} · "
+                                f"Diff OI {toi_ind_fmt(_row['diff_oi'])} · "
+                                f"{_row['verdict_reason']}"
+                            )
+                            st.toast(_vmsg, icon="✅")
+                            if _tg_tok and _tg_chat:
+                                toi_send_telegram(_vmsg, _tg_tok, _tg_chat)
                         st.rerun()
                     except Exception as _me:
                         st.error(f"Snapshot failed: {_me}")

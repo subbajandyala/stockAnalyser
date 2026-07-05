@@ -207,6 +207,49 @@ def fetch_snapshot(
     }
 
 
+# ── Move Verdict ─────────────────────────────────────────────────────────────
+
+def classify_move(curr_snapshot: dict, prev_row: dict) -> tuple:
+    """
+    Compare curr_snapshot OI against the raw OI stored in prev_row to produce
+    a GOOD / FAKE verdict.
+
+    GOOD  — OI delta direction confirms price delta direction (institutional conviction)
+    FAKE  — OI diverges from price, or both legs are unwinding (short-covering trap)
+
+    Returns (verdict: str, reason: str)
+    """
+    price_delta = curr_snapshot["spot"] - prev_row.get("_raw_spot", curr_snapshot["spot"])
+    call_chg    = curr_snapshot["total_ce_oi"] - prev_row.get("_raw_ce_oi", curr_snapshot["total_ce_oi"])
+    put_chg     = curr_snapshot["total_pe_oi"] - prev_row.get("_raw_pe_oi", curr_snapshot["total_pe_oi"])
+    # diffChg > 0 → puts increasing relative to calls (put writers supporting rally)
+    diff_chg    = put_chg - call_chg
+
+    # Mutual unwind: both OI legs shrinking → short-covering, no new conviction
+    if call_chg < 0 and put_chg < 0:
+        return "FAKE", "Mutual unwind — both legs unwinding (short-covering, low conviction)"
+
+    both_building = call_chg > 0 and put_chg > 0
+
+    if price_delta == 0:
+        if both_building:
+            return "GOOD", "Fresh buildup both legs — range-bound accumulation"
+        return "FAKE", "No price movement to confirm OI flow"
+
+    price_up    = price_delta > 0
+    oi_confirms = (price_up and diff_chg >= 0) or (not price_up and diff_chg <= 0)
+
+    if oi_confirms:
+        reason = (
+            "Fresh buildup both legs — confirmed direction"
+            if both_building
+            else "OI flow confirms price direction"
+        )
+        return "GOOD", reason
+    else:
+        return "FAKE", "OI flow diverges from price — possible trap / stop-hunt"
+
+
 # ── Row computation ───────────────────────────────────────────────────────────
 
 def compute_row(
@@ -265,21 +308,33 @@ def compute_row(
         for s in ps
     }
 
+    # Move Verdict — only meaningful when we have a prior snapshot to diff against
+    if prev_row is not None:
+        verdict, verdict_reason = classify_move(snapshot, prev_row)
+    else:
+        verdict, verdict_reason = "—", "First snapshot — no prior row to compare"
+
     return {
-        "time":          snapshot["ts"].strftime("%H:%M"),
-        "spot":          round(snapshot["spot"], 2),
-        "ce_chng_oi":    ce_chng,
-        "pe_chng_oi":    pe_chng,
-        "diff_oi":       diff_oi,
-        "diff_pct":      diff_pct,
-        "dir_chng":      dir_chng,
-        "chng_in_dir":   chng_in_dir,
-        "pcr":           pcr,
-        "coi_pcr":       coi_pcr,
-        "vol_pcr":       vol_pcr,
-        "sentiment":     sentiment,
-        "per_strike":    ps,
-        "strike_deltas": strike_deltas,
+        "time":           snapshot["ts"].strftime("%H:%M"),
+        "spot":           round(snapshot["spot"], 2),
+        "ce_chng_oi":     ce_chng,
+        "pe_chng_oi":     pe_chng,
+        "diff_oi":        diff_oi,
+        "diff_pct":       diff_pct,
+        "dir_chng":       dir_chng,
+        "chng_in_dir":    chng_in_dir,
+        "pcr":            pcr,
+        "coi_pcr":        coi_pcr,
+        "vol_pcr":        vol_pcr,
+        "sentiment":      sentiment,
+        "verdict":        verdict,
+        "verdict_reason": verdict_reason,
+        "per_strike":     ps,
+        "strike_deltas":  strike_deltas,
+        # Raw snapshot OI stored so the next row's classify_move can diff against them
+        "_raw_ce_oi":     ce_oi,
+        "_raw_pe_oi":     pe_oi,
+        "_raw_spot":      round(snapshot["spot"], 2),
     }
 
 
