@@ -2793,46 +2793,24 @@ with tab10:
 
                 # ── ① SIGNAL BANNER ───────────────────────────────────────────
                 st.markdown(f"""
-<div style="background:{_sbg};border:1.5px solid {_sc};border-radius:14px;
-padding:22px 28px 18px;margin:6px 0 14px;position:relative;overflow:hidden;">
-  <div style="position:absolute;top:0;left:0;right:0;height:3px;
-  background:linear-gradient(90deg,transparent,{_sc},transparent);opacity:.6;"></div>
-
-  <div style="display:flex;align-items:flex-start;justify-content:space-between;
-  flex-wrap:wrap;gap:16px;margin-bottom:18px;">
-
+<div style="background:{_sbg};border:1.5px solid {_sc};border-radius:14px;padding:22px 28px 18px;margin:6px 0 14px;position:relative;overflow:hidden;">
+  <div style="position:absolute;top:0;left:0;right:0;height:3px;background:linear-gradient(90deg,transparent,{_sc},transparent);opacity:.6;"></div>
+  <div style="display:flex;align-items:flex-start;justify-content:space-between;flex-wrap:wrap;gap:16px;margin-bottom:18px;">
     <div>
-      <div style="font-size:0.58rem;font-weight:800;letter-spacing:2px;text-transform:uppercase;
-      color:{_sc};opacity:.75;margin-bottom:5px;">Signal</div>
-      <div style="font-size:2.1rem;font-weight:900;color:{_sc};letter-spacing:1px;
-      line-height:1;">{_signal}</div>
+      <div style="font-size:0.58rem;font-weight:800;letter-spacing:2px;text-transform:uppercase;color:{_sc};opacity:.75;margin-bottom:5px;">Signal</div>
+      <div style="font-size:2.1rem;font-weight:900;color:{_sc};letter-spacing:1px;line-height:1;">{_signal}</div>
       <div style="margin-top:10px;">{_trade_line}</div>
     </div>
-
     <div style="text-align:right;">
-      <div style="font-size:0.58rem;font-weight:800;letter-spacing:2px;text-transform:uppercase;
-      color:#3d4a5c;margin-bottom:5px;">Score</div>
+      <div style="font-size:0.58rem;font-weight:800;letter-spacing:2px;text-transform:uppercase;color:#3d4a5c;margin-bottom:5px;">Score</div>
       <div style="font-size:2.4rem;font-weight:900;color:{_sc};line-height:1;">{_score:+d}</div>
-      <div style="font-size:0.72rem;color:#6e7681;margin-top:6px;">
-        {_conf_icon} {_conf} confidence &nbsp;·&nbsp; {_sa_ts_str}
-      </div>
+      <div style="font-size:0.72rem;color:#6e7681;margin-top:6px;">{_conf_icon} {_conf} confidence &nbsp;·&nbsp; {_sa_ts_str}</div>
     </div>
   </div>
-
   <div>
-    <div style="display:flex;justify-content:space-between;font-size:0.56rem;
-    color:#3d4a5c;font-weight:700;text-transform:uppercase;letter-spacing:.8px;margin-bottom:5px;">
-      <span>Strong PE &minus;12</span><span>Neutral 0</span><span>Strong CE +12</span>
-    </div>
-    <div style="height:7px;background:#1a2035;border-radius:4px;overflow:hidden;">
-      <div style="height:100%;width:100%;background:linear-gradient(90deg,#f85149 0%,#e6b800 50%,#00d4aa 100%);
-      border-radius:4px;"></div>
-    </div>
-    <div style="position:relative;height:10px;">
-      <div style="position:absolute;left:{_gauge_pct:.1f}%;transform:translateX(-50%);
-      top:0;width:3px;height:10px;background:{_sc};border-radius:2px;
-      box-shadow:0 0 6px {_sc};"></div>
-    </div>
+    <div style="display:flex;justify-content:space-between;font-size:0.56rem;color:#3d4a5c;font-weight:700;text-transform:uppercase;letter-spacing:.8px;margin-bottom:5px;"><span>Strong PE -12</span><span>Neutral 0</span><span>Strong CE +12</span></div>
+    <div style="height:7px;background:#1a2035;border-radius:4px;overflow:hidden;"><div style="height:100%;width:100%;background:linear-gradient(90deg,#f85149 0%,#e6b800 50%,#00d4aa 100%);border-radius:4px;"></div></div>
+    <div style="position:relative;height:10px;"><div style="position:absolute;left:{_gauge_pct:.1f}%;transform:translateX(-50%);top:0;width:3px;height:10px;background:{_sc};border-radius:2px;box-shadow:0 0 6px {_sc};"></div></div>
   </div>
 </div>""", unsafe_allow_html=True)
 
