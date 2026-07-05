@@ -2555,44 +2555,93 @@ with tab9:
 
 # ── TAB 10 — Smart Alerts ─────────────────────────────────────────────────────
 with tab10:
+
+    # ── Design tokens (injected once per render) ──────────────────────────────
+    st.markdown("""
+<style>
+.sa-card{background:#0d1220;border:1px solid #1a2035;border-radius:12px;padding:18px 22px;margin-bottom:12px;}
+.sa-sec{font-size:0.58rem;font-weight:800;text-transform:uppercase;letter-spacing:2px;color:#3d4a5c;margin-bottom:10px;}
+.sa-kv-lbl{font-size:0.58rem;font-weight:700;text-transform:uppercase;letter-spacing:1.1px;color:#4a5568;margin-bottom:3px;}
+.sa-kv-val{font-size:1.08rem;font-weight:800;color:#e6edf3;line-height:1.3;}
+.sa-divider{height:1px;background:#1a2035;margin:14px 0;}
+.sa-bbull{background:rgba(0,212,170,0.13);border:1px solid rgba(0,212,170,0.4);color:#00d4aa;
+  font-size:0.62rem;font-weight:800;padding:2px 9px;border-radius:6px;letter-spacing:.5px;white-space:nowrap;}
+.sa-bbear{background:rgba(248,81,73,0.11);border:1px solid rgba(248,81,73,0.4);color:#f85149;
+  font-size:0.62rem;font-weight:700;padding:2px 9px;border-radius:6px;white-space:nowrap;}
+.sa-bneut{background:rgba(230,184,0,0.09);border:1px solid rgba(230,184,0,0.3);color:#e6b800;
+  font-size:0.62rem;font-weight:600;padding:2px 9px;border-radius:6px;white-space:nowrap;}
+.sa-tbl{width:100%;border-collapse:collapse;}
+.sa-tbl th{padding:8px 14px;font-size:0.58rem;font-weight:800;text-transform:uppercase;
+  letter-spacing:1.2px;color:#3d4a5c;text-align:left;background:#0a0e1a;border-bottom:1px solid #1a2035;}
+.sa-tbl th.r{text-align:right;}
+.sa-tbl td{padding:7px 14px;border-bottom:1px solid rgba(26,32,53,0.7);vertical-align:middle;}
+.sa-tbl tr:last-child td{border-bottom:none;}
+.sa-tbl tfoot td{background:#0a0e1a;border-top:2px solid #1a2035;padding:8px 14px;}
+</style>""", unsafe_allow_html=True)
+
     _sa_kite_key   = st.session_state.get("kite_api_key",      _get_secret("KITE_API_KEY", ""))
     _sa_kite_token = st.session_state.get("kite_access_token", _get_secret("KITE_ACCESS_TOKEN", ""))
     _sa_kite_live  = bool(_sa_kite_key and _sa_kite_token)
 
-    st.markdown("#### 💡 Smart Option Buying Signal")
-    st.markdown(
-        '<small style="color:#8b949e;">'
-        "Aggregates live Kite OI · PCR · Max Pain · COI PCR trend · Move Verdict · Vol PCR · OI walls "
-        "→ single BUY CE / BUY PE / WAIT recommendation with strike, entry, SL and target"
-        "</small>",
-        unsafe_allow_html=True,
-    )
+    # ── Page header ───────────────────────────────────────────────────────────
+    st.markdown("""
+<div style="display:flex;align-items:center;gap:12px;margin:2px 0 4px;">
+  <span style="font-size:1.25rem;font-weight:900;color:#fff;letter-spacing:-.5px;">💡 Smart Alerts</span>
+  <span style="font-size:0.62rem;font-weight:700;background:rgba(0,212,170,0.1);border:1px solid
+  rgba(0,212,170,0.25);color:#00d4aa;padding:2px 10px;border-radius:20px;letter-spacing:1.3px;
+  text-transform:uppercase;">OPTION SIGNAL</span>
+</div>
+<div style="font-size:0.78rem;color:#4a5568;margin-bottom:18px;">
+  8 OI factors aggregated live → single BUY CE / BUY PE / WAIT with strike · entry · SL · target
+</div>""", unsafe_allow_html=True)
 
     if not _sa_kite_live:
-        st.warning("⚡ Connect Zerodha Kite in the sidebar to enable Smart Alerts.")
+        st.markdown("""
+<div class="sa-card" style="text-align:center;padding:36px 24px;">
+  <div style="font-size:2rem;margin-bottom:12px;opacity:.35;">🔌</div>
+  <div style="color:#e6edf3;font-size:1rem;font-weight:700;margin-bottom:6px;">Kite not connected</div>
+  <div style="color:#4a5568;font-size:0.82rem;">Enter API Key + Access Token in the sidebar to unlock live signals</div>
+</div>""", unsafe_allow_html=True)
+
     else:
-        # ── Controls ──────────────────────────────────────────────────────────
-        _sac1, _sac2, _sac3, _sac4 = st.columns([2, 2, 2, 2])
+        # ── CONTROL PANEL ─────────────────────────────────────────────────────
+        st.markdown('<div class="sa-sec">Configuration</div>', unsafe_allow_html=True)
+        with st.container(border=True):
+            _sc1, _sc2, _sc3, _sc4, _sc5 = st.columns([2.2, 2.2, 1.8, 1.6, 1.8])
 
-        _sa_symbol = _sac1.selectbox("Index", TOI_SYMBOLS, key="sa_symbol",
-                                     index=TOI_SYMBOLS.index("SENSEX"))
+            _sa_symbol = _sc1.selectbox(
+                "Index", TOI_SYMBOLS, key="sa_symbol",
+                index=TOI_SYMBOLS.index("SENSEX"),
+            )
 
-        _sa_instr_key = f"toi_instr_{_sa_symbol}"
-        _sa_instr_df  = st.session_state.get(_sa_instr_key)
-        _sa_expiries  = toi_get_expiries(_sa_instr_df) if _sa_instr_df is not None else []
-        _sa_exp_opts  = _sa_expiries if _sa_expiries else ["— load instruments first —"]
+            _sa_instr_key = f"toi_instr_{_sa_symbol}"
+            _sa_instr_df  = st.session_state.get(_sa_instr_key)
+            _sa_expiries  = toi_get_expiries(_sa_instr_df) if _sa_instr_df is not None else []
+            _sa_exp_opts  = _sa_expiries if _sa_expiries else ["— load first —"]
 
-        _sa_expiry = _sac2.selectbox("Expiry", _sa_exp_opts, key="sa_expiry",
-                                     disabled=not _sa_expiries)
+            _sa_expiry = _sc2.selectbox(
+                "Expiry", _sa_exp_opts, key="sa_expiry",
+                disabled=not _sa_expiries,
+            )
+            _sa_auto_int = _sc3.selectbox(
+                "Scan every", ["1 Min", "3 Min", "5 Min"],
+                key="sa_interval", index=0,
+            )
+            _sa_isec = {"1 Min": 60, "3 Min": 180, "5 Min": 300}[_sa_auto_int]
 
-        _sa_auto_int = _sac3.selectbox("Auto-scan interval",
-                                       ["1 Min", "3 Min", "5 Min"],
-                                       key="sa_interval", index=0)
-        _sa_isec = {"1 Min": 60, "3 Min": 180, "5 Min": 300}[_sa_auto_int]
+            _sc4.markdown('<div style="height:28px;"></div>', unsafe_allow_html=True)
+            _sa_load_btn = _sc4.button(
+                "📥 Load", use_container_width=True, key="sa_load",
+            )
+            _sa_elapsed = int(time.time() - st.session_state.get("sa_last_fetch", time.time()))
+            _sa_ts_lbl  = f"Updated {_sa_elapsed}s ago" if st.session_state.get("sa_last_fetch", 0) > 0 else "Not yet scanned"
+            _sc5.caption(_sa_ts_lbl)
+            _sa_manual = _sc5.button(
+                "🔍 Analyze Now", type="primary",
+                use_container_width=True, key="sa_manual",
+            )
 
-        _sa_load_btn = _sac4.button("📥 Load Instruments", type="primary",
-                                    use_container_width=True, key="sa_load")
-
+        # ── Load instruments handler ──────────────────────────────────────────
         if _sa_load_btn:
             with st.spinner(f"Downloading {_sa_symbol} instruments…"):
                 try:
@@ -2600,25 +2649,29 @@ with tab10:
                     st.session_state[_sa_instr_key] = _instr
                     _sa_instr_df = _instr
                     _sa_expiries = toi_get_expiries(_instr)
-                    st.success(
-                        f"✅ {_sa_symbol} instruments loaded · {len(_sa_expiries)} expiries found"
-                    )
                     st.rerun()
                 except Exception as _ile:
                     st.error(f"Instruments download failed: {_ile}")
 
+        # ── Empty state: no instruments ───────────────────────────────────────
         if _sa_instr_df is None:
-            st.info(
-                "📥 Click **Load Instruments** to download option instruments from Kite.\n\n"
-                "💡 **Tip:** If you already initialized Trending OI for the same symbol, "
-                "instruments are shared — just select an expiry and analyze."
-            )
-        elif _sa_expiries and _sa_expiry and _sa_expiry != "— load instruments first —":
+            st.markdown("""
+<div class="sa-card" style="text-align:center;padding:32px 24px;">
+  <div style="font-size:2rem;margin-bottom:12px;opacity:.35;">📥</div>
+  <div style="color:#e6edf3;font-weight:700;margin-bottom:6px;">Load option instruments to begin</div>
+  <div style="color:#4a5568;font-size:0.82rem;max-width:420px;margin:0 auto;">
+    Click <strong style="color:#c9d1d9;">📥 Load</strong> above to fetch option data from Kite.
+    If Trending OI is already running for this index, instruments are already cached — just pick an expiry.
+  </div>
+</div>""", unsafe_allow_html=True)
+
+        elif _sa_expiries and _sa_expiry and _sa_expiry != "— load first —":
+
             # ── Auto-refresh ──────────────────────────────────────────────────
             if _HAS_AUTOREFRESH:
                 _st_autorefresh(interval=_sa_isec * 1000, key="sa_ar")
 
-            # ── Helper: run signal ────────────────────────────────────────────
+            # ── Helpers ───────────────────────────────────────────────────────
             def _run_sa_signal():
                 _toi_rows = st.session_state.get("toi_rows", [])
                 if st.session_state.get("toi_init_symbol") != _sa_symbol:
@@ -2631,8 +2684,8 @@ with tab10:
                 )
 
             def _record_signal(sig: dict):
-                _sa_hist = st.session_state.get("sa_history", [])
-                _sa_hist.append({
+                _h = st.session_state.get("sa_history", [])
+                _h.append({
                     "ts":     sig["ts"].strftime("%H:%M"),
                     "signal": sig.get("signal", "WAIT"),
                     "score":  sig.get("score", 0),
@@ -2640,25 +2693,21 @@ with tab10:
                     "strike": sig.get("strike"),
                     "ltp":    sig.get("ltp"),
                 })
-                st.session_state["sa_history"] = _sa_hist[-30:]
+                st.session_state["sa_history"] = _h[-30:]
 
             def _maybe_alert(sig: dict):
-                _sa_signal = sig.get("signal", "WAIT")
-                if _sa_signal == "WAIT":
+                if sig.get("signal", "WAIT") == "WAIT":
                     return
-                _sa_strike = sig.get("strike", "—")
-                _sa_ltp    = sig.get("ltp") or 0
-                _amsg = (
-                    f"💡 *{_sa_signal}* · {_sa_symbol} "
-                    f"{_sa_strike} @ ₹{_sa_ltp:.1f} "
-                    f"· Score {sig['score']:+d} "
-                    f"· Spot {sig['spot']:,.2f}"
+                _msg = (
+                    f"💡 *{sig['signal']}* · {_sa_symbol} "
+                    f"{sig.get('strike','—')} @ ₹{sig.get('ltp') or 0:.1f} "
+                    f"· Score {sig['score']:+d} · Spot {sig['spot']:,.2f}"
                 )
-                st.toast(_amsg, icon="💡")
+                st.toast(_msg, icon="💡")
                 _tg_tok  = st.session_state.get("toi_tg_token", "")
                 _tg_chat = st.session_state.get("toi_tg_chat", "")
                 if _tg_tok and _tg_chat:
-                    toi_send_telegram(_amsg, _tg_tok, _tg_chat)
+                    toi_send_telegram(_msg, _tg_tok, _tg_chat)
 
             # ── Auto-analyze on timer ─────────────────────────────────────────
             _sa_last = st.session_state.get("sa_last_fetch", 0.0)
@@ -2670,17 +2719,9 @@ with tab10:
                     _record_signal(_sig)
                     _maybe_alert(_sig)
                 except Exception as _sae:
-                    st.warning(f"Signal analysis failed: {_sae}")
+                    st.warning(f"Auto-scan failed: {_sae}")
 
-            # ── Manual analyze button ─────────────────────────────────────────
-            _sa_bc1, _sa_bc2, _sa_bc3 = st.columns([4, 2, 2])
-            _sa_elapsed = int(time.time() - st.session_state.get("sa_last_fetch", time.time()))
-            _sa_bc2.caption(
-                f"Last: {_sa_elapsed}s ago"
-                if st.session_state.get("sa_last_fetch", 0) > 0 else "Not yet analyzed"
-            )
-            _sa_manual = _sa_bc3.button("🔍 Analyze Now", type="primary",
-                                        use_container_width=True, key="sa_manual")
+            # ── Manual analyze ────────────────────────────────────────────────
             if _sa_manual:
                 with st.spinner("Fetching live OI data…"):
                     try:
@@ -2693,218 +2734,298 @@ with tab10:
                     except Exception as _sme:
                         st.error(f"Analysis failed: {_sme}")
 
-            # ── Display latest signal ─────────────────────────────────────────
+            # ── SIGNAL DISPLAY ────────────────────────────────────────────────
             _sa_sig = st.session_state.get("sa_last_signal")
-            if _sa_sig:
-                if "error" in _sa_sig:
-                    st.error(f"Signal error: {_sa_sig['error']}")
-                else:
-                    _signal = _sa_sig.get("signal", "WAIT")
-                    _score  = _sa_sig.get("score", 0)
-                    _conf   = _sa_sig.get("confidence", "LOW")
 
-                    if "STRONG BUY CE" in _signal:
-                        _sig_color, _sig_bg = "#00d4aa", "rgba(0,212,170,0.12)"
-                    elif "BUY CE" in _signal:
-                        _sig_color, _sig_bg = "#58d68d", "rgba(88,214,141,0.10)"
-                    elif "STRONG BUY PE" in _signal:
-                        _sig_color, _sig_bg = "#f85149", "rgba(248,81,73,0.14)"
-                    elif "BUY PE" in _signal:
-                        _sig_color, _sig_bg = "#ff7043", "rgba(255,112,67,0.10)"
-                    else:
-                        _sig_color, _sig_bg = "#e6b800", "rgba(230,184,0,0.08)"
+            if not _sa_sig:
+                st.markdown("""
+<div class="sa-card" style="text-align:center;padding:44px 24px;margin-top:6px;">
+  <div style="font-size:2.6rem;opacity:.2;margin-bottom:14px;">📡</div>
+  <div style="color:#e6edf3;font-weight:700;font-size:1.05rem;margin-bottom:8px;">No signal yet</div>
+  <div style="color:#4a5568;font-size:0.82rem;max-width:480px;margin:0 auto;line-height:1.7;">
+    Click <strong style="color:#c9d1d9;">🔍 Analyze Now</strong> or wait for the auto-scan.<br>
+    Checks: PCR · Max Pain · OI Walls · COI PCR · Vol PCR · Verdict · Sentiment · Diff OI
+  </div>
+</div>""", unsafe_allow_html=True)
 
-                    _sa_strike = _sa_sig.get("strike")
-                    _sa_ltp    = _sa_sig.get("ltp") or 0
-                    _sa_sl     = _sa_sig.get("sl")
-                    _sa_tgt    = _sa_sig.get("target")
-                    _sa_rr     = _sa_sig.get("rr")
-                    _sa_opt    = _sa_sig.get("option_type", "")
-
-                    _sub_line = (
-                        f"<br><span style='font-size:1.05rem;font-weight:700;color:#e6edf3;'>"
-                        f"Buy {_sa_symbol} "
-                        f"<span style='color:{_sig_color};'>{_sa_strike} {_sa_opt}</span>"
-                        f"</span>"
-                        if _signal != "WAIT" and _sa_strike else ""
-                    )
-
-                    # ── Signal card ───────────────────────────────────────────
-                    st.markdown(
-                        f"""<div style="background:{_sig_bg};border:2px solid {_sig_color};
-                        border-radius:12px;padding:20px 28px;margin:14px 0 6px;text-align:center;">
-                        <div style="font-size:2rem;font-weight:900;color:{_sig_color};
-                        letter-spacing:1.5px;">{_signal}</div>
-                        <div style="color:#8b949e;font-size:0.82rem;margin-top:6px;">
-                            Confidence: <strong style="color:{_sig_color};">{_conf}</strong>
-                            &nbsp;·&nbsp; Score: <strong style="color:{_sig_color};">{_score:+d}</strong>
-                            &nbsp;·&nbsp; Spot: <strong style="color:#e6edf3;">{_sa_sig['spot']:,.2f}</strong>
-                            &nbsp;·&nbsp; Max Pain: <strong style="color:#e6edf3;">{_sa_sig.get('max_pain','—')}</strong>
-                        </div>{_sub_line}</div>""",
-                        unsafe_allow_html=True,
-                    )
-
-                    # ── Trade setup card ──────────────────────────────────────
-                    if _signal != "WAIT" and _sa_ltp and _sa_ltp > 0.5:
-                        _tcolor = "#00d4aa" if "CE" in _signal else "#f85149"
-                        ltp_s   = f"₹{_sa_ltp:.1f}"
-                        sl_s    = f"₹{_sa_sl:.1f}"  if _sa_sl  else "—"
-                        tgt_s   = f"₹{_sa_tgt:.1f}" if _sa_tgt else "—"
-                        rr_s    = f"1 : {_sa_rr}"    if _sa_rr  else "—"
-                        st.markdown(
-                            f"""<div style="background:rgba(255,255,255,0.03);border:1px solid #1a2035;
-                            border-radius:10px;padding:14px 22px;margin:4px 0 14px;">
-                            <div style="font-size:0.68rem;color:#6e7681;text-transform:uppercase;
-                            letter-spacing:1.2px;margin-bottom:10px;font-weight:700;">Trade Setup</div>
-                            <div style="display:flex;gap:36px;flex-wrap:wrap;align-items:flex-start;">
-                            <div><div style="font-size:0.68rem;color:#6e7681;text-transform:uppercase;
-                            letter-spacing:1px;">Strike</div>
-                            <div style="font-size:1.2rem;font-weight:800;color:{_tcolor};">{_sa_strike}</div></div>
-                            <div><div style="font-size:0.68rem;color:#6e7681;text-transform:uppercase;
-                            letter-spacing:1px;">Entry (LTP)</div>
-                            <div style="font-size:1.2rem;font-weight:800;color:#e6edf3;">{ltp_s}</div></div>
-                            <div><div style="font-size:0.68rem;color:#6e7681;text-transform:uppercase;
-                            letter-spacing:1px;">Stop Loss</div>
-                            <div style="font-size:1.2rem;font-weight:800;color:#f85149;">{sl_s}</div></div>
-                            <div><div style="font-size:0.68rem;color:#6e7681;text-transform:uppercase;
-                            letter-spacing:1px;">Target</div>
-                            <div style="font-size:1.2rem;font-weight:800;color:#00d4aa;">{tgt_s}</div></div>
-                            <div><div style="font-size:0.68rem;color:#6e7681;text-transform:uppercase;
-                            letter-spacing:1px;">Risk:Reward</div>
-                            <div style="font-size:1.2rem;font-weight:800;color:#e6edf3;">{rr_s}</div></div>
-                            <div><div style="font-size:0.68rem;color:#6e7681;text-transform:uppercase;
-                            letter-spacing:1px;">Expiry</div>
-                            <div style="font-size:1.1rem;font-weight:700;color:#adbac7;">{_sa_expiry}</div></div>
-                            </div>
-                            <div style="font-size:0.72rem;color:#6e7681;margin-top:10px;">
-                            ⚠️ For educational purposes only — not financial advice. Always use proper position sizing.
-                            </div></div>""",
-                            unsafe_allow_html=True,
-                        )
-
-                    # ── OI summary metrics ────────────────────────────────────
-                    _sm1, _sm2, _sm3, _sm4, _sm5, _sm6 = st.columns(6)
-                    _sm1.metric("Spot",     f"{_sa_sig['spot']:,.2f}")
-                    _sm2.metric("ATM",      f"{_sa_sig.get('atm', '—')}")
-                    _sm3.metric("PCR",      f"{_sa_sig.get('pcr', 0):.3f}")
-                    _sm4.metric("Max Pain", f"{_sa_sig.get('max_pain', '—')}")
-                    _sm5.metric("CE Wall",  f"{_sa_sig.get('max_ce_wall', '—')}")
-                    _sm6.metric("PE Wall",  f"{_sa_sig.get('max_pe_wall', '—')}")
-
-                    # ── Factor breakdown ──────────────────────────────────────
-                    st.markdown("**Factor Breakdown**")
-                    _factors = _sa_sig.get("factors", [])
-                    if _factors:
-                        _dir_badge = {
-                            "BULL": (
-                                '<span style="background:rgba(0,212,170,0.15);border:1px solid #00d4aa;'
-                                'color:#00d4aa;font-size:0.68rem;font-weight:800;padding:2px 8px;'
-                                'border-radius:8px;">▲ BULL</span>'
-                            ),
-                            "BEAR": (
-                                '<span style="background:rgba(248,81,73,0.12);border:1px solid rgba(248,81,73,0.5);'
-                                'color:#f85149;font-size:0.68rem;font-weight:700;padding:2px 8px;'
-                                'border-radius:8px;">▼ BEAR</span>'
-                            ),
-                            "NEUTRAL": (
-                                '<span style="background:rgba(230,184,0,0.1);border:1px solid rgba(230,184,0,0.3);'
-                                'color:#e6b800;font-size:0.68rem;font-weight:600;padding:2px 8px;'
-                                'border-radius:8px;">— NEUTRAL</span>'
-                            ),
-                        }
-
-                        def _pts_badge(p: int) -> str:
-                            if p > 0:
-                                return f'<span style="color:#00d4aa;font-weight:800;">{p:+d}</span>'
-                            if p < 0:
-                                return f'<span style="color:#f85149;font-weight:800;">{p:+d}</span>'
-                            return '<span style="color:#6e7681;">0</span>'
-
-                        _factor_rows = "".join(
-                            f'<tr>'
-                            f'<td style="padding:6px 12px;color:#c9d1d9;white-space:nowrap;">{f["name"]}</td>'
-                            f'<td style="padding:6px 12px;color:#e6edf3;font-weight:600;">{f["value"]}</td>'
-                            f'<td style="padding:6px 12px;">{_dir_badge.get(f["direction"], f["direction"])}</td>'
-                            f'<td style="padding:6px 12px;text-align:right;">{_pts_badge(f["points"])}</td>'
-                            f'<td style="padding:6px 12px;color:#8b949e;font-size:0.82rem;">{f["reason"]}</td>'
-                            f'</tr>'
-                            for f in _factors
-                        )
-                        st.markdown(
-                            f"""<table style="width:100%;border-collapse:collapse;background:#0d1117;
-                            border-radius:8px;overflow:hidden;margin-bottom:12px;">
-                            <thead><tr style="background:#161b22;">
-                            <th style="padding:8px 12px;color:#00d4aa;text-align:left;">Factor</th>
-                            <th style="padding:8px 12px;color:#00d4aa;text-align:left;">Value</th>
-                            <th style="padding:8px 12px;color:#00d4aa;text-align:left;">Direction</th>
-                            <th style="padding:8px 12px;color:#00d4aa;text-align:right;">Points</th>
-                            <th style="padding:8px 12px;color:#00d4aa;text-align:left;">Interpretation</th>
-                            </tr></thead><tbody>{_factor_rows}</tbody></table>""",
-                            unsafe_allow_html=True,
-                        )
-
-                    # ── Tip: initialize Trending OI for extra signals ──────────
-                    _sa_toi_rows = st.session_state.get("toi_rows", [])
-                    if not _sa_toi_rows or st.session_state.get("toi_init_symbol") != _sa_symbol:
-                        st.info(
-                            f"💡 **Unlock 5 more signals:** Initialize Trending OI (Tab 9) for "
-                            f"**{_sa_symbol}** to add COI PCR, Vol PCR, Move Verdict, "
-                            "Sentiment and Diff OI Trend to the score."
-                        )
+            elif "error" in _sa_sig:
+                st.error(f"Signal error: {_sa_sig['error']}")
 
             else:
-                st.info(
-                    "🔍 Click **Analyze Now** to get a live option buying signal.\n\n"
-                    "**What this checks:**\n"
-                    "- **PCR** — Put-call ratio (heavy put OI = bullish support)\n"
-                    "- **Max Pain** — Gravitational pull toward max pain strike\n"
-                    "- **OI Walls** — Heaviest CE (resistance) and PE (support) strikes\n"
-                    "- **COI PCR** — Change in OI PCR trend (from Trending OI)\n"
-                    "- **Vol PCR** — Volume put/call ratio\n"
-                    "- **Move Verdict** — GOOD/FAKE OI flow confirmation\n"
-                    "- **Sentiment** — Institutional bias from COI PCR trend\n"
-                    "- **Diff OI Trend** — Put-Call OI divergence direction\n\n"
-                    "**Score guide:** ≥ +6 = STRONG BUY CE · ≥ +4 = BUY CE · "
-                    "≤ −6 = STRONG BUY PE · ≤ −4 = BUY PE · |score| < 4 = WAIT"
+                _signal  = _sa_sig.get("signal", "WAIT")
+                _score   = _sa_sig.get("score", 0)
+                _conf    = _sa_sig.get("confidence", "LOW")
+                _sa_strike = _sa_sig.get("strike")
+                _sa_ltp    = _sa_sig.get("ltp") or 0
+                _sa_sl     = _sa_sig.get("sl")
+                _sa_tgt    = _sa_sig.get("target")
+                _sa_rr     = _sa_sig.get("rr")
+                _sa_opt    = _sa_sig.get("option_type", "")
+                _sa_ts_str = _sa_sig["ts"].strftime("%H:%M") if hasattr(_sa_sig.get("ts"), "strftime") else str(_sa_sig.get("ts", "—"))
+                _sa_atm    = _sa_sig.get("atm", 0)
+                _sa_pcr    = _sa_sig.get("pcr", 0)
+                _sa_mp     = _sa_sig.get("max_pain", 0)
+                _sa_cew    = _sa_sig.get("max_ce_wall", 0)
+                _sa_pew    = _sa_sig.get("max_pe_wall", 0)
+
+                # color scheme
+                if "STRONG BUY CE" in _signal:
+                    _sc, _sbg = "#00d4aa", "rgba(0,212,170,0.09)"
+                elif "BUY CE" in _signal:
+                    _sc, _sbg = "#58d68d", "rgba(88,214,141,0.08)"
+                elif "STRONG BUY PE" in _signal:
+                    _sc, _sbg = "#f85149", "rgba(248,81,73,0.11)"
+                elif "BUY PE" in _signal:
+                    _sc, _sbg = "#ff7043", "rgba(255,112,67,0.09)"
+                else:
+                    _sc, _sbg = "#e6b800", "rgba(230,184,0,0.07)"
+
+                # score gauge: map -12..+12 → 0%..100%
+                _gauge_pct = max(2, min(98, ((_score + 12) / 24) * 100))
+                _conf_icon = {"HIGH": "🔥", "MEDIUM": "⚡", "LOW": "⏳"}.get(_conf, "")
+                _trade_line = (
+                    f"<span style='color:{_sc};font-size:0.95rem;font-weight:700;'>"
+                    f"Buy {_sa_symbol} {_sa_strike} {_sa_opt}</span>"
+                    f"<span style='color:#4a5568;font-size:0.8rem;margin-left:10px;'>expiry {_sa_expiry}</span>"
+                    if _signal != "WAIT" and _sa_strike else
+                    "<span style='color:#4a5568;font-size:0.82rem;'>No directional setup — stand aside</span>"
                 )
 
-            # ── Signal history ────────────────────────────────────────────────
-            _sa_hist_disp = st.session_state.get("sa_history", [])
-            if len(_sa_hist_disp) > 1:
-                st.divider()
-                st.markdown("**Signal History** (most recent first)")
-                _hist_rows_html = "".join(
-                    f'<tr>'
-                    f'<td style="padding:5px 12px;color:#8b949e;">{h["ts"]}</td>'
-                    f'<td style="padding:5px 12px;font-weight:700;color:'
-                    f'{"#00d4aa" if "CE" in h["signal"] else "#f85149" if "PE" in h["signal"] else "#e6b800"}'
-                    f';">{h["signal"]}</td>'
-                    f'<td style="padding:5px 12px;color:#e6edf3;">{h["spot"]:,.2f}</td>'
-                    f'<td style="padding:5px 12px;font-weight:700;color:'
-                    f'{"#00d4aa" if h["score"] > 0 else "#f85149" if h["score"] < 0 else "#6e7681"}'
-                    f';">{h["score"]:+d}</td>'
-                    f'<td style="padding:5px 12px;color:#c9d1d9;">{h["strike"] if h["strike"] else "—"}</td>'
-                    f'<td style="padding:5px 12px;color:#c9d1d9;">'
-                    f'{"₹" + str(round(h["ltp"], 1)) if h["ltp"] else "—"}</td>'
-                    f'</tr>'
-                    for h in reversed(_sa_hist_disp[-20:])
-                )
-                st.markdown(
-                    f"""<table style="width:100%;border-collapse:collapse;background:#0d1117;
-                    border-radius:8px;overflow:hidden;margin-bottom:12px;">
-                    <thead><tr style="background:#161b22;">
-                    <th style="padding:8px 12px;color:#6e7681;text-align:left;
-                    font-size:0.72rem;text-transform:uppercase;letter-spacing:.6px;">Time</th>
-                    <th style="padding:8px 12px;color:#6e7681;text-align:left;
-                    font-size:0.72rem;text-transform:uppercase;letter-spacing:.6px;">Signal</th>
-                    <th style="padding:8px 12px;color:#6e7681;text-align:left;
-                    font-size:0.72rem;text-transform:uppercase;letter-spacing:.6px;">Spot</th>
-                    <th style="padding:8px 12px;color:#6e7681;text-align:left;
-                    font-size:0.72rem;text-transform:uppercase;letter-spacing:.6px;">Score</th>
-                    <th style="padding:8px 12px;color:#6e7681;text-align:left;
-                    font-size:0.72rem;text-transform:uppercase;letter-spacing:.6px;">Strike</th>
-                    <th style="padding:8px 12px;color:#6e7681;text-align:left;
-                    font-size:0.72rem;text-transform:uppercase;letter-spacing:.6px;">LTP</th>
-                    </tr></thead><tbody>{_hist_rows_html}</tbody></table>""",
-                    unsafe_allow_html=True,
-                )
+                # ── ① SIGNAL BANNER ───────────────────────────────────────────
+                st.markdown(f"""
+<div style="background:{_sbg};border:1.5px solid {_sc};border-radius:14px;
+padding:22px 28px 18px;margin:6px 0 14px;position:relative;overflow:hidden;">
+  <div style="position:absolute;top:0;left:0;right:0;height:3px;
+  background:linear-gradient(90deg,transparent,{_sc},transparent);opacity:.6;"></div>
+
+  <div style="display:flex;align-items:flex-start;justify-content:space-between;
+  flex-wrap:wrap;gap:16px;margin-bottom:18px;">
+
+    <div>
+      <div style="font-size:0.58rem;font-weight:800;letter-spacing:2px;text-transform:uppercase;
+      color:{_sc};opacity:.75;margin-bottom:5px;">Signal</div>
+      <div style="font-size:2.1rem;font-weight:900;color:{_sc};letter-spacing:1px;
+      line-height:1;">{_signal}</div>
+      <div style="margin-top:10px;">{_trade_line}</div>
+    </div>
+
+    <div style="text-align:right;">
+      <div style="font-size:0.58rem;font-weight:800;letter-spacing:2px;text-transform:uppercase;
+      color:#3d4a5c;margin-bottom:5px;">Score</div>
+      <div style="font-size:2.4rem;font-weight:900;color:{_sc};line-height:1;">{_score:+d}</div>
+      <div style="font-size:0.72rem;color:#6e7681;margin-top:6px;">
+        {_conf_icon} {_conf} confidence &nbsp;·&nbsp; {_sa_ts_str}
+      </div>
+    </div>
+  </div>
+
+  <div>
+    <div style="display:flex;justify-content:space-between;font-size:0.56rem;
+    color:#3d4a5c;font-weight:700;text-transform:uppercase;letter-spacing:.8px;margin-bottom:5px;">
+      <span>Strong PE &minus;12</span><span>Neutral 0</span><span>Strong CE +12</span>
+    </div>
+    <div style="height:7px;background:#1a2035;border-radius:4px;overflow:hidden;">
+      <div style="height:100%;width:100%;background:linear-gradient(90deg,#f85149 0%,#e6b800 50%,#00d4aa 100%);
+      border-radius:4px;"></div>
+    </div>
+    <div style="position:relative;height:10px;">
+      <div style="position:absolute;left:{_gauge_pct:.1f}%;transform:translateX(-50%);
+      top:0;width:3px;height:10px;background:{_sc};border-radius:2px;
+      box-shadow:0 0 6px {_sc};"></div>
+    </div>
+  </div>
+</div>""", unsafe_allow_html=True)
+
+                # ── ② TRADE SETUP  |  MARKET SNAPSHOT ────────────────────────
+                _lc, _rc = st.columns([11, 9])
+
+                with _lc:
+                    if _signal != "WAIT" and _sa_ltp and _sa_ltp > 0.5:
+                        _tc  = "#00d4aa" if "CE" in _signal else "#f85149"
+                        ltp_s = f"₹{_sa_ltp:.1f}"
+                        sl_s  = f"₹{_sa_sl:.1f}"  if _sa_sl  else "—"
+                        tgt_s = f"₹{_sa_tgt:.1f}" if _sa_tgt else "—"
+                        rr_s  = f"1 : {_sa_rr}"    if _sa_rr  else "—"
+                        st.markdown(f"""
+<div class="sa-card">
+  <div class="sa-sec">Trade Setup</div>
+  <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:16px;margin-bottom:14px;">
+    <div>
+      <div class="sa-kv-lbl">Strike</div>
+      <div class="sa-kv-val" style="color:{_tc};font-size:1.35rem;">{_sa_strike}</div>
+    </div>
+    <div>
+      <div class="sa-kv-lbl">Type</div>
+      <div class="sa-kv-val" style="color:{_tc};">{_sa_opt}</div>
+    </div>
+    <div>
+      <div class="sa-kv-lbl">Expiry</div>
+      <div class="sa-kv-val" style="color:#adbac7;font-size:0.88rem;">{_sa_expiry}</div>
+    </div>
+  </div>
+  <div class="sa-divider"></div>
+  <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:16px;margin-top:14px;">
+    <div>
+      <div class="sa-kv-lbl">Entry (LTP)</div>
+      <div class="sa-kv-val">{ltp_s}</div>
+    </div>
+    <div>
+      <div class="sa-kv-lbl">Stop Loss</div>
+      <div class="sa-kv-val" style="color:#f85149;">{sl_s}</div>
+    </div>
+    <div>
+      <div class="sa-kv-lbl">Target</div>
+      <div class="sa-kv-val" style="color:#00d4aa;">{tgt_s}</div>
+    </div>
+    <div>
+      <div class="sa-kv-lbl">Risk : Reward</div>
+      <div class="sa-kv-val">{rr_s}</div>
+    </div>
+  </div>
+  <div style="font-size:0.67rem;color:#3d4a5c;margin-top:14px;">
+    ⚠ For educational purposes only — not financial advice.
+  </div>
+</div>""", unsafe_allow_html=True)
+                    else:
+                        st.markdown("""
+<div class="sa-card" style="text-align:center;padding:28px 20px;">
+  <div style="color:#4a5568;font-size:0.88rem;margin-bottom:4px;">No trade setup</div>
+  <div style="color:#3d4a5c;font-size:0.78rem;">Score below threshold — stand aside</div>
+</div>""", unsafe_allow_html=True)
+
+                with _rc:
+                    _pcr_col = "#00d4aa" if _sa_pcr >= 1.0 else "#f85149"
+                    st.markdown(f"""
+<div class="sa-card">
+  <div class="sa-sec">Market Snapshot</div>
+  <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;">
+    <div>
+      <div class="sa-kv-lbl">Spot</div>
+      <div class="sa-kv-val">{_sa_sig['spot']:,.2f}</div>
+    </div>
+    <div>
+      <div class="sa-kv-lbl">ATM Strike</div>
+      <div class="sa-kv-val">{_sa_atm:,}</div>
+    </div>
+    <div>
+      <div class="sa-kv-lbl">PCR</div>
+      <div class="sa-kv-val" style="color:{_pcr_col};">{_sa_pcr:.3f}</div>
+    </div>
+    <div>
+      <div class="sa-kv-lbl">Max Pain</div>
+      <div class="sa-kv-val">{_sa_mp:,}</div>
+    </div>
+    <div>
+      <div class="sa-kv-lbl">CE Wall (resistance)</div>
+      <div class="sa-kv-val" style="color:#f85149;">{_sa_cew:,}</div>
+    </div>
+    <div>
+      <div class="sa-kv-lbl">PE Wall (support)</div>
+      <div class="sa-kv-val" style="color:#00d4aa;">{_sa_pew:,}</div>
+    </div>
+  </div>
+</div>""", unsafe_allow_html=True)
+
+                    # Trending OI feed status
+                    _sa_toi_rows = st.session_state.get("toi_rows", [])
+                    _toi_on      = bool(_sa_toi_rows and st.session_state.get("toi_init_symbol") == _sa_symbol)
+                    if _toi_on:
+                        _toi_status = (
+                            f'<span class="sa-bbull">✓ Active · {len(_sa_toi_rows)} rows</span>'
+                        )
+                        _toi_note   = "5 extra factors feeding into score"
+                    else:
+                        _toi_status = '<span class="sa-bneut">— Not initialized</span>'
+                        _toi_note   = "Initialize Tab 9 to unlock COI PCR · Verdict · Sentiment"
+                    st.markdown(f"""
+<div class="sa-card" style="margin-top:10px;padding:12px 18px;">
+  <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;">
+    <div>
+      <div class="sa-kv-lbl" style="margin-bottom:4px;">Trending OI feed</div>
+      <div style="font-size:0.75rem;color:#4a5568;">{_toi_note}</div>
+    </div>
+    {_toi_status}
+  </div>
+</div>""", unsafe_allow_html=True)
+
+                # ── ③ FACTOR BREAKDOWN ────────────────────────────────────────
+                _factors = _sa_sig.get("factors", [])
+                if _factors:
+                    def _dbadge(d: str) -> str:
+                        if d == "BULL":  return '<span class="sa-bbull">▲ BULL</span>'
+                        if d == "BEAR":  return '<span class="sa-bbear">▼ BEAR</span>'
+                        return '<span class="sa-bneut">— NEUTRAL</span>'
+
+                    def _phtmls(p: int) -> str:
+                        if p > 0: return f'<span style="color:#00d4aa;font-weight:800;">{p:+d}</span>'
+                        if p < 0: return f'<span style="color:#f85149;font-weight:800;">{p:+d}</span>'
+                        return '<span style="color:#3d4a5c;font-weight:700;">0</span>'
+
+                    _total = sum(f["points"] for f in _factors)
+                    _f_rows = "".join(
+                        f'<tr>'
+                        f'<td style="color:#adbac7;font-weight:600;font-size:0.82rem;white-space:nowrap;">{f["name"]}</td>'
+                        f'<td style="color:#e6edf3;font-weight:700;font-size:0.84rem;">{f["value"]}</td>'
+                        f'<td>{_dbadge(f["direction"])}</td>'
+                        f'<td class="r">{_phtmls(f["points"])}</td>'
+                        f'<td style="color:#6e7681;font-size:0.77rem;">{f["reason"]}</td>'
+                        f'</tr>'
+                        for f in _factors
+                    )
+                    st.markdown('<div class="sa-sec" style="margin-top:4px;">Signal Factors</div>', unsafe_allow_html=True)
+                    st.markdown(f"""
+<div class="sa-card" style="padding:0;overflow:hidden;">
+  <div style="overflow-x:auto;">
+    <table class="sa-tbl">
+      <thead><tr>
+        <th>Factor</th><th>Value</th><th>Direction</th>
+        <th class="r">Pts</th><th>Interpretation</th>
+      </tr></thead>
+      <tbody>{_f_rows}</tbody>
+      <tfoot><tr>
+        <td colspan="3" style="color:#6e7681;font-size:0.72rem;font-weight:700;
+        text-transform:uppercase;letter-spacing:.8px;">Total Score</td>
+        <td class="r" style="font-size:1.05rem;">{_phtmls(_total)}</td>
+        <td></td>
+      </tr></tfoot>
+    </table>
+  </div>
+</div>""", unsafe_allow_html=True)
+
+                # ── ④ SIGNAL HISTORY ──────────────────────────────────────────
+                _sa_hist_disp = st.session_state.get("sa_history", [])
+                if len(_sa_hist_disp) > 1:
+                    def _sig_col(sig: str) -> str:
+                        if "CE" in sig:  return "#00d4aa"
+                        if "PE" in sig:  return "#f85149"
+                        return "#e6b800"
+
+                    def _score_col(sc: int) -> str:
+                        if sc > 0: return "#00d4aa"
+                        if sc < 0: return "#f85149"
+                        return "#6e7681"
+
+                    _h_rows = "".join(
+                        f'<tr>'
+                        f'<td style="color:#6e7681;font-size:0.8rem;white-space:nowrap;">{h["ts"]}</td>'
+                        f'<td style="font-weight:700;color:{_sig_col(h["signal"])};font-size:0.81rem;">{h["signal"]}</td>'
+                        f'<td style="color:#c9d1d9;font-size:0.81rem;">{h["spot"]:,.2f}</td>'
+                        f'<td style="font-weight:700;color:{_score_col(h["score"])};font-size:0.84rem;">{h["score"]:+d}</td>'
+                        f'<td style="color:#adbac7;font-size:0.81rem;">{h["strike"] if h["strike"] else "—"}</td>'
+                        f'<td style="color:#adbac7;font-size:0.81rem;">{"₹"+str(round(h["ltp"],1)) if h["ltp"] else "—"}</td>'
+                        f'</tr>'
+                        for h in reversed(_sa_hist_disp[-20:])
+                    )
+                    st.markdown('<div class="sa-sec" style="margin-top:4px;">Signal History</div>', unsafe_allow_html=True)
+                    st.markdown(f"""
+<div class="sa-card" style="padding:0;overflow:hidden;">
+  <div style="overflow-x:auto;">
+    <table class="sa-tbl">
+      <thead><tr>
+        <th>Time</th><th>Signal</th><th>Spot</th>
+        <th>Score</th><th>Strike</th><th>LTP</th>
+      </tr></thead>
+      <tbody>{_h_rows}</tbody>
+    </table>
+  </div>
+</div>""", unsafe_allow_html=True)
