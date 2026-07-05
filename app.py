@@ -2278,9 +2278,8 @@ with tab9:
         _toi_init_btn = tc5.button("🚀 Initialize", type="primary",
                                    use_container_width=True, key="toi_init")
 
-        ar1, ar2, ar3 = st.columns([2, 3, 5])
-        _toi_auto      = ar1.checkbox("Auto-refresh", value=False, key="toi_auto")
-        _toi_threshold = int(ar2.number_input(
+        ar1, ar2 = st.columns([3, 5])
+        _toi_threshold = int(ar1.number_input(
             "OI Alert Threshold", min_value=10_000, max_value=10_000_000,
             value=500_000, step=50_000, key="toi_threshold",
         ))
@@ -2335,19 +2334,13 @@ with tab9:
         _init_sym    = st.session_state.get("toi_init_symbol", "")
 
         if _initialized and _init_sym == _toi_symbol:
-            # ── Auto-refresh widget ───────────────────────────────────────────
-            if _toi_auto:
-                if _HAS_AUTOREFRESH:
-                    _st_autorefresh(interval=_toi_isec * 1000, key="toi_ar")
-                else:
-                    st.warning(
-                        "Auto-refresh package not installed. "
-                        "Add `streamlit-autorefresh>=1.0.0` to requirements.txt and redeploy."
-                    )
+            # ── Auto-refresh widget — always on when initialized ───────────────
+            if _HAS_AUTOREFRESH:
+                _st_autorefresh(interval=_toi_isec * 1000, key="toi_ar")
 
             # ── Auto-snapshot on timer ────────────────────────────────────────
             _last_fetch = st.session_state.get("toi_last_fetch", 0.0)
-            if _toi_auto and (time.time() - _last_fetch >= _toi_isec * 0.9):
+            if time.time() - _last_fetch >= _toi_isec * 0.9:
                 try:
                     _snap = toi_fetch_snapshot(
                         _toi_kite_key, _toi_kite_token,
