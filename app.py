@@ -36,6 +36,7 @@ from screener.trending_oi import (
     INTERVALS          as TOI_INTERVALS,
 )
 from screener.smart_alerts import run_smart_signal
+from screener.smart_alerts_v2 import run_smart_signal_v2
 
 try:
     from streamlit_autorefresh import st_autorefresh as _st_autorefresh
@@ -286,6 +287,7 @@ _oc_loaded   = any(k in st.session_state for k in ("oc_NIFTY", "oc_BANKNIFTY", "
 _em_count    = len(st.session_state.get("em_summary",    pd.DataFrame()))
 _toi_count   = len(st.session_state.get("toi_rows",     []))
 _sa_count    = len(st.session_state.get("sa_history",   []))
+_sa2_count   = len(st.session_state.get("sa2_history",  []))
 
 def _sb_row(icon: str, label: str, count: int) -> str:
     badge = f'<span class="sb-badge">{count}</span>' if count > 0 else ""
@@ -317,6 +319,7 @@ with st.sidebar:
 {_sb_row("🚀", "Sensex Expiry Moves", _em_count)}
 {_sb_row("📡", "Trending OI", _toi_count)}
 {_sb_row("💡", "Smart Alerts", _sa_count)}
+{_sb_row("⚡", "Smart Alerts Pro", _sa2_count)}
 <div class="sb-div"></div>
 <div class="sb-live"><span class="sb-dot"></span>NSE feed LIVE</div>
 """, unsafe_allow_html=True)
@@ -454,7 +457,7 @@ st.markdown(
 st.divider()
 
 # ── Tabs ──────────────────────────────────────────────────────────────────────
-tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10 = st.tabs([
+tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11 = st.tabs([
     "📰 News + Breakout",
     "🔁 20 MA Retracement",
     "📈 EMA Crossover",
@@ -465,6 +468,7 @@ tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10 = st.tabs([
     "🚀 Sensex Expiry Moves",
     "📡 Trending OI",
     "💡 Smart Alerts",
+    "⚡ Smart Alerts Pro",
 ])
 
 # ── TAB 1 ─────────────────────────────────────────────────────────────────────
@@ -3004,6 +3008,455 @@ with tab10:
         <th>Score</th><th>Strike</th><th>LTP</th>
       </tr></thead>
       <tbody>{_h_rows}</tbody>
+    </table>
+  </div>
+</div>""", unsafe_allow_html=True)
+
+
+# ── TAB 11 — Smart Alerts Pro ──────────────────────────────────────────────────
+with tab11:
+
+    # ── CSS (shared sa- classes already injected in tab10; add pro-specific) ──
+    st.markdown("""
+<style>
+.sp-gate-pass{display:inline-flex;align-items:center;gap:5px;background:rgba(0,212,170,0.1);border:1px solid rgba(0,212,170,0.3);color:#00d4aa;font-size:0.65rem;font-weight:700;padding:3px 10px;border-radius:20px;white-space:nowrap;}
+.sp-gate-fail{display:inline-flex;align-items:center;gap:5px;background:rgba(248,81,73,0.1);border:1px solid rgba(248,81,73,0.3);color:#f85149;font-size:0.65rem;font-weight:700;padding:3px 10px;border-radius:20px;white-space:nowrap;}
+.sp-gate-row{display:flex;flex-wrap:wrap;gap:8px;margin:10px 0 14px;}
+.sp-conflict{background:rgba(248,81,73,0.08);border:1px solid rgba(248,81,73,0.25);border-radius:8px;padding:8px 14px;font-size:0.78rem;color:#f85149;margin-bottom:10px;}
+.sp-expiry-badge{background:rgba(230,184,0,0.12);border:1px solid rgba(230,184,0,0.35);color:#e6b800;font-size:0.65rem;font-weight:700;padding:2px 9px;border-radius:10px;letter-spacing:.5px;}
+.sp-ctx-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;}
+.sp-ctx-item{background:#0a0e1a;border:1px solid #1a2035;border-radius:8px;padding:10px 12px;}
+</style>""", unsafe_allow_html=True)
+
+    _sp_kite_key   = st.session_state.get("kite_api_key",      _get_secret("KITE_API_KEY", ""))
+    _sp_kite_token = st.session_state.get("kite_access_token", _get_secret("KITE_ACCESS_TOKEN", ""))
+    _sp_kite_live  = bool(_sp_kite_key and _sp_kite_token)
+
+    # ── Header ────────────────────────────────────────────────────────────────
+    st.markdown("""
+<div style="display:flex;align-items:center;gap:12px;margin:2px 0 4px;">
+  <span style="font-size:1.25rem;font-weight:900;color:#fff;letter-spacing:-.5px;">⚡ Smart Alerts Pro</span>
+  <span style="font-size:0.62rem;font-weight:700;background:rgba(230,184,0,0.1);border:1px solid rgba(230,184,0,0.3);color:#e6b800;padding:2px 10px;border-radius:20px;letter-spacing:1.3px;text-transform:uppercase;">13-FACTOR · PRECISION</span>
+</div>
+<div style="font-size:0.78rem;color:#4a5568;margin-bottom:18px;">
+  VWAP · India VIX · IV Spike · OI Velocity · Time Gate · Consecutive Confirmation · Expiry Mode · Dynamic SL
+</div>""", unsafe_allow_html=True)
+
+    if not _sp_kite_live:
+        st.markdown("""
+<div class="sa-card" style="text-align:center;padding:36px 24px;">
+  <div style="font-size:2rem;margin-bottom:12px;opacity:.35;">🔌</div>
+  <div style="color:#e6edf3;font-size:1rem;font-weight:700;margin-bottom:6px;">Kite not connected</div>
+  <div style="color:#4a5568;font-size:0.82rem;">Enter API Key + Access Token in the sidebar to unlock precision signals</div>
+</div>""", unsafe_allow_html=True)
+
+    else:
+        # ── CONTROL PANEL ─────────────────────────────────────────────────────
+        st.markdown('<div class="sa-sec">Configuration</div>', unsafe_allow_html=True)
+        with st.container(border=True):
+            _sp1, _sp2, _sp3, _sp4, _sp5 = st.columns([2.2, 2.2, 1.8, 1.6, 1.8])
+
+            _sp_symbol = _sp1.selectbox(
+                "Index", TOI_SYMBOLS, key="sp_symbol",
+                index=TOI_SYMBOLS.index("SENSEX"),
+            )
+            _sp_instr_key = f"toi_instr_{_sp_symbol}"
+            _sp_instr_df  = st.session_state.get(_sp_instr_key)
+            _sp_expiries  = toi_get_expiries(_sp_instr_df) if _sp_instr_df is not None else []
+            _sp_exp_opts  = _sp_expiries if _sp_expiries else ["— load first —"]
+
+            _sp_expiry = _sp2.selectbox(
+                "Expiry", _sp_exp_opts, key="sp_expiry",
+                disabled=not _sp_expiries,
+            )
+            _sp_auto_int = _sp3.selectbox(
+                "Scan every", ["1 Min", "3 Min", "5 Min"],
+                key="sp_interval", index=0,
+            )
+            _sp_isec = {"1 Min": 60, "3 Min": 180, "5 Min": 300}[_sp_auto_int]
+
+            _sp4.markdown('<div style="height:28px;"></div>', unsafe_allow_html=True)
+            _sp_load_btn = _sp4.button("📥 Load", use_container_width=True, key="sp_load")
+            _sp_elapsed  = int(time.time() - st.session_state.get("sa2_last_fetch", time.time()))
+            _sp_ts_lbl   = f"Updated {_sp_elapsed}s ago" if st.session_state.get("sa2_last_fetch", 0) > 0 else "Not yet scanned"
+            _sp5.caption(_sp_ts_lbl)
+            _sp_manual = _sp5.button("🔍 Analyze Now", type="primary", use_container_width=True, key="sp_manual")
+
+        # ── Load instruments ──────────────────────────────────────────────────
+        if _sp_load_btn:
+            with st.spinner(f"Downloading {_sp_symbol} instruments…"):
+                try:
+                    _instr = toi_fetch_instruments(_sp_kite_key, _sp_kite_token, _sp_symbol)
+                    st.session_state[_sp_instr_key] = _instr
+                    _sp_instr_df = _instr
+                    _sp_expiries = toi_get_expiries(_instr)
+                    # Also load peer index instruments for cross-index conflict check
+                    _peer_map = {"NIFTY": "BANKNIFTY", "BANKNIFTY": "NIFTY"}
+                    _peer = _peer_map.get(_sp_symbol)
+                    if _peer and f"toi_instr_{_peer}" not in st.session_state:
+                        try:
+                            _peer_instr = toi_fetch_instruments(_sp_kite_key, _sp_kite_token, _peer)
+                            st.session_state[f"toi_instr_{_peer}"] = _peer_instr
+                        except Exception:
+                            pass
+                    st.rerun()
+                except Exception as _ile:
+                    st.error(f"Instruments download failed: {_ile}")
+
+        if _sp_instr_df is None:
+            st.markdown("""
+<div class="sa-card" style="text-align:center;padding:32px 24px;">
+  <div style="font-size:2rem;margin-bottom:12px;opacity:.35;">📥</div>
+  <div style="color:#e6edf3;font-weight:700;margin-bottom:6px;">Load option instruments to begin</div>
+  <div style="color:#4a5568;font-size:0.82rem;max-width:420px;margin:0 auto;">Click <strong style="color:#c9d1d9;">📥 Load</strong> above. For NIFTY/BANKNIFTY, peer instruments are also fetched for cross-index conflict detection.</div>
+</div>""", unsafe_allow_html=True)
+
+        elif _sp_expiries and _sp_expiry and _sp_expiry != "— load first —":
+
+            if _HAS_AUTOREFRESH:
+                _st_autorefresh(interval=_sp_isec * 1000, key="sp_ar")
+
+            # ── Signal runner ─────────────────────────────────────────────────
+            def _run_sp_signal():
+                _toi_rows = st.session_state.get("toi_rows", [])
+                if st.session_state.get("toi_init_symbol") != _sp_symbol:
+                    _toi_rows = []
+                _ltp_hist  = st.session_state.get("sa2_ltp_history", [])
+                _dir_hist  = st.session_state.get("sa2_direction_history", [])
+                _peer_sym  = {"NIFTY": "BANKNIFTY", "BANKNIFTY": "NIFTY"}.get(_sp_symbol)
+                _peer_df   = st.session_state.get(f"toi_instr_{_peer_sym}") if _peer_sym else None
+                return run_smart_signal_v2(
+                    _sp_kite_key, _sp_kite_token,
+                    _sp_symbol, _sp_expiry,
+                    _sp_instr_df,
+                    toi_rows=_toi_rows if _toi_rows else None,
+                    ltp_history=_ltp_hist,
+                    direction_history=_dir_hist,
+                    scan_interval_sec=_sp_isec,
+                    instr_df_peer=_peer_df,
+                )
+
+            def _record_sp_signal(sig: dict):
+                # Update rolling histories
+                _ltp_h = st.session_state.get("sa2_ltp_history", [])
+                if sig.get("atm_ltp", 0) > 0:
+                    _ltp_h.append(sig["atm_ltp"])
+                    st.session_state["sa2_ltp_history"] = _ltp_h[-10:]
+
+                _dir_h = st.session_state.get("sa2_direction_history", [])
+                _dir_h.append(sig.get("direction", "NEUTRAL"))
+                st.session_state["sa2_direction_history"] = _dir_h[-5:]
+
+                # History log
+                _h = st.session_state.get("sa2_history", [])
+                _h.append({
+                    "ts":       sig["ts"].strftime("%H:%M"),
+                    "signal":   sig.get("signal", "WAIT"),
+                    "score":    sig.get("score", 0),
+                    "spot":     sig.get("spot", 0),
+                    "strike":   sig.get("strike"),
+                    "ltp":      sig.get("ltp"),
+                    "vix":      sig.get("vix", 0),
+                    "iv_ratio": sig.get("iv_ratio", 1.0),
+                    "gate_pass": sig.get("gate_pass", False),
+                    "expiry_day": sig.get("expiry_day", False),
+                })
+                st.session_state["sa2_history"] = _h[-30:]
+
+            def _maybe_sp_alert(sig: dict):
+                if sig.get("signal", "WAIT") == "WAIT":
+                    return
+                _msg = (
+                    f"⚡ *{sig['signal']}* · {_sp_symbol} "
+                    f"{sig.get('strike','—')} @ ₹{sig.get('ltp') or 0:.1f} "
+                    f"· Score {sig['score']:+d} · VIX {sig.get('vix',0):.1f} "
+                    f"· Spot {sig['spot']:,.2f}"
+                )
+                st.toast(_msg, icon="⚡")
+                _tg_tok  = st.session_state.get("toi_tg_token", "")
+                _tg_chat = st.session_state.get("toi_tg_chat", "")
+                if _tg_tok and _tg_chat:
+                    toi_send_telegram(_msg, _tg_tok, _tg_chat)
+
+            # ── Auto-analyze ──────────────────────────────────────────────────
+            _sp_last = st.session_state.get("sa2_last_fetch", 0.0)
+            if time.time() - _sp_last >= _sp_isec * 0.9:
+                try:
+                    _sp_sig = _run_sp_signal()
+                    st.session_state["sa2_last_signal"] = _sp_sig
+                    st.session_state["sa2_last_fetch"]  = time.time()
+                    _record_sp_signal(_sp_sig)
+                    _maybe_sp_alert(_sp_sig)
+                except Exception as _spe:
+                    st.warning(f"Auto-scan failed: {_spe}")
+
+            if _sp_manual:
+                with st.spinner("Fetching live OI + VWAP + VIX…"):
+                    try:
+                        _sp_sig = _run_sp_signal()
+                        st.session_state["sa2_last_signal"] = _sp_sig
+                        st.session_state["sa2_last_fetch"]  = time.time()
+                        _record_sp_signal(_sp_sig)
+                        _maybe_sp_alert(_sp_sig)
+                        st.rerun()
+                    except Exception as _sme:
+                        st.error(f"Analysis failed: {_sme}")
+
+            # ── DISPLAY ───────────────────────────────────────────────────────
+            _sp_res = st.session_state.get("sa2_last_signal")
+
+            if not _sp_res:
+                st.markdown("""
+<div class="sa-card" style="text-align:center;padding:44px 24px;margin-top:6px;">
+  <div style="font-size:2.6rem;opacity:.2;margin-bottom:14px;">⚡</div>
+  <div style="color:#e6edf3;font-weight:700;font-size:1.05rem;margin-bottom:8px;">No signal yet</div>
+  <div style="color:#4a5568;font-size:0.82rem;max-width:480px;margin:0 auto;line-height:1.7;">Click <strong style="color:#c9d1d9;">🔍 Analyze Now</strong> or wait for the auto-scan.<br>13 factors: PCR · Max Pain · OI Walls · COI PCR · Vol PCR · Verdict · Sentiment · Diff OI · VWAP · VIX · IV Spike · Time · OI Velocity</div>
+</div>""", unsafe_allow_html=True)
+
+            elif "error" in _sp_res:
+                st.error(f"Signal error: {_sp_res['error']}")
+
+            else:
+                _sp_signal  = _sp_res.get("signal", "WAIT")
+                _sp_score   = _sp_res.get("score", 0)
+                _sp_conf    = _sp_res.get("confidence", "LOW")
+                _sp_gates   = _sp_res.get("gates", {})
+                _sp_gate_ok = _sp_res.get("gate_pass", False)
+                _sp_vix     = _sp_res.get("vix", 0)
+                _sp_vwap    = _sp_res.get("vwap", 0)
+                _sp_ivr     = _sp_res.get("iv_ratio", 1.0)
+                _sp_exp_day = _sp_res.get("expiry_day", False)
+                _sp_conflict = _sp_res.get("conflict", False)
+                _sp_cross_sym = _sp_res.get("cross_symbol", "")
+                _sp_cross_dir = _sp_res.get("cross_direction", "N/A")
+                _sp_strike  = _sp_res.get("strike")
+                _sp_ltp     = _sp_res.get("ltp") or 0
+                _sp_sl      = _sp_res.get("sl")
+                _sp_tgt     = _sp_res.get("target")
+                _sp_rr      = _sp_res.get("rr")
+                _sp_opt     = _sp_res.get("option_type", "")
+                _sp_ts_str  = _sp_res["ts"].strftime("%H:%M") if hasattr(_sp_res.get("ts"), "strftime") else "—"
+                _sp_atm     = _sp_res.get("atm", 0)
+                _sp_pcr     = _sp_res.get("pcr", 0)
+                _sp_mp      = _sp_res.get("max_pain", 0)
+                _sp_cew     = _sp_res.get("max_ce_wall", 0)
+                _sp_pew     = _sp_res.get("max_pe_wall", 0)
+                _sp_sl_mult = _sp_res.get("sl_mult", 0.65)
+                _sp_tgt_mult= _sp_res.get("tgt_mult", 1.65)
+                _sp_block   = _sp_res.get("block_reason", "")
+
+                # Signal color
+                if "STRONG BUY CE" in _sp_signal:
+                    _spc, _spbg = "#00d4aa", "rgba(0,212,170,0.09)"
+                elif "BUY CE" in _sp_signal:
+                    _spc, _spbg = "#58d68d", "rgba(88,214,141,0.08)"
+                elif "STRONG BUY PE" in _sp_signal:
+                    _spc, _spbg = "#f85149", "rgba(248,81,73,0.11)"
+                elif "BUY PE" in _sp_signal:
+                    _spc, _spbg = "#ff7043", "rgba(255,112,67,0.09)"
+                else:
+                    _spc, _spbg = "#e6b800", "rgba(230,184,0,0.07)"
+
+                # ── Gate status row ───────────────────────────────────────────
+                st.markdown('<div class="sa-sec">Signal Gates</div>', unsafe_allow_html=True)
+                _gate_icons = {"Time": "⏱", "VIX": "📊", "IV": "📈", "Confirm": "🔁"}
+                _gate_html  = '<div class="sp-gate-row">'
+                for _gk, (_gpass, _greason) in _sp_gates.items():
+                    _gicon = _gate_icons.get(_gk, "•")
+                    _gcls  = "sp-gate-pass" if _gpass else "sp-gate-fail"
+                    _gmark = "✓" if _gpass else "✗"
+                    _gate_html += f'<span class="{_gcls}" title="{_greason}">{_gicon} {_gk} {_gmark}</span>'
+                if _sp_exp_day:
+                    _gate_html += '<span class="sp-expiry-badge">🗓 EXPIRY DAY</span>'
+                _gate_html += "</div>"
+                st.markdown(_gate_html, unsafe_allow_html=True)
+
+                # Conflict warning
+                if _sp_conflict:
+                    st.markdown(f'<div class="sp-conflict">⚠ Cross-index conflict: {_sp_symbol} is {_sp_res.get("direction","?")} but {_sp_cross_sym} is {_sp_cross_dir} — WAIT forced</div>', unsafe_allow_html=True)
+
+                # Gate block reason
+                if not _sp_gate_ok and _sp_block:
+                    st.markdown(f'<div class="sp-conflict">🚧 Gate blocked: {_sp_block}</div>', unsafe_allow_html=True)
+
+                # ── Signal banner ─────────────────────────────────────────────
+                _sp_gauge   = max(2, min(98, ((_sp_score + 14) / 28) * 100))
+                _sp_ci      = {"HIGH": "🔥", "MEDIUM": "⚡", "LOW": "⏳"}.get(_sp_conf, "")
+                _sp_tl = (
+                    f"<span style='color:{_spc};font-size:0.95rem;font-weight:700;'>Buy {_sp_symbol} {_sp_strike} {_sp_opt}</span><span style='color:#4a5568;font-size:0.8rem;margin-left:10px;'>expiry {_sp_expiry}</span>"
+                    if _sp_signal != "WAIT" and _sp_strike else
+                    "<span style='color:#4a5568;font-size:0.82rem;'>No directional setup — stand aside</span>"
+                )
+                _sp_extra = ""
+                if not _sp_gate_ok:
+                    _sp_extra = f"<span style='color:#f85149;font-size:0.72rem;margin-left:8px;'>⚠ Gate blocked</span>"
+                elif _sp_exp_day:
+                    _sp_extra = "<span style='color:#e6b800;font-size:0.72rem;margin-left:8px;'>🗓 Expiry-day thresholds active</span>"
+
+                st.markdown(f"""
+<div style="background:{_spbg};border:1.5px solid {_spc};border-radius:14px;padding:22px 28px 18px;margin:6px 0 14px;position:relative;overflow:hidden;">
+  <div style="position:absolute;top:0;left:0;right:0;height:3px;background:linear-gradient(90deg,transparent,{_spc},transparent);opacity:.6;"></div>
+  <div style="display:flex;align-items:flex-start;justify-content:space-between;flex-wrap:wrap;gap:16px;margin-bottom:18px;">
+    <div>
+      <div style="font-size:0.58rem;font-weight:800;letter-spacing:2px;text-transform:uppercase;color:{_spc};opacity:.75;margin-bottom:5px;">Signal</div>
+      <div style="font-size:2.1rem;font-weight:900;color:{_spc};letter-spacing:1px;line-height:1;">{_sp_signal}</div>
+      <div style="margin-top:10px;">{_sp_tl}{_sp_extra}</div>
+    </div>
+    <div style="text-align:right;">
+      <div style="font-size:0.58rem;font-weight:800;letter-spacing:2px;text-transform:uppercase;color:#3d4a5c;margin-bottom:5px;">Score</div>
+      <div style="font-size:2.4rem;font-weight:900;color:{_spc};line-height:1;">{_sp_score:+d}</div>
+      <div style="font-size:0.72rem;color:#6e7681;margin-top:6px;">{_sp_ci} {_sp_conf} confidence &nbsp;·&nbsp; {_sp_ts_str}</div>
+    </div>
+  </div>
+  <div>
+    <div style="display:flex;justify-content:space-between;font-size:0.56rem;color:#3d4a5c;font-weight:700;text-transform:uppercase;letter-spacing:.8px;margin-bottom:5px;"><span>Strong PE -14</span><span>Neutral 0</span><span>Strong CE +14</span></div>
+    <div style="height:7px;background:#1a2035;border-radius:4px;overflow:hidden;"><div style="height:100%;width:100%;background:linear-gradient(90deg,#f85149 0%,#e6b800 50%,#00d4aa 100%);border-radius:4px;"></div></div>
+    <div style="position:relative;height:10px;"><div style="position:absolute;left:{_sp_gauge:.1f}%;transform:translateX(-50%);top:0;width:3px;height:10px;background:{_spc};border-radius:2px;box-shadow:0 0 6px {_spc};"></div></div>
+  </div>
+</div>""", unsafe_allow_html=True)
+
+                # ── Trade + Context columns ───────────────────────────────────
+                _lc2, _rc2 = st.columns([11, 9])
+
+                with _lc2:
+                    if _sp_signal != "WAIT" and _sp_ltp and _sp_ltp > 0.5:
+                        _tc2  = "#00d4aa" if "CE" in _sp_signal else "#f85149"
+                        _ltp_s2 = f"₹{_sp_ltp:.1f}"
+                        _sl_s2  = f"₹{_sp_sl:.1f}"  if _sp_sl  else "—"
+                        _tgt_s2 = f"₹{_sp_tgt:.1f}" if _sp_tgt else "—"
+                        _rr_s2  = f"1 : {_sp_rr}"   if _sp_rr  else "—"
+                        _sl_pct  = f"{int((1 - _sp_sl_mult)*100)}%"
+                        _tgt_pct = f"{int((_sp_tgt_mult - 1)*100)}%"
+                        st.markdown(f"""
+<div class="sa-card">
+  <div class="sa-sec">Trade Setup <span style="color:#e6b800;font-size:0.55rem;">(VIX-adjusted · SL -{_sl_pct} / Tgt +{_tgt_pct})</span></div>
+  <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:16px;margin-bottom:14px;">
+    <div><div class="sa-kv-lbl">Strike</div><div class="sa-kv-val" style="color:{_tc2};font-size:1.35rem;">{_sp_strike}</div></div>
+    <div><div class="sa-kv-lbl">Type</div><div class="sa-kv-val" style="color:{_tc2};">{_sp_opt}</div></div>
+    <div><div class="sa-kv-lbl">Expiry</div><div class="sa-kv-val" style="color:#adbac7;font-size:0.88rem;">{_sp_expiry}</div></div>
+  </div>
+  <div class="sa-divider"></div>
+  <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:16px;margin-top:14px;">
+    <div><div class="sa-kv-lbl">Entry (LTP)</div><div class="sa-kv-val">{_ltp_s2}</div></div>
+    <div><div class="sa-kv-lbl">Stop Loss</div><div class="sa-kv-val" style="color:#f85149;">{_sl_s2}</div></div>
+    <div><div class="sa-kv-lbl">Target</div><div class="sa-kv-val" style="color:#00d4aa;">{_tgt_s2}</div></div>
+    <div><div class="sa-kv-lbl">Risk : Reward</div><div class="sa-kv-val">{_rr_s2}</div></div>
+  </div>
+  <div style="font-size:0.67rem;color:#3d4a5c;margin-top:14px;">⚠ For educational purposes only — not financial advice.</div>
+</div>""", unsafe_allow_html=True)
+                    else:
+                        st.markdown("""
+<div class="sa-card" style="text-align:center;padding:28px 20px;">
+  <div style="color:#4a5568;font-size:0.88rem;margin-bottom:4px;">No trade setup</div>
+  <div style="color:#3d4a5c;font-size:0.78rem;">Gates blocked or score below threshold</div>
+</div>""", unsafe_allow_html=True)
+
+                with _rc2:
+                    _pcr_c2 = "#00d4aa" if _sp_pcr >= 1.0 else "#f85149"
+                    _vwap_c = "#00d4aa" if _sp_res.get("spot", 0) > _sp_vwap > 0 else ("#f85149" if 0 < _sp_vwap < _sp_res.get("spot", 0) else "#adbac7")
+                    _vix_c  = "#00d4aa" if 12 <= _sp_vix <= 18 else ("#e6b800" if _sp_vix <= 22 else "#f85149")
+                    _ivr_c  = "#00d4aa" if _sp_ivr > 1.1 else ("#f85149" if _sp_ivr < 0.9 else "#adbac7")
+                    _vwap_disp = f"{_sp_vwap:,.0f}" if _sp_vwap > 0 else "—"
+                    _vix_disp  = f"{_sp_vix:.1f}" if _sp_vix > 0 else "—"
+                    _ivr_disp  = f"{_sp_ivr:.2f}x" if _sp_ivr != 1.0 else "—"
+                    _cross_disp = f"{_sp_cross_sym}: {_sp_cross_dir}" if _sp_cross_sym and _sp_cross_dir not in ("N/A", "") else "—"
+                    _cross_c = "#f85149" if _sp_conflict else ("#00d4aa" if _sp_cross_dir == _sp_res.get("direction") else "#adbac7")
+                    st.markdown(f"""
+<div class="sa-card">
+  <div class="sa-sec">Market Context</div>
+  <div class="sp-ctx-grid">
+    <div class="sp-ctx-item"><div class="sa-kv-lbl">Spot</div><div class="sa-kv-val" style="font-size:0.95rem;">{_sp_res.get("spot",0):,.2f}</div></div>
+    <div class="sp-ctx-item"><div class="sa-kv-lbl">ATM</div><div class="sa-kv-val" style="font-size:0.95rem;">{_sp_atm:,}</div></div>
+    <div class="sp-ctx-item"><div class="sa-kv-lbl">VWAP</div><div class="sa-kv-val" style="color:{_vwap_c};font-size:0.95rem;">{_vwap_disp}</div></div>
+    <div class="sp-ctx-item"><div class="sa-kv-lbl">PCR</div><div class="sa-kv-val" style="color:{_pcr_c2};font-size:0.95rem;">{_sp_pcr:.3f}</div></div>
+    <div class="sp-ctx-item"><div class="sa-kv-lbl">Max Pain</div><div class="sa-kv-val" style="font-size:0.95rem;">{_sp_mp:,}</div></div>
+    <div class="sp-ctx-item"><div class="sa-kv-lbl">India VIX</div><div class="sa-kv-val" style="color:{_vix_c};font-size:0.95rem;">{_vix_disp}</div></div>
+    <div class="sp-ctx-item"><div class="sa-kv-lbl">CE Wall</div><div class="sa-kv-val" style="color:#f85149;font-size:0.95rem;">{_sp_cew:,}</div></div>
+    <div class="sp-ctx-item"><div class="sa-kv-lbl">PE Wall</div><div class="sa-kv-val" style="color:#00d4aa;font-size:0.95rem;">{_sp_pew:,}</div></div>
+    <div class="sp-ctx-item"><div class="sa-kv-lbl">IV Ratio</div><div class="sa-kv-val" style="color:{_ivr_c};font-size:0.95rem;">{_ivr_disp}</div></div>
+  </div>
+  <div class="sa-divider"></div>
+  <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;">
+    <div><div class="sa-kv-lbl" style="margin-bottom:2px;">Cross-index</div><div style="font-size:0.8rem;font-weight:700;color:{_cross_c};">{_cross_disp}</div></div>
+    <div style="text-align:right;"><div class="sa-kv-lbl" style="margin-bottom:2px;">SL / Target</div><div style="font-size:0.78rem;color:#adbac7;">-{int((1-_sp_sl_mult)*100)}% / +{int((_sp_tgt_mult-1)*100)}% (VIX {_vix_disp})</div></div>
+  </div>
+</div>""", unsafe_allow_html=True)
+
+                # ── Factor Breakdown ──────────────────────────────────────────
+                _sp_factors = _sp_res.get("factors", [])
+                if _sp_factors:
+                    def _sp_badge(d: str) -> str:
+                        if d == "BULL": return '<span class="sa-bbull">▲ BULL</span>'
+                        if d == "BEAR": return '<span class="sa-bbear">▼ BEAR</span>'
+                        return '<span class="sa-bneut">— NEUTRAL</span>'
+
+                    def _sp_pts(p: int) -> str:
+                        if p > 0: return f'<span style="color:#00d4aa;font-weight:800;">{p:+d}</span>'
+                        if p < 0: return f'<span style="color:#f85149;font-weight:800;">{p:+d}</span>'
+                        return '<span style="color:#3d4a5c;font-weight:700;">0</span>'
+
+                    _sp_total = sum(f["points"] for f in _sp_factors)
+                    _v2_names = {"VWAP", "India VIX", "IV Spike", "Time Window", "OI Velocity"}
+                    _sp_frows = "".join(
+                        f'<tr style="{"background:rgba(230,184,0,0.04);" if f["name"] in _v2_names else ""}">'
+                        f'<td style="color:#adbac7;font-weight:600;font-size:0.82rem;white-space:nowrap;">'
+                        f'{"⚡ " if f["name"] in _v2_names else ""}{f["name"]}</td>'
+                        f'<td style="color:#e6edf3;font-weight:700;font-size:0.84rem;">{f["value"]}</td>'
+                        f'<td>{_sp_badge(f["direction"])}</td>'
+                        f'<td class="r">{_sp_pts(f["points"])}</td>'
+                        f'<td style="color:#6e7681;font-size:0.77rem;">{f["reason"]}</td>'
+                        f'</tr>'
+                        for f in _sp_factors
+                    )
+                    st.markdown('<div class="sa-sec" style="margin-top:4px;">Signal Factors <span style="color:#e6b800;font-weight:500;font-size:0.55rem;">⚡ = new v2 factors</span></div>', unsafe_allow_html=True)
+                    st.markdown(f"""
+<div class="sa-card" style="padding:0;overflow:hidden;">
+  <div style="overflow-x:auto;">
+    <table class="sa-tbl">
+      <thead><tr><th>Factor</th><th>Value</th><th>Direction</th><th class="r">Pts</th><th>Interpretation</th></tr></thead>
+      <tbody>{_sp_frows}</tbody>
+      <tfoot><tr><td colspan="3" style="color:#6e7681;font-size:0.72rem;font-weight:700;text-transform:uppercase;letter-spacing:.8px;">Total Score (max ±14)</td><td class="r" style="font-size:1.05rem;">{_sp_pts(_sp_total)}</td><td></td></tr></tfoot>
+    </table>
+  </div>
+</div>""", unsafe_allow_html=True)
+
+                # ── Signal History ────────────────────────────────────────────
+                _sp_hist = st.session_state.get("sa2_history", [])
+                if len(_sp_hist) > 1:
+                    def _sp_sig_col(s: str) -> str:
+                        if "CE" in s: return "#00d4aa"
+                        if "PE" in s: return "#f85149"
+                        return "#e6b800"
+
+                    def _sp_sc_col(sc: int) -> str:
+                        if sc > 0: return "#00d4aa"
+                        if sc < 0: return "#f85149"
+                        return "#6e7681"
+
+                    _sp_hrows = ""
+                    for h in reversed(_sp_hist[-20:]):
+                        _gate_badge = '<span class="sa-bbull">✓ Gates OK</span>' if h["gate_pass"] else '<span class="sa-bbear">✗ Blocked</span>'
+                        _ltp_cell = ("₹" + str(round(h["ltp"], 1))) if h["ltp"] else "—"
+                        _sp_hrows += (
+                            f'<tr>'
+                            f'<td style="color:#6e7681;font-size:0.8rem;white-space:nowrap;">{h["ts"]}</td>'
+                            f'<td style="font-weight:700;color:{_sp_sig_col(h["signal"])};font-size:0.81rem;">{h["signal"]}</td>'
+                            f'<td style="color:#c9d1d9;font-size:0.81rem;">{h["spot"]:,.2f}</td>'
+                            f'<td style="font-weight:700;color:{_sp_sc_col(h["score"])};font-size:0.84rem;">{h["score"]:+d}</td>'
+                            f'<td style="color:#adbac7;font-size:0.81rem;">{h["strike"] if h["strike"] else "—"}</td>'
+                            f'<td style="color:#adbac7;font-size:0.81rem;">{_ltp_cell}</td>'
+                            f'<td style="color:#6e7681;font-size:0.79rem;">{h["vix"]:.1f}</td>'
+                            f'<td style="color:#6e7681;font-size:0.79rem;">{h["iv_ratio"]:.2f}x</td>'
+                            f'<td>{_gate_badge}</td>'
+                            f'</tr>'
+                        )
+                    st.markdown('<div class="sa-sec" style="margin-top:4px;">Signal History</div>', unsafe_allow_html=True)
+                    st.markdown(f"""
+<div class="sa-card" style="padding:0;overflow:hidden;">
+  <div style="overflow-x:auto;">
+    <table class="sa-tbl">
+      <thead><tr><th>Time</th><th>Signal</th><th>Spot</th><th>Score</th><th>Strike</th><th>LTP</th><th>VIX</th><th>IV Ratio</th><th>Gates</th></tr></thead>
+      <tbody>{_sp_hrows}</tbody>
     </table>
   </div>
 </div>""", unsafe_allow_html=True)
