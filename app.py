@@ -37,6 +37,7 @@ from screener.trending_oi import (
 )
 from screener.smart_alerts import run_smart_signal
 from screener.smart_alerts_v2 import run_smart_signal_v2
+from screener.gamma_blast import run_gamma_blast_scan
 
 try:
     from streamlit_autorefresh import st_autorefresh as _st_autorefresh
@@ -288,6 +289,7 @@ _em_count    = len(st.session_state.get("em_summary",    pd.DataFrame()))
 _toi_count   = len(st.session_state.get("toi_rows",     []))
 _sa_count    = len(st.session_state.get("sa_history",   []))
 _sa2_count   = len(st.session_state.get("sa2_history",  []))
+_gb_count    = len(st.session_state.get("gb_history",   []))
 
 def _sb_row(icon: str, label: str, count: int) -> str:
     badge = f'<span class="sb-badge">{count}</span>' if count > 0 else ""
@@ -320,6 +322,7 @@ with st.sidebar:
 {_sb_row("📡", "Trending OI", _toi_count)}
 {_sb_row("💡", "Smart Alerts", _sa_count)}
 {_sb_row("⚡", "Smart Alerts Pro", _sa2_count)}
+{_sb_row("💥", "Expiry Gamma Blast", _gb_count)}
 <div class="sb-div"></div>
 <div class="sb-live"><span class="sb-dot"></span>NSE feed LIVE</div>
 """, unsafe_allow_html=True)
@@ -457,7 +460,7 @@ st.markdown(
 st.divider()
 
 # ── Tabs ──────────────────────────────────────────────────────────────────────
-tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11 = st.tabs([
+tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12 = st.tabs([
     "📰 News + Breakout",
     "🔁 20 MA Retracement",
     "📈 EMA Crossover",
@@ -469,6 +472,7 @@ tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11 = st.tabs([
     "📡 Trending OI",
     "💡 Smart Alerts",
     "⚡ Smart Alerts Pro",
+    "💥 Expiry Gamma Blast",
 ])
 
 # ── TAB 1 ─────────────────────────────────────────────────────────────────────
@@ -3460,3 +3464,476 @@ with tab11:
     </table>
   </div>
 </div>""", unsafe_allow_html=True)
+
+# ── Tab 12: Expiry Gamma Blast ─────────────────────────────────────────────
+with tab12:
+    _IST_GB = datetime.timezone(datetime.timedelta(hours=5, minutes=30))
+
+    st.markdown("""
+<style>
+.gb-header{display:flex;align-items:center;gap:12px;margin-bottom:4px;}
+.gb-title{font-size:1.45rem;font-weight:800;color:#f0f6fc;letter-spacing:-0.5px;}
+.gb-badge-exp{background:#1a2535;border:1px solid #e6b800;color:#e6b800;font-size:0.68rem;font-weight:700;padding:3px 9px;border-radius:20px;letter-spacing:0.8px;}
+.gb-badge-live{background:#0d2818;border:1px solid #2ea043;color:#2ea043;font-size:0.68rem;font-weight:700;padding:3px 9px;border-radius:20px;letter-spacing:0.8px;}
+.gb-countdown{font-size:1.1rem;font-weight:700;color:#e6b800;font-variant-numeric:tabular-nums;}
+.gb-countdown-lbl{font-size:0.72rem;color:#6e7681;margin-right:6px;}
+.gb-cdown-wrap{display:flex;align-items:center;gap:6px;background:#12191f;border:1px solid #21262d;border-radius:8px;padding:6px 14px;margin-bottom:10px;}
+/* Strike Ladder */
+.gb-ladder-wrap{overflow-x:auto;border-radius:10px;border:1px solid #21262d;}
+.gb-tbl{width:100%;border-collapse:collapse;font-size:0.82rem;}
+.gb-tbl th{background:#0d1117;color:#6e7681;font-size:0.72rem;font-weight:600;letter-spacing:0.6px;padding:7px 10px;text-transform:uppercase;border-bottom:1px solid #21262d;}
+.gb-tbl td{padding:7px 10px;border-bottom:1px solid #161b22;white-space:nowrap;vertical-align:middle;}
+.gb-tbl tr:last-child td{border-bottom:none;}
+.gb-row-atm td{background:rgba(230,184,0,0.07)!important;}
+.gb-row-atm .gb-strike-cell{color:#e6b800!important;font-weight:800;}
+.gb-row-blast td{background:rgba(248,81,73,0.10)!important;animation:gb-pulse 1.2s ease-in-out infinite;}
+@keyframes gb-pulse{0%,100%{background:rgba(248,81,73,0.10)!important;}50%{background:rgba(248,81,73,0.22)!important;}}
+.gb-ce-side{text-align:right;}
+.gb-pe-side{text-align:left;}
+.gb-strike-cell{text-align:center;font-weight:700;color:#c9d1d9;font-size:0.88rem;}
+.gb-dist-cell{text-align:center;font-size:0.73rem;color:#6e7681;}
+.gb-ltp{font-weight:600;color:#c9d1d9;}
+.gb-oi-bar-ce{display:flex;align-items:center;justify-content:flex-end;gap:6px;}
+.gb-oi-bar-pe{display:flex;align-items:center;justify-content:flex-start;gap:6px;}
+.gb-bar-fill-ce{height:6px;background:#00d4aa;border-radius:3px;min-width:2px;}
+.gb-bar-fill-pe{height:6px;background:#f85149;border-radius:3px;min-width:2px;}
+.gb-oi-num{color:#adbac7;font-size:0.79rem;}
+.gb-delta-pos{color:#f85149;font-size:0.73rem;font-weight:600;}
+.gb-delta-neg{color:#00d4aa;font-size:0.73rem;font-weight:600;}
+.gb-delta-neu{color:#6e7681;font-size:0.73rem;}
+.gb-fire{color:#ff6b35;font-size:0.85rem;}
+/* Signal banners */
+.gb-banner{border-radius:12px;padding:20px 24px;margin:12px 0;position:relative;overflow:hidden;}
+.gb-banner-blast{background:linear-gradient(135deg,#1a0a00 0%,#2a0d0d 100%);border:2px solid #f85149;box-shadow:0 0 20px rgba(248,81,73,0.3);}
+.gb-banner-preblast{background:linear-gradient(135deg,#1a1000 0%,#1f1a00 100%);border:2px solid #e6b800;}
+.gb-banner-building{background:linear-gradient(135deg,#0d1117 0%,#12191f 100%);border:1px solid #e6b800;}
+.gb-banner-watch{background:linear-gradient(135deg,#0d1117 0%,#12191f 100%);border:1px solid #30363d;}
+.gb-banner-wait{background:#0d1117;border:1px solid #21262d;}
+.gb-sig-label{font-size:0.72rem;color:#6e7681;letter-spacing:1px;text-transform:uppercase;margin-bottom:4px;}
+.gb-sig-text-blast{font-size:1.8rem;font-weight:900;color:#f85149;letter-spacing:-1px;}
+.gb-sig-text-pre{font-size:1.5rem;font-weight:800;color:#e6b800;}
+.gb-sig-text-building{font-size:1.4rem;font-weight:700;color:#e6b800;}
+.gb-sig-text-watch{font-size:1.4rem;font-weight:700;color:#adbac7;}
+.gb-sig-text-wait{font-size:1.4rem;font-weight:700;color:#6e7681;}
+.gb-sig-sub{font-size:0.84rem;color:#6e7681;margin-top:4px;}
+.gb-score-box{position:absolute;top:16px;right:20px;text-align:right;}
+.gb-score-lbl{font-size:0.68rem;color:#6e7681;letter-spacing:0.8px;}
+.gb-score-ce{font-size:1.1rem;font-weight:700;color:#00d4aa;}
+.gb-score-pe{font-size:1.1rem;font-weight:700;color:#f85149;}
+/* Trade setup */
+.gb-setup{background:#0d1117;border:1px solid #21262d;border-radius:10px;padding:16px;}
+.gb-kv{display:flex;justify-content:space-between;align-items:center;padding:5px 0;border-bottom:1px solid #161b22;}
+.gb-kv:last-child{border-bottom:none;}
+.gb-kv-lbl{font-size:0.74rem;color:#6e7681;letter-spacing:0.4px;}
+.gb-kv-val{font-size:0.92rem;font-weight:700;color:#f0f6fc;}
+.gb-kv-sl{color:#f85149!important;}
+.gb-kv-tgt{color:#00d4aa!important;}
+/* Factor table */
+.gb-factor-dir-bull{display:inline-block;background:#0d2818;color:#2ea043;border:1px solid #2ea043;font-size:0.68rem;padding:1px 7px;border-radius:4px;font-weight:700;}
+.gb-factor-dir-bear{display:inline-block;background:#2a0d0d;color:#f85149;border:1px solid #f85149;font-size:0.68rem;padding:1px 7px;border-radius:4px;font-weight:700;}
+.gb-factor-dir-neu{display:inline-block;background:#161b22;color:#6e7681;border:1px solid #30363d;font-size:0.68rem;padding:1px 7px;border-radius:4px;}
+</style>
+""", unsafe_allow_html=True)
+
+    # ── Header ────────────────────────────────────────────────────────────────
+    _gb_now = datetime.datetime.now(_IST_GB)
+    _gb_close = _gb_now.replace(hour=15, minute=30, second=0, microsecond=0)
+    _gb_secs_left = max(0, int((_gb_close - _gb_now).total_seconds()))
+    _gb_hh = _gb_secs_left // 3600
+    _gb_mm = (_gb_secs_left % 3600) // 60
+    _gb_ss = _gb_secs_left % 60
+
+    st.markdown("""
+<div class="gb-header">
+  <span class="gb-title">💥 Expiry Gamma Blast</span>
+  <span class="gb-badge-exp">EXPIRY DAY</span>
+  <span class="gb-badge-live">LIVE</span>
+</div>""", unsafe_allow_html=True)
+
+    st.markdown(
+        f'<div class="gb-cdown-wrap">'
+        f'<span class="gb-countdown-lbl">Market closes in</span>'
+        f'<span class="gb-countdown">{_gb_hh:02d}:{_gb_mm:02d}:{_gb_ss:02d}</span>'
+        f'<span class="gb-countdown-lbl" style="margin-left:10px;">Gamma blast window: 2:00 PM – 3:15 PM IST</span>'
+        f'</div>',
+        unsafe_allow_html=True,
+    )
+
+    # ── Kite check ───────────────────────────────────────────────────────────
+    _gb_key  = st.session_state.get("kite_api_key", "")
+    _gb_tok  = st.session_state.get("kite_access_token", "")
+    _kite_ok = bool(_gb_key and _gb_tok)
+
+    if not _kite_ok:
+        st.markdown('<div class="sa-card" style="text-align:center;padding:40px 20px;"><div style="font-size:2rem;">🔑</div><div style="color:#6e7681;margin-top:8px;">Enter Kite API Key &amp; Access Token in the sidebar to start scanning</div></div>', unsafe_allow_html=True)
+    else:
+        # ── Control panel ─────────────────────────────────────────────────────
+        with st.container(border=True):
+            _gb_c1, _gb_c2, _gb_c3, _gb_c4 = st.columns([2, 3, 2, 3])
+            with _gb_c1:
+                _gb_sym = st.selectbox("Index", ["NIFTY", "BANKNIFTY", "FINNIFTY"], key="gb_sym")
+            with _gb_c2:
+                # Get expiry list from sa_instr if already loaded, else show text input
+                _gb_instr = st.session_state.get("gb_instr")
+                if _gb_instr is not None and not _gb_instr.empty:
+                    _gb_exp_opts = sorted(
+                        _gb_instr[(_gb_instr["name"] == _gb_sym) & (_gb_instr["instrument_type"].isin(["CE", "PE"]))]["expiry"].unique()
+                    )
+                    _gb_exp_default = _gb_exp_opts[0] if _gb_exp_opts else ""
+                    _gb_expiry = st.selectbox("Expiry", _gb_exp_opts, key="gb_expiry_sel") if _gb_exp_opts else st.text_input("Expiry (e.g. 2025-07-03)", key="gb_expiry_txt")
+                else:
+                    _gb_expiry = st.text_input("Expiry (load first)", key="gb_expiry_txt", placeholder="e.g. 2025-07-03")
+            with _gb_c3:
+                _gb_interval = st.selectbox("Refresh", [30, 45, 60], format_func=lambda x: f"{x}s", key="gb_interval")
+            with _gb_c4:
+                _gb_lc1, _gb_lc2 = st.columns(2)
+                with _gb_lc1:
+                    _gb_load_btn = st.button("📥 Load", key="gb_load", use_container_width=True)
+                with _gb_lc2:
+                    _gb_scan_btn = st.button("🔍 Scan Now", key="gb_scan", use_container_width=True, type="primary")
+
+        # ── Load instruments ──────────────────────────────────────────────────
+        if _gb_load_btn:
+            with st.spinner("Downloading NFO instruments…"):
+                try:
+                    _gb_raw = toi_fetch_instruments(_gb_key, _gb_tok)
+                    st.session_state["gb_instr"] = _gb_raw
+                    st.session_state["gb_prev_chain"] = None
+                    st.session_state["gb_spot_history"] = []
+                    st.session_state["gb_history"] = []
+                    st.success(f"Loaded {len(_gb_raw)} instruments")
+                    st.rerun()
+                except Exception as _gb_e:
+                    st.error(f"Load failed: {_gb_e}")
+
+        # ── Auto-refresh timer ────────────────────────────────────────────────
+        _gb_h_now = _gb_now.hour * 60 + _gb_now.minute
+        _gb_in_window = (14 * 60) <= _gb_h_now < (15 * 60 + 15)
+        if _gb_in_window and st.session_state.get("gb_instr") is not None:
+            _st_autorefresh(interval=_gb_interval * 1000, key="gb_refresh")
+
+        # ── Run scan ──────────────────────────────────────────────────────────
+        def _do_gb_scan():
+            _instr = st.session_state.get("gb_instr")
+            if _instr is None or _instr.empty:
+                st.warning("Load instruments first (click 📥 Load)")
+                return
+            _exp = st.session_state.get("gb_expiry_sel") or st.session_state.get("gb_expiry_txt", "")
+            if not _exp:
+                st.warning("Select an expiry date")
+                return
+            with st.spinner("Scanning option chain…"):
+                try:
+                    _res = run_gamma_blast_scan(
+                        _gb_key, _gb_tok,
+                        _gb_sym, _exp, _instr,
+                        spot_history=st.session_state.get("gb_spot_history"),
+                        prev_chain=st.session_state.get("gb_prev_chain"),
+                    )
+                    if "error" in _res:
+                        st.error(_res["error"])
+                        return
+                    st.session_state["gb_last_signal"] = _res
+                    st.session_state["gb_last_fetch"]  = datetime.datetime.now(_IST_GB)
+                    st.session_state["gb_prev_chain"]  = _res["new_prev_chain"]
+                    # Spot history
+                    _sh = st.session_state.get("gb_spot_history", [])
+                    _sh.append(_res["spot"])
+                    st.session_state["gb_spot_history"] = _sh[-20:]
+                    # Signal history (record if actionable)
+                    _sig = _res["signal"]
+                    if _sig not in ("WAIT", "WATCH"):
+                        _hist = st.session_state.get("gb_history", [])
+                        _hist.append({
+                            "ts":      _res["ist_now"].strftime("%H:%M:%S"),
+                            "signal":  _sig,
+                            "spot":    _res["spot"],
+                            "ce_sc":   _res["score_ce"],
+                            "pe_sc":   _res["score_pe"],
+                            "strike":  _res.get("recommended_strike"),
+                            "type":    _res.get("recommended_type"),
+                            "ltp":     _res.get("ltp_entry"),
+                        })
+                        st.session_state["gb_history"] = _hist[-30:]
+                except Exception as _e:
+                    st.error(f"Scan error: {_e}")
+
+        if _gb_scan_btn:
+            _do_gb_scan()
+        elif _gb_in_window and st.session_state.get("gb_instr") is not None:
+            _do_gb_scan()
+
+        # ── Display results ───────────────────────────────────────────────────
+        _gb_res = st.session_state.get("gb_last_signal")
+        _gb_fetch_ts = st.session_state.get("gb_last_fetch")
+
+        if _gb_fetch_ts:
+            _gb_age = int((datetime.datetime.now(_IST_GB) - _gb_fetch_ts).total_seconds())
+            st.caption(f"Last scan: {_gb_fetch_ts.strftime('%H:%M:%S')} IST  ·  {_gb_age}s ago")
+
+        if _gb_res:
+            _gb_sig   = _gb_res["signal"]
+            _gb_chain = _gb_res["chain"]
+            _gb_spot  = _gb_res["spot"]
+            _gb_atm   = _gb_res["atm"]
+
+            # ── Gamma signal banner ───────────────────────────────────────────
+            if "GAMMA BLAST" in _gb_sig:
+                _banner_cls = "gb-banner-blast"
+                _sig_cls    = "gb-sig-text-blast"
+                _sig_emoji  = "💥 "
+            elif "PRE-BLAST" in _gb_sig:
+                _banner_cls = "gb-banner-preblast"
+                _sig_cls    = "gb-sig-text-pre"
+                _sig_emoji  = "⚡ "
+            elif "BUILDING" in _gb_sig:
+                _banner_cls = "gb-banner-building"
+                _sig_cls    = "gb-sig-text-building"
+                _sig_emoji  = "🔥 "
+            elif _gb_sig == "WATCH":
+                _banner_cls = "gb-banner-watch"
+                _sig_cls    = "gb-sig-text-watch"
+                _sig_emoji  = "👁 "
+            else:
+                _banner_cls = "gb-banner-wait"
+                _sig_cls    = "gb-sig-text-wait"
+                _sig_emoji  = ""
+
+            _gb_detail = _gb_res.get("signal_detail", "")
+            _gb_sd_txt = _gb_res.get("spot_direction", "FLAT")
+            _gb_dir_arrow = {"UP": "⬆ Spot rising", "DOWN": "⬇ Spot falling", "FLAT": "➡ Sideways"}.get(_gb_sd_txt, "")
+
+            st.markdown(
+                f'<div class="gb-banner {_banner_cls}">'
+                f'<div class="gb-sig-label">GAMMA SIGNAL</div>'
+                f'<div class="{_sig_cls}">{_sig_emoji}{_gb_sig}</div>'
+                f'<div class="gb-sig-sub">{_gb_detail if _gb_detail else _gb_dir_arrow}</div>'
+                f'<div class="gb-score-box">'
+                f'<div class="gb-score-lbl">CE SCORE</div>'
+                f'<div class="gb-score-ce">+{_gb_res["score_ce"]}</div>'
+                f'<div class="gb-score-lbl" style="margin-top:4px;">PE SCORE</div>'
+                f'<div class="gb-score-pe">+{_gb_res["score_pe"]}</div>'
+                f'</div>'
+                f'</div>',
+                unsafe_allow_html=True,
+            )
+
+            # ── Two columns: Setup | Strike Ladder ───────────────────────────
+            _gb_col1, _gb_col2 = st.columns([1, 2])
+
+            with _gb_col1:
+                st.markdown('<div class="sa-sec">Trade Setup</div>', unsafe_allow_html=True)
+                _rs  = _gb_res.get("recommended_strike")
+                _rt  = _gb_res.get("recommended_type")
+                _ltp = _gb_res.get("ltp_entry")
+                _sl  = _gb_res.get("ltp_sl")
+                _tgt = _gb_res.get("ltp_target")
+
+                if _rs and _rt and _ltp:
+                    st.markdown(
+                        f'<div class="gb-setup">'
+                        f'<div class="gb-kv"><span class="gb-kv-lbl">INSTRUMENT</span><span class="gb-kv-val">{_gb_sym} {int(_rs)} {_rt}</span></div>'
+                        f'<div class="gb-kv"><span class="gb-kv-lbl">ENTRY LTP</span><span class="gb-kv-val">₹{_ltp:.1f}</span></div>'
+                        f'<div class="gb-kv"><span class="gb-kv-lbl">STOP LOSS</span><span class="gb-kv-val gb-kv-sl">₹{_sl:.1f} (−50%)</span></div>'
+                        f'<div class="gb-kv"><span class="gb-kv-lbl">TARGET</span><span class="gb-kv-val gb-kv-tgt">₹{_tgt:.1f} (3×)</span></div>'
+                        f'<div class="gb-kv"><span class="gb-kv-lbl">SPOT</span><span class="gb-kv-val">{_gb_spot:,.2f}</span></div>'
+                        f'<div class="gb-kv"><span class="gb-kv-lbl">ATM</span><span class="gb-kv-val">{int(_gb_atm)}</span></div>'
+                        f'<div class="gb-kv"><span class="gb-kv-lbl">DIRECTION</span><span class="gb-kv-val">{_gb_sd_txt} {_gb_dir_arrow}</span></div>'
+                        f'<div style="margin-top:10px;padding:8px;background:#1a0000;border-radius:6px;border:1px solid #f85149;">'
+                        f'<div style="color:#f85149;font-size:0.72rem;font-weight:700;">⚠ EXPIRY DAY RULES</div>'
+                        f'<div style="color:#6e7681;font-size:0.71rem;margin-top:4px;">Exit by 3:15 PM — no exceptions.<br>50% SL is firm. 3× target then exit.<br>Do NOT hold through 3:20 PM.</div>'
+                        f'</div>'
+                        f'</div>',
+                        unsafe_allow_html=True,
+                    )
+                else:
+                    st.markdown(
+                        '<div class="gb-setup" style="text-align:center;padding:30px 16px;">'
+                        '<div style="color:#6e7681;font-size:0.84rem;">No trade setup yet.<br>Waiting for blast zone signal.</div>'
+                        '</div>',
+                        unsafe_allow_html=True,
+                    )
+
+                # Blast zone indicators
+                st.markdown('<div class="sa-sec" style="margin-top:12px;">Pressure Walls</div>', unsafe_allow_html=True)
+                _ce_bs = _gb_res.get("blast_strike_ce")
+                _pe_bs = _gb_res.get("blast_strike_pe")
+                _ce_oi = _gb_res.get("pressure_oi_ce", 0)
+                _pe_oi = _gb_res.get("pressure_oi_pe", 0)
+                _cov_ce = _gb_res.get("covering_ce", False)
+                _cov_pe = _gb_res.get("covering_pe", False)
+
+                _wall_rows = ""
+                if _ce_bs:
+                    _dist_ce = abs(_ce_bs - _gb_spot) / _gb_spot * 100
+                    _cov_badge = ' <span style="color:#ff6b35;font-size:0.7rem;">🔥 COVERING</span>' if _cov_ce else ""
+                    _wall_rows += (
+                        f'<div class="gb-kv">'
+                        f'<span class="gb-kv-lbl">CE WALL {int(_ce_bs)}{_cov_badge}</span>'
+                        f'<span class="gb-kv-val" style="color:#00d4aa;">{_ce_oi/1e5:.1f}L · {_dist_ce:.2f}% away</span>'
+                        f'</div>'
+                    )
+                if _pe_bs:
+                    _dist_pe = abs(_gb_spot - _pe_bs) / _gb_spot * 100
+                    _cov_badge2 = ' <span style="color:#ff6b35;font-size:0.7rem;">🔥 COVERING</span>' if _cov_pe else ""
+                    _wall_rows += (
+                        f'<div class="gb-kv">'
+                        f'<span class="gb-kv-lbl">PE WALL {int(_pe_bs)}{_cov_badge2}</span>'
+                        f'<span class="gb-kv-val" style="color:#f85149;">{_pe_oi/1e5:.1f}L · {_dist_pe:.2f}% away</span>'
+                        f'</div>'
+                    )
+                if _wall_rows:
+                    st.markdown(f'<div class="gb-setup">{_wall_rows}</div>', unsafe_allow_html=True)
+
+            with _gb_col2:
+                st.markdown('<div class="sa-sec">Strike Ladder — Nearby OI</div>', unsafe_allow_html=True)
+
+                # Build strike ladder HTML
+                _max_ce_oi = max(_gb_chain["CE OI"].max(), 1)
+                _max_pe_oi = max(_gb_chain["PE OI"].max(), 1)
+
+                _ladder_rows = ""
+                for _, _row in _gb_chain.iterrows():
+                    _s    = _row["Strike"]
+                    _ce_o = int(_row["CE OI"])
+                    _pe_o = int(_row["PE OI"])
+                    _ce_l = _row["CE LTP"]
+                    _pe_l = _row["PE LTP"]
+                    _ce_d = int(_row.get("CE ΔOI", 0))
+                    _pe_d = int(_row.get("PE ΔOI", 0))
+
+                    _is_atm   = (_s == _gb_atm)
+                    _is_blast = (
+                        (_ce_bs is not None and _s == _ce_bs and abs(_s - _gb_spot) / _gb_spot * 100 < 0.30) or
+                        (_pe_bs is not None and _s == _pe_bs and abs(_gb_spot - _s) / _gb_spot * 100 < 0.30)
+                    )
+                    _row_cls = "gb-row-blast" if _is_blast else ("gb-row-atm" if _is_atm else "")
+
+                    # Distance from spot
+                    _dist_pct = (_s - _gb_spot) / _gb_spot * 100
+                    if abs(_dist_pct) < 0.01:
+                        _dist_str = "← SPOT"
+                    else:
+                        _dist_str = f"{_dist_pct:+.2f}%"
+
+                    # OI bars (max 120px wide)
+                    _ce_bar_w = int(_ce_o / _max_ce_oi * 120)
+                    _pe_bar_w = int(_pe_o / _max_pe_oi * 120)
+
+                    # Delta strings
+                    def _delta_str(d):
+                        if d == 0: return '<span class="gb-delta-neu">—</span>'
+                        cls = "gb-delta-neg" if d < 0 else "gb-delta-pos"
+                        return f'<span class="{cls}">{d/1e5:+.1f}L</span>'
+
+                    _blast_icon = "⚡" if _is_blast else ""
+                    _fire_ce = " 🔥" if (_cov_ce and _s == _ce_bs) else ""
+                    _fire_pe = " 🔥" if (_cov_pe and _s == _pe_bs) else ""
+
+                    _ladder_rows += (
+                        f'<tr class="{_row_cls}">'
+                        f'<td class="gb-ce-side">'
+                        f'  <div class="gb-oi-bar-ce">'
+                        f'    <span class="gb-oi-num">{_ce_o/1e5:.1f}L{_fire_ce}</span>'
+                        f'    <div class="gb-bar-fill-ce" style="width:{_ce_bar_w}px;"></div>'
+                        f'  </div>'
+                        f'</td>'
+                        f'<td class="gb-ce-side"><span class="gb-ltp">{"₹"+str(round(_ce_l,1)) if _ce_l > 0 else "—"}</span></td>'
+                        f'<td class="gb-ce-side">{_delta_str(_ce_d)}</td>'
+                        f'<td class="gb-strike-cell">{_blast_icon}{int(_s)}</td>'
+                        f'<td class="gb-dist-cell">{_dist_str}</td>'
+                        f'<td class="gb-pe-side">{_delta_str(_pe_d)}</td>'
+                        f'<td class="gb-pe-side"><span class="gb-ltp">{"₹"+str(round(_pe_l,1)) if _pe_l > 0 else "—"}</span></td>'
+                        f'<td class="gb-pe-side">'
+                        f'  <div class="gb-oi-bar-pe">'
+                        f'    <div class="gb-bar-fill-pe" style="width:{_pe_bar_w}px;"></div>'
+                        f'    <span class="gb-oi-num">{_pe_o/1e5:.1f}L{_fire_pe}</span>'
+                        f'  </div>'
+                        f'</td>'
+                        f'</tr>'
+                    )
+
+                st.markdown(
+                    f'<div class="gb-ladder-wrap">'
+                    f'<table class="gb-tbl">'
+                    f'<thead><tr>'
+                    f'<th class="gb-ce-side">CE OI (L)</th>'
+                    f'<th class="gb-ce-side">CE LTP</th>'
+                    f'<th class="gb-ce-side">CE ΔOI</th>'
+                    f'<th style="text-align:center;">STRIKE</th>'
+                    f'<th style="text-align:center;">DIST</th>'
+                    f'<th class="gb-pe-side">PE ΔOI</th>'
+                    f'<th class="gb-pe-side">PE LTP</th>'
+                    f'<th class="gb-pe-side">PE OI (L)</th>'
+                    f'</tr></thead>'
+                    f'<tbody>{_ladder_rows}</tbody>'
+                    f'</table>'
+                    f'</div>',
+                    unsafe_allow_html=True,
+                )
+
+            # ── Factor breakdown ──────────────────────────────────────────────
+            _gb_factors = _gb_res.get("factors", [])
+            if _gb_factors:
+                st.markdown('<div class="sa-sec" style="margin-top:14px;">Factor Breakdown</div>', unsafe_allow_html=True)
+                _gb_frows = ""
+                for _fn, _fv, _fd, _fp in _gb_factors:
+                    _dir_cls = "gb-factor-dir-bull" if _fd == "BULL" else ("gb-factor-dir-bear" if _fd == "BEAR" else "gb-factor-dir-neu")
+                    _pts_col = "#00d4aa" if _fp > 0 else ("#f85149" if _fp < 0 else "#6e7681")
+                    _gb_frows += (
+                        f'<tr>'
+                        f'<td style="color:#adbac7;font-size:0.82rem;white-space:nowrap;">{_fn}</td>'
+                        f'<td style="color:#c9d1d9;font-size:0.8rem;">{_fv}</td>'
+                        f'<td><span class="{_dir_cls}">{_fd}</span></td>'
+                        f'<td style="font-weight:700;color:{_pts_col};font-size:0.85rem;">{_fp:+d}</td>'
+                        f'</tr>'
+                    )
+                st.markdown(
+                    f'<div class="sa-card" style="padding:0;overflow:hidden;">'
+                    f'<div style="overflow-x:auto;">'
+                    f'<table class="sa-tbl">'
+                    f'<thead><tr><th>Factor</th><th>Reading</th><th>Direction</th><th>Pts</th></tr></thead>'
+                    f'<tbody>{_gb_frows}</tbody>'
+                    f'</table>'
+                    f'</div>'
+                    f'</div>',
+                    unsafe_allow_html=True,
+                )
+
+        # ── Signal history ────────────────────────────────────────────────────
+        _gb_hist = st.session_state.get("gb_history", [])
+        if _gb_hist:
+            st.markdown('<div class="sa-sec" style="margin-top:14px;">Signal History (This Session)</div>', unsafe_allow_html=True)
+
+            def _gb_sig_col(sig):
+                if "BLAST" in sig: return "#f85149"
+                if "PRE" in sig:   return "#e6b800"
+                if "BUILD" in sig: return "#ff6b35"
+                return "#adbac7"
+
+            _gb_hrows = ""
+            for _h in reversed(_gb_hist[-20:]):
+                _ltp_s = ("₹" + str(round(_h["ltp"], 1))) if _h.get("ltp") else "—"
+                _str_s = str(int(_h["strike"])) if _h.get("strike") else "—"
+                _gb_hrows += (
+                    f'<tr>'
+                    f'<td style="color:#6e7681;font-size:0.8rem;white-space:nowrap;">{_h["ts"]}</td>'
+                    f'<td style="font-weight:700;color:{_gb_sig_col(_h["signal"])};font-size:0.81rem;">{_h["signal"]}</td>'
+                    f'<td style="color:#c9d1d9;font-size:0.81rem;">{_h["spot"]:,.2f}</td>'
+                    f'<td style="color:#00d4aa;font-size:0.82rem;">{_h["ce_sc"]:+d}</td>'
+                    f'<td style="color:#f85149;font-size:0.82rem;">{_h["pe_sc"]:+d}</td>'
+                    f'<td style="color:#adbac7;">{_str_s} {_h.get("type","")}</td>'
+                    f'<td style="color:#adbac7;">{_ltp_s}</td>'
+                    f'</tr>'
+                )
+            st.markdown(
+                f'<div class="sa-card" style="padding:0;overflow:hidden;">'
+                f'<div style="overflow-x:auto;">'
+                f'<table class="sa-tbl">'
+                f'<thead><tr><th>Time</th><th>Signal</th><th>Spot</th><th>CE Sc</th><th>PE Sc</th><th>Strike</th><th>LTP</th></tr></thead>'
+                f'<tbody>{_gb_hrows}</tbody>'
+                f'</table>'
+                f'</div>'
+                f'</div>',
+                unsafe_allow_html=True,
+            )
