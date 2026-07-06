@@ -24,6 +24,15 @@ _KITE_BASE = "https://api.kite.trade"
 _IST = datetime.timezone(datetime.timedelta(hours=5, minutes=30))
 _BFO = {"SENSEX", "BANKEX"}
 
+_SPOT_SYM: dict[str, str] = {
+    "NIFTY":      "NSE:NIFTY 50",
+    "BANKNIFTY":  "NSE:NIFTY BANK",
+    "FINNIFTY":   "NSE:NIFTY FIN SERVICE",
+    "MIDCPNIFTY": "NSE:NIFTY MID SELECT",
+    "SENSEX":     "BSE:SENSEX",
+    "BANKEX":     "BSE:BANKEX",
+}
+
 
 def _hdrs(api_key: str, access_token: str) -> dict:
     return {"X-Kite-Version": "3", "Authorization": f"token {api_key}:{access_token}"}
@@ -44,19 +53,19 @@ def fetch_chain_snapshot(
     Returns {"spot", "atm", "chain": DataFrame, "strike_gap"} or None on error.
     """
     hdrs = _hdrs(api_key, access_token)
-    xch  = "BFO"  if symbol in _BFO else "NFO"
-    spot_xch = "BSE" if symbol in _BFO else "NSE"
+    xch      = "BFO" if symbol in _BFO else "NFO"
+    spot_sym = _SPOT_SYM.get(symbol, f"NSE:{symbol}")
 
     # Spot price
     r = requests.get(
         f"{_KITE_BASE}/quote/ltp",
         headers=hdrs,
-        params={"i": [f"{spot_xch}:{symbol}"]},
+        params={"i": [spot_sym]},
         timeout=10,
     )
     if not r.ok:
         return None
-    spot = float(r.json().get("data", {}).get(f"{spot_xch}:{symbol}", {}).get("last_price", 0))
+    spot = float(r.json().get("data", {}).get(spot_sym, {}).get("last_price", 0))
     if spot <= 0:
         return None
 
