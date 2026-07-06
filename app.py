@@ -3597,7 +3597,7 @@ with tab12:
         if _gb_load_btn:
             with st.spinner("Downloading NFO instruments…"):
                 try:
-                    _gb_raw = toi_fetch_instruments(_gb_key, _gb_tok)
+                    _gb_raw = toi_fetch_instruments(_gb_key, _gb_tok, _gb_sym)
                     st.session_state["gb_instr"] = _gb_raw
                     st.session_state["gb_prev_chain"] = None
                     st.session_state["gb_spot_history"] = []
