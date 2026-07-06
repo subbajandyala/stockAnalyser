@@ -2586,6 +2586,22 @@ with tab10:
 .sa-tbl td{padding:7px 14px;border-bottom:1px solid rgba(26,32,53,0.7);vertical-align:middle;}
 .sa-tbl tr:last-child td{border-bottom:none;}
 .sa-tbl tfoot td{background:#0a0e1a;border-top:2px solid #1a2035;padding:8px 14px;}
+/* ── Active Trade Monitor ── */
+.atm-card{border-radius:14px;padding:20px 24px;margin:6px 0 14px;position:relative;overflow:hidden;}
+.atm-open{background:linear-gradient(135deg,#0a1a12 0%,#0d1f1a 100%);border:1.5px solid #00d4aa;}
+.atm-sl{background:linear-gradient(135deg,#1a0a0a 0%,#1f0d0d 100%);border:1.5px solid #f85149;animation:atm-pulse .9s ease-in-out infinite;}
+.atm-tgt{background:linear-gradient(135deg,#0a1a12 0%,#081510 100%);border:2px solid #00d4aa;box-shadow:0 0 18px rgba(0,212,170,.25);animation:atm-pulse-g .9s ease-in-out infinite;}
+.atm-rev{background:linear-gradient(135deg,#1a1200 0%,#1f1a00 100%);border:1.5px solid #e6b800;}
+@keyframes atm-pulse{0%,100%{box-shadow:0 0 0 rgba(248,81,73,0);}50%{box-shadow:0 0 14px rgba(248,81,73,.35);}}
+@keyframes atm-pulse-g{0%,100%{box-shadow:0 0 8px rgba(0,212,170,.2);}50%{box-shadow:0 0 22px rgba(0,212,170,.45);}}
+.atm-label{font-size:0.56rem;font-weight:800;letter-spacing:2px;text-transform:uppercase;margin-bottom:4px;}
+.atm-pnl-pos{font-size:1.5rem;font-weight:900;color:#00d4aa;}
+.atm-pnl-neg{font-size:1.5rem;font-weight:900;color:#f85149;}
+.atm-bar-wrap{position:relative;height:10px;background:#1a2035;border-radius:5px;margin:10px 0 4px;overflow:visible;}
+.atm-bar-fill{height:100%;border-radius:5px;transition:width .4s ease;}
+.atm-marker{position:absolute;top:-4px;width:3px;height:18px;border-radius:2px;transform:translateX(-50%);}
+.atm-rev-banner{background:rgba(230,184,0,.1);border:1px solid rgba(230,184,0,.4);border-radius:8px;
+  padding:8px 14px;margin-top:12px;font-size:0.8rem;color:#e6b800;font-weight:700;}
 </style>""", unsafe_allow_html=True)
 
     _sa_kite_key   = st.session_state.get("kite_api_key",      _get_secret("KITE_API_KEY", ""))
@@ -2704,6 +2720,38 @@ with tab10:
                 })
                 st.session_state["sa_history"] = _h[-30:]
 
+            def _update_active_trade_ltp():
+                """Fetch current LTP for the open trade and check SL/Target."""
+                trade = st.session_state.get("sa_active_trade")
+                if not trade or trade.get("status") != "OPEN":
+                    return
+                import requests as _rq
+                _xch = "BFO" if trade["symbol"] in ("SENSEX", "BANKEX") else "NFO"
+                _sym = f"{_xch}:{trade['tradingsymbol']}"
+                try:
+                    _r = _rq.get(
+                        "https://api.kite.trade/quote/ltp",
+                        headers={"X-Kite-Version": "3", "Authorization": f"token {_sa_kite_key}:{_sa_kite_token}"},
+                        params={"i": [_sym]},
+                        timeout=8,
+                    )
+                    if _r.ok:
+                        _ltp = float(_r.json().get("data", {}).get(_sym, {}).get("last_price", 0))
+                        if _ltp > 0:
+                            trade["current_ltp"] = _ltp
+                            trade["last_update_ts"] = datetime.datetime.now(
+                                datetime.timezone(datetime.timedelta(hours=5, minutes=30))
+                            ).strftime("%H:%M:%S")
+                            if _ltp <= trade["sl"]:
+                                trade["status"] = "SL HIT"
+                                st.toast(f"🛑 STOP LOSS HIT — {trade['symbol']} {int(trade['strike'])} {trade['opt_type']} @ ₹{_ltp:.1f}", icon="🛑")
+                            elif _ltp >= trade["target"]:
+                                trade["status"] = "TARGET HIT"
+                                st.toast(f"🎯 TARGET HIT — {trade['symbol']} {int(trade['strike'])} {trade['opt_type']} @ ₹{_ltp:.1f}", icon="🎯")
+                            st.session_state["sa_active_trade"] = trade
+                except Exception:
+                    pass
+
             def _maybe_alert(sig: dict):
                 if sig.get("signal", "WAIT") == "WAIT":
                     return
@@ -2727,6 +2775,7 @@ with tab10:
                     st.session_state["sa_last_fetch"]  = time.time()
                     _record_signal(_sig)
                     _maybe_alert(_sig)
+                    _update_active_trade_ltp()
                 except Exception as _sae:
                     st.warning(f"Auto-scan failed: {_sae}")
 
@@ -2739,6 +2788,7 @@ with tab10:
                         st.session_state["sa_last_fetch"]  = time.time()
                         _record_signal(_sig)
                         _maybe_alert(_sig)
+                        _update_active_trade_ltp()
                         st.rerun()
                     except Exception as _sme:
                         st.error(f"Analysis failed: {_sme}")
@@ -2823,6 +2873,121 @@ with tab10:
   </div>
 </div>""", unsafe_allow_html=True)
 
+                # ── ① b  ACTIVE TRADE MONITOR ────────────────────────────────
+                _at = st.session_state.get("sa_active_trade")
+                if _at:
+                    _at_status  = _at.get("status", "OPEN")
+                    _at_cur     = _at.get("current_ltp", _at["entry_ltp"])
+                    _at_entry   = _at["entry_ltp"]
+                    _at_sl      = _at["sl"]
+                    _at_tgt     = _at["target"]
+                    _at_pnl_pts = _at_cur - _at_entry
+                    _at_pnl_pct = (_at_pnl_pts / _at_entry * 100) if _at_entry else 0
+                    _at_elapsed = int((datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=5, minutes=30))) - _at["entry_time"]).total_seconds() / 60)
+
+                    # Card class
+                    if _at_status == "TARGET HIT":
+                        _at_cls = "atm-tgt"
+                    elif _at_status == "SL HIT":
+                        _at_cls = "atm-sl"
+                    else:
+                        _at_cls = "atm-open"
+
+                    # Progress bar: position of SL, entry, current, target on a 0-100% scale
+                    _at_rng = _at_tgt - _at_sl
+                    def _at_pct(v):
+                        return max(2, min(98, (v - _at_sl) / _at_rng * 100)) if _at_rng > 0 else 50
+                    _at_entry_pct  = _at_pct(_at_entry)
+                    _at_cur_pct    = _at_pct(_at_cur)
+                    _at_fill_color = "#00d4aa" if _at_pnl_pts >= 0 else "#f85149"
+                    _at_pnl_cls    = "atm-pnl-pos" if _at_pnl_pts >= 0 else "atm-pnl-neg"
+                    _at_pnl_sign   = "+" if _at_pnl_pts >= 0 else ""
+
+                    # Signal reversal check
+                    _at_reversal = False
+                    _at_rev_msg  = ""
+                    if _at_status == "OPEN" and _sa_sig:
+                        _cur_sig = _sa_sig.get("signal", "WAIT")
+                        _at_is_ce = _at["opt_type"] == "CE"
+                        if _at_is_ce and "PE" in _cur_sig:
+                            _at_reversal = True
+                            _at_rev_msg  = f"Signal reversed to {_cur_sig} — consider exiting your CE position"
+                            _at_cls      = "atm-rev"
+                        elif not _at_is_ce and "CE" in _cur_sig:
+                            _at_reversal = True
+                            _at_rev_msg  = f"Signal reversed to {_cur_sig} — consider exiting your PE position"
+                            _at_cls      = "atm-rev"
+
+                    # Status badge
+                    if _at_status == "TARGET HIT":
+                        _at_status_html = '<span style="color:#00d4aa;font-size:1.1rem;font-weight:900;">🎯 TARGET HIT — EXIT NOW</span>'
+                    elif _at_status == "SL HIT":
+                        _at_status_html = '<span style="color:#f85149;font-size:1.1rem;font-weight:900;">🛑 STOP LOSS HIT — EXIT NOW</span>'
+                    else:
+                        _at_status_html = f'<span style="color:#00d4aa;font-size:0.85rem;font-weight:700;">🟢 OPEN · {_at_elapsed} min in trade</span>'
+
+                    _rev_html = f'<div class="atm-rev-banner">⚠ {_at_rev_msg}</div>' if _at_reversal else ""
+
+                    st.markdown(f"""
+<div class="atm-card {_at_cls}">
+  <div style="display:flex;justify-content:space-between;align-items:flex-start;flex-wrap:wrap;gap:12px;">
+    <div>
+      <div class="atm-label" style="color:#00d4aa;">Active Trade Monitor</div>
+      <div style="font-size:1rem;font-weight:800;color:#f0f6fc;">{_at["symbol"]} {int(_at["strike"])} {_at["opt_type"]} · expiry {_at["expiry"]}</div>
+      <div style="margin-top:4px;">{_at_status_html}</div>
+    </div>
+    <div style="text-align:right;">
+      <div class="atm-label" style="color:#6e7681;">P&amp;L</div>
+      <div class="{_at_pnl_cls}">{_at_pnl_sign}{_at_pnl_pct:.1f}%</div>
+      <div style="font-size:0.78rem;color:#6e7681;">{_at_pnl_sign}₹{_at_pnl_pts:.2f} per unit</div>
+    </div>
+  </div>
+  <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:16px;margin-top:14px;">
+    <div>
+      <div class="atm-label" style="color:#6e7681;">Entry LTP</div>
+      <div style="font-size:1rem;font-weight:800;color:#e6edf3;">₹{_at_entry:.1f}</div>
+    </div>
+    <div>
+      <div class="atm-label" style="color:#6e7681;">Current LTP</div>
+      <div style="font-size:1.1rem;font-weight:900;color:{_at_fill_color};">₹{_at_cur:.1f}</div>
+    </div>
+    <div>
+      <div class="atm-label" style="color:#6e7681;">Last updated</div>
+      <div style="font-size:0.82rem;color:#6e7681;">{_at.get("last_update_ts","—")}</div>
+    </div>
+  </div>
+  <div style="margin-top:16px;">
+    <div style="display:flex;justify-content:space-between;font-size:0.65rem;color:#6e7681;margin-bottom:4px;">
+      <span style="color:#f85149;">SL ₹{_at_sl:.1f}</span>
+      <span style="color:#adbac7;">Entry ₹{_at_entry:.1f}</span>
+      <span style="color:#00d4aa;">Target ₹{_at_tgt:.1f}</span>
+    </div>
+    <div class="atm-bar-wrap">
+      <div class="atm-bar-fill" style="width:{_at_cur_pct:.1f}%;background:{_at_fill_color};opacity:.35;"></div>
+      <div class="atm-marker" style="left:{_at_entry_pct:.1f}%;background:#ffffff;opacity:.5;"></div>
+      <div class="atm-marker" style="left:{_at_cur_pct:.1f}%;background:{_at_fill_color};box-shadow:0 0 6px {_at_fill_color};"></div>
+    </div>
+  </div>
+  {_rev_html}
+</div>""", unsafe_allow_html=True)
+
+                    # Exit button
+                    _at_ecol1, _at_ecol2 = st.columns([1, 3])
+                    with _at_ecol1:
+                        if st.button("📤 I Exited", key="sa_exit_trade", type="secondary", use_container_width=True):
+                            _at_final = st.session_state.get("sa_active_trade", {})
+                            _at_final["status"] = "EXITED"
+                            _at_final["exit_ltp"] = _at_cur
+                            _at_final["exit_pnl_pct"] = _at_pnl_pct
+                            # Record outcome in history
+                            _oh = st.session_state.get("sa_history", [])
+                            if _oh:
+                                _oh[-1]["outcome"] = f"{_at_pnl_sign}{_at_pnl_pct:.1f}%"
+                            st.session_state["sa_history"] = _oh
+                            st.session_state["sa_active_trade"] = None
+                            st.toast(f"Trade closed · P&L: {_at_pnl_sign}{_at_pnl_pct:.1f}%", icon="📤")
+                            st.rerun()
+
                 # ── ② TRADE SETUP  |  MARKET SNAPSHOT ────────────────────────
                 _lc, _rc = st.columns([11, 9])
 
@@ -2873,6 +3038,44 @@ with tab10:
     ⚠ For educational purposes only — not financial advice.
   </div>
 </div>""", unsafe_allow_html=True)
+                        # ── "I Entered" button ─────────────────────────────────
+                        _existing_trade = st.session_state.get("sa_active_trade")
+                        _trade_open = bool(_existing_trade and _existing_trade.get("status") == "OPEN")
+                        if not _trade_open:
+                            st.markdown('<div style="margin-top:6px;"></div>', unsafe_allow_html=True)
+                            if st.button("✅  I Entered This Trade", key="sa_enter_trade", type="primary", use_container_width=True):
+                                _ts_rows = _sa_instr_df[
+                                    (_sa_instr_df["expiry"] == _sa_expiry) &
+                                    (_sa_instr_df["strike"].astype(float) == float(_sa_strike)) &
+                                    (_sa_instr_df["instrument_type"] == _sa_opt)
+                                ]
+                                _ts = _ts_rows.iloc[0]["tradingsymbol"] if not _ts_rows.empty else ""
+                                _ist_tz = datetime.timezone(datetime.timedelta(hours=5, minutes=30))
+                                st.session_state["sa_active_trade"] = {
+                                    "symbol":        _sa_symbol,
+                                    "expiry":        _sa_expiry,
+                                    "strike":        _sa_strike,
+                                    "opt_type":      _sa_opt,
+                                    "tradingsymbol": _ts,
+                                    "entry_ltp":     _sa_ltp,
+                                    "current_ltp":   _sa_ltp,
+                                    "sl":            _sa_sl,
+                                    "target":        _sa_tgt,
+                                    "entry_time":    datetime.datetime.now(_ist_tz),
+                                    "entry_score":   _score,
+                                    "entry_signal":  _signal,
+                                    "status":        "OPEN",
+                                    "last_update_ts": "just now",
+                                }
+                                st.toast(f"Trade recorded: {_sa_symbol} {_sa_strike} {_sa_opt} @ ₹{_sa_ltp:.1f}", icon="✅")
+                                st.rerun()
+                        else:
+                            st.markdown(
+                                '<div style="text-align:center;padding:8px;background:rgba(0,212,170,0.08);'
+                                'border:1px solid rgba(0,212,170,0.3);border-radius:8px;margin-top:6px;'
+                                'font-size:0.78rem;color:#00d4aa;">🟢 Trade active — monitor above</div>',
+                                unsafe_allow_html=True,
+                            )
                     else:
                         st.markdown("""
 <div class="sa-card" style="text-align:center;padding:28px 20px;">
