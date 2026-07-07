@@ -1,6 +1,7 @@
 import yfinance as yf
 import pandas as pd
 import numpy as np
+from screener.kite_hist import batch_quote_nse, patch_df_with_kite
 
 
 def _ema(series: pd.Series, period: int) -> pd.Series:
@@ -40,6 +41,7 @@ def analyze_ma50_support(
     touch_pct: float = 0.01,
     interval: str = "1d",
     period: str = "1y",
+    kite_quote: dict | None = None,
 ) -> dict | None:
     try:
         df = yf.download(nse_symbol, period=period, interval=interval,
@@ -47,7 +49,12 @@ def analyze_ma50_support(
         if df is None or len(df) < 60:
             return None
 
-        df     = df.copy()
+        df = df.copy()
+
+        # Replace today's candle with live Kite price if available
+        if kite_quote:
+            df = patch_df_with_kite(df, kite_quote)
+
         close  = df["Close"].squeeze()
         high   = df["High"].squeeze()
         low    = df["Low"].squeeze()
@@ -99,7 +106,6 @@ def analyze_ma50_support(
 
         above_monthly_cpr = False
         if monthly_cpr:
-            # Price should be above Monthly TC (top of monthly CPR band)
             above_monthly_cpr = today_close > monthly_cpr["Monthly TC"]
 
         if not above_monthly_cpr:
@@ -151,14 +157,28 @@ def run_ma50_support_scan(
     touch_pct: float = 0.01,
     interval: str = "1d",
     period: str = "1y",
+    api_key: str = "",
+    access_token: str = "",
 ) -> pd.DataFrame:
+    # Batch-fetch live Kite quotes for all symbols in one API call
+    kite_quotes: dict = {}
+    if api_key and access_token:
+        try:
+            plain_syms = list(symbols_df["Symbol"].str.upper())
+            kite_quotes = batch_quote_nse(api_key, access_token, plain_syms)
+        except Exception:
+            pass
+
     rows = []
     for _, row in symbols_df.iterrows():
+        nse_key = f"NSE:{str(row['Symbol']).upper()}"
+        quote   = kite_quotes.get(nse_key, {})
         result = analyze_ma50_support(
             row["NSE_Symbol"],
             touch_pct=touch_pct,
             interval=interval,
             period=period,
+            kite_quote=quote if quote else None,
         )
         if result:
             rows.append({"Symbol": row["Symbol"], "Company": row["Company"], **result})

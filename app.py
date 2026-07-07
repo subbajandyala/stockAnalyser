@@ -10,6 +10,7 @@ from screener.technical import analyze_stock, _ema
 from screener.ma_retracement import run_ma_retracement_scan
 from screener.ma_crossover import run_crossover_scan
 from screener.ma50_support import run_ma50_support_scan
+from screener.cpr_retracement import run_cpr_retracement_scan
 from screener.option_chain import (
     fetch_option_chain, get_expiries, parse_chain,
     atm_strike, calc_pcr, calc_max_pain,
@@ -292,6 +293,7 @@ _toi_count   = len(st.session_state.get("toi_rows",     []))
 _sa_count    = len(st.session_state.get("sa_history",   []))
 _sa2_count   = len(st.session_state.get("sa2_history",  []))
 _gb_count    = len(st.session_state.get("gb_history",   []))
+_cpr_count   = len(st.session_state.get("cpr_results",  pd.DataFrame()))
 
 def _sb_row(icon: str, label: str, count: int, tab_kw: str = "") -> str:
     badge = f'<span class="sb-badge">{count}</span>' if count > 0 else ""
@@ -334,6 +336,7 @@ with st.sidebar:
 {_sb_row("💡", "Smart Alerts", _sa_count, "Smart Alerts")}
 {_sb_row("⚡", "Smart Alerts Pro", _sa2_count, "Smart Alerts Pro")}
 {_sb_row("💥", "Expiry Gamma Blast", _gb_count, "Gamma Blast")}
+{_sb_row("🎯", "CPR Retracement", _cpr_count, "CPR Retracement")}
 <div class="sb-div"></div>
 <div class="sb-live"><span class="sb-dot"></span>NSE feed LIVE</div>
 """, unsafe_allow_html=True)
@@ -471,7 +474,7 @@ st.markdown(
 st.divider()
 
 # ── Tabs ──────────────────────────────────────────────────────────────────────
-tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12 = st.tabs([
+tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13 = st.tabs([
     "📰 News + Breakout",
     "🔁 20 MA Retracement",
     "📈 EMA Crossover",
@@ -484,6 +487,7 @@ tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12 = st.t
     "💡 Smart Alerts",
     "⚡ Smart Alerts Pro",
     "💥 Expiry Gamma Blast",
+    "🎯 CPR Retracement",
 ])
 
 # ── TAB 1 ─────────────────────────────────────────────────────────────────────
@@ -582,8 +586,13 @@ with tab2:
     if run_ma_btn:
         with st.spinner(f"Scanning NIFTY 500 on {tf['label']} candles… (3–5 min)"):
             symbols_df = get_nifty500_symbols()
-            ma_results = run_ma_retracement_scan(symbols_df, touch_pct=touch_pct/100,
-                                                  interval=interval, period=period)
+            _ma_kite_key   = st.session_state.get("kite_api_key", "")
+            _ma_kite_token = st.session_state.get("kite_access_token", "")
+            ma_results = run_ma_retracement_scan(
+                symbols_df, touch_pct=touch_pct/100,
+                interval=interval, period=period,
+                api_key=_ma_kite_key, access_token=_ma_kite_token,
+            )
             st.session_state["ma_results"] = ma_results
             st.session_state["ma_tf"] = tf_key
 
@@ -636,7 +645,12 @@ with tab3:
     if run_cross_btn:
         with st.spinner("Scanning NIFTY 500 for 20/50 EMA crossovers… (3–5 min)"):
             symbols_df    = get_nifty500_symbols()
-            cross_results = run_crossover_scan(symbols_df)
+            _cx_kite_key   = st.session_state.get("kite_api_key", "")
+            _cx_kite_token = st.session_state.get("kite_access_token", "")
+            cross_results = run_crossover_scan(
+                symbols_df,
+                api_key=_cx_kite_key, access_token=_cx_kite_token,
+            )
             st.session_state["cross_results"] = cross_results
 
     if "cross_results" in st.session_state:
@@ -689,8 +703,13 @@ with tab4:
     if run_ma50_btn:
         with st.spinner(f"Scanning NIFTY 500 on {tf['label']} candles… (3–6 min)"):
             symbols_df   = get_nifty500_symbols()
-            ma50_results = run_ma50_support_scan(symbols_df, touch_pct=touch_pct_50/100,
-                                                  interval=interval, period=period)
+            _m50_kite_key   = st.session_state.get("kite_api_key", "")
+            _m50_kite_token = st.session_state.get("kite_access_token", "")
+            ma50_results = run_ma50_support_scan(
+                symbols_df, touch_pct=touch_pct_50/100,
+                interval=interval, period=period,
+                api_key=_m50_kite_key, access_token=_m50_kite_token,
+            )
             st.session_state["ma50_results"] = ma50_results
             st.session_state["ma50_tf"]      = tf_key
 
@@ -4151,3 +4170,141 @@ with tab12:
                 f'</div>',
                 unsafe_allow_html=True,
             )
+
+
+# ── TAB 13 — CPR Retracement ──────────────────────────────────────────────────
+with tab13:
+    st.markdown("#### 🎯 CPR Retracement — Bounces & Rejections at Pivot Levels")
+    st.markdown(
+        '<small style="color:#8b949e;">'
+        'Scans NIFTY 500 daily candles for two patterns:<br>'
+        '&nbsp;&nbsp;<b style="color:#00d4aa;">📈 CPR Bounce</b> — stock was falling, low tagged TC/Pivot/BC, closed back above (support held)<br>'
+        '&nbsp;&nbsp;<b style="color:#f85149;">📉 CPR Rejection</b> — stock was rising, high tagged TC/Pivot/BC, closed back below (resistance held)<br>'
+        'CPR for each day is calculated from the prior day\'s High + Low + Close. '
+        'Touch tolerance = % distance allowed between candle extreme and CPR level.'
+        '</small>',
+        unsafe_allow_html=True,
+    )
+
+    with st.container(border=True):
+        cpr_c1, cpr_c2, cpr_c3 = st.columns([2, 4, 2])
+        cpr_touch_pct = cpr_c1.slider(
+            "Touch tolerance (%)", min_value=1, max_value=3, value=1,
+            key="cpr_touch_pct",
+            help="How close the candle's High/Low must be to a CPR level to count as a touch",
+        )
+        cpr_c2.markdown(
+            '<small style="color:#8b949e;">'
+            'Pattern A: today's candle touches today's CPR and closes in reversal direction<br>'
+            'Pattern B: yesterday's candle touched yesterday's CPR, today confirms the move'
+            '</small>',
+            unsafe_allow_html=True,
+        )
+        cpr_run_btn = cpr_c3.button(
+            "🔍 Run CPR Scan", type="primary", use_container_width=True, key="run_cpr"
+        )
+
+    if cpr_run_btn:
+        with st.spinner("Scanning NIFTY 500 for CPR retracements… (3–5 min)"):
+            _cpr_kite_key   = st.session_state.get("kite_api_key", "")
+            _cpr_kite_token = st.session_state.get("kite_access_token", "")
+            _cpr_syms       = get_nifty500_symbols()
+            cpr_results     = run_cpr_retracement_scan(
+                _cpr_syms,
+                touch_pct=cpr_touch_pct / 100,
+                api_key=_cpr_kite_key,
+                access_token=_cpr_kite_token,
+            )
+            st.session_state["cpr_results"] = cpr_results
+
+    if "cpr_results" in st.session_state:
+        cpr_df: pd.DataFrame = st.session_state["cpr_results"]
+        if cpr_df.empty:
+            st.warning(
+                "No CPR retracements found. Try increasing touch tolerance or check back "
+                "after today's session closes."
+            )
+        else:
+            _n_bounce = len(cpr_df[cpr_df["Direction"] == "BULL"])
+            _n_reject = len(cpr_df[cpr_df["Direction"] == "BEAR"])
+            _n_2day   = len(cpr_df[cpr_df["Pattern"] == "2-Day"])
+            cc1, cc2, cc3, cc4 = st.columns(4)
+            cc1.metric("Total Signals",       len(cpr_df))
+            cc2.metric("📈 Bounces (BULL)",   _n_bounce)
+            cc3.metric("📉 Rejections (BEAR)", _n_reject)
+            cc4.metric("2-Day Patterns",       _n_2day)
+
+            # Filter toggle
+            cpr_f1, cpr_f2 = st.columns([3, 1])
+            _cpr_dir_filter = cpr_f1.radio(
+                "Show:", ["All", "📈 Bounces only", "📉 Rejections only"],
+                horizontal=True, key="cpr_dir_filter",
+            )
+            _display_df = cpr_df.copy()
+            if _cpr_dir_filter == "📈 Bounces only":
+                _display_df = _display_df[_display_df["Direction"] == "BULL"]
+            elif _cpr_dir_filter == "📉 Rejections only":
+                _display_df = _display_df[_display_df["Direction"] == "BEAR"]
+
+            if _display_df.empty:
+                st.info("No signals match the selected filter.")
+            else:
+                _CPR_SIGNAL_COLORS = {
+                    "📈 CPR Bounce":    "color: #00d4aa; font-weight: 700",
+                    "📉 CPR Rejection": "color: #f85149; font-weight: 700",
+                }
+                _CPR_LEVEL_COLORS = {
+                    "TC":    "color: #00d4aa",
+                    "Pivot": "color: #e6b800",
+                    "BC":    "color: #f85149",
+                }
+
+                def _cpr_signal_style(v):
+                    return _CPR_SIGNAL_COLORS.get(v, "")
+
+                def _cpr_level_style(v):
+                    return _CPR_LEVEL_COLORS.get(v, "")
+
+                _price_cols  = ["Price", "Touch Price", "Level Price", "CPR TC", "CPR Pivot", "CPR BC"]
+                _pct_cols    = ["Change%", "5D Trend%"]
+                _show_cols   = [
+                    "Symbol", "Company", "Signal", "Pattern", "CPR Level",
+                    "Level Price", "CPR TC", "CPR Pivot", "CPR BC",
+                    "Touch Price", "Price", "Change%", "5D Trend%", "Vol Ratio",
+                ]
+                _show_cols = [c for c in _show_cols if c in _display_df.columns]
+
+                styled_cpr = (
+                    _display_df[_show_cols].copy().style
+                    .map(_cpr_signal_style, subset=["Signal"])
+                    .map(_cpr_level_style,  subset=["CPR Level"])
+                    .map(change_style,      subset=["Change%", "5D Trend%"])
+                    .format({c: "₹{:.2f}" for c in _price_cols if c in _display_df.columns})
+                    .format({c: "{:+.2f}%" for c in _pct_cols   if c in _display_df.columns})
+                    .format({"Vol Ratio": "{:.2f}x"} if "Vol Ratio" in _display_df.columns else {})
+                )
+
+                st.caption("👆 Click any row to open chart · Esc to close")
+                cpr_sel = st.dataframe(
+                    styled_cpr, use_container_width=True, height=520,
+                    on_select="rerun", selection_mode="single-row", key="cpr_table",
+                )
+
+                csv_cpr = _display_df.to_csv(index=False).encode("utf-8")
+                st.download_button("⬇️ Export CSV", csv_cpr, "cpr_retracement.csv", "text/csv")
+
+                cpr_rows = cpr_sel.selection.get("rows", []) if cpr_sel else []
+                if cpr_rows:
+                    _cr = _display_df.iloc[cpr_rows[0]]
+                    _cpr_lvls = {
+                        k: float(_cr[k])
+                        for k in ["CPR TC", "CPR Pivot", "CPR BC"]
+                        if k in _cr
+                    }
+                    chart_modal(_cr["Symbol"] + ".NS", _cr["Company"], "1D",
+                                extra_levels=_cpr_lvls)
+    else:
+        st.info(
+            "🔎 Click **Run CPR Scan** to find stocks bouncing off or being rejected by "
+            "CPR (Central Pivot Range) levels."
+        )
