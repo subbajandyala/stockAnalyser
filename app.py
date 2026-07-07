@@ -4195,8 +4195,8 @@ with tab13:
         )
         cpr_c2.markdown(
             '<small style="color:#8b949e;">'
-            'Pattern A: today's candle touches today's CPR and closes in reversal direction<br>'
-            'Pattern B: yesterday's candle touched yesterday's CPR, today confirms the move'
+            'Pattern A: today\'s candle touches today\'s CPR and closes in reversal direction<br>'
+            'Pattern B: yesterday\'s candle touched yesterday\'s CPR, today confirms the move'
             '</small>',
             unsafe_allow_html=True,
         )
