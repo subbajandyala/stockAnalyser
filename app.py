@@ -101,8 +101,9 @@ hr { border-color: #1a2035 !important; margin: 10px 0 !important; }
 .sb-brand-name { font-size: 1.3rem; font-weight: 900; color: #fff; letter-spacing: -0.5px; }
 .sb-brand-sub { font-size: 0.67rem; color: #4a5568; margin-top: 2px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.8px; }
 .sb-sec { font-size: 0.61rem; font-weight: 700; text-transform: uppercase; letter-spacing: 1.8px; color: #3d4a5c; padding: 14px 16px 5px; }
-.sb-item { display: flex; align-items: center; justify-content: space-between; padding: 7px 16px; border-radius: 7px; margin: 1px 6px; }
-.sb-item:hover { background: rgba(0,212,170,0.06); }
+.sb-item { display: flex; align-items: center; justify-content: space-between; padding: 7px 16px; border-radius: 7px; margin: 1px 6px; cursor: pointer; }
+.sb-item:hover { background: rgba(0,212,170,0.08); }
+.sb-item:active { background: rgba(0,212,170,0.15); }
 .sb-lbl { color: #adbac7; font-size: 0.8rem; }
 .sb-badge { background: rgba(0,212,170,0.12); border: 1px solid rgba(0,212,170,0.25); color: #00d4aa; font-size: 0.61rem; font-weight: 700; padding: 1px 6px; border-radius: 10px; }
 .sb-div { height: 1px; background: #1a2035; margin: 14px 0; }
@@ -292,9 +293,18 @@ _sa_count    = len(st.session_state.get("sa_history",   []))
 _sa2_count   = len(st.session_state.get("sa2_history",  []))
 _gb_count    = len(st.session_state.get("gb_history",   []))
 
-def _sb_row(icon: str, label: str, count: int) -> str:
+def _sb_row(icon: str, label: str, count: int, tab_kw: str = "") -> str:
     badge = f'<span class="sb-badge">{count}</span>' if count > 0 else ""
-    return f'<div class="sb-item"><span class="sb-lbl">{icon} {label}</span>{badge}</div>'
+    kw = tab_kw or label
+    onclick = (
+        "var btns=window.parent.document.querySelectorAll('[data-baseweb=\"tab\"]');"
+        f"var kw='{kw}';"
+        "for(var i=0;i<btns.length;i++){if(btns[i].textContent.includes(kw)){btns[i].click();break;}}"
+    )
+    return (
+        f'<div class="sb-item" onclick="{onclick}">'
+        f'<span class="sb-lbl">{icon} {label}</span>{badge}</div>'
+    )
 
 def _get_secret(key: str, default: str = "") -> str:
     try:
@@ -309,21 +319,21 @@ with st.sidebar:
   <div class="sb-brand-sub">NSE India · NIFTY 500</div>
 </div>
 <div class="sb-sec">WORKSPACE</div>
-{_sb_row("📰", "News + Breakout", _news_count)}
-{_sb_row("🔁", "20 MA Retracement", _ma_count)}
+{_sb_row("📰", "News + Breakout", _news_count, "News")}
+{_sb_row("🔁", "20 MA Retracement", _ma_count, "Retracement")}
 <div class="sb-sec">SCANNERS</div>
-{_sb_row("📈", "EMA Crossover", _cross_count)}
-{_sb_row("🛡️", "50 MA Support", _ma50_count)}
+{_sb_row("📈", "EMA Crossover", _cross_count, "Crossover")}
+{_sb_row("🛡️", "50 MA Support", _ma50_count, "Support")}
 <div class="sb-sec">ANALYSIS</div>
-{_sb_row("📊", "Fundamentals", _fund_count)}
+{_sb_row("📊", "Fundamentals", _fund_count, "Fundamentals")}
 <div class="sb-sec">TOOLS</div>
-{_sb_row("🔗", "Option Chain", 1 if _oc_loaded else 0)}
-{_sb_row("🎯", "F&O Scanner", _fo_count)}
-{_sb_row("🚀", "Sensex Expiry Moves", _em_count)}
-{_sb_row("📡", "Trending OI", _toi_count)}
-{_sb_row("💡", "Smart Alerts", _sa_count)}
-{_sb_row("⚡", "Smart Alerts Pro", _sa2_count)}
-{_sb_row("💥", "Expiry Gamma Blast", _gb_count)}
+{_sb_row("🔗", "Option Chain", 1 if _oc_loaded else 0, "Option Chain")}
+{_sb_row("🎯", "F&O Scanner", _fo_count, "F&O")}
+{_sb_row("🚀", "Sensex Expiry Moves", _em_count, "Sensex")}
+{_sb_row("📡", "Trending OI", _toi_count, "Trending")}
+{_sb_row("💡", "Smart Alerts", _sa_count, "Smart Alerts")}
+{_sb_row("⚡", "Smart Alerts Pro", _sa2_count, "Smart Alerts Pro")}
+{_sb_row("💥", "Expiry Gamma Blast", _gb_count, "Gamma Blast")}
 <div class="sb-div"></div>
 <div class="sb-live"><span class="sb-dot"></span>NSE feed LIVE</div>
 """, unsafe_allow_html=True)
