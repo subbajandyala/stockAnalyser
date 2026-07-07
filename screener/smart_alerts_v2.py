@@ -41,14 +41,13 @@ _SPOT_QUOTE: dict[str, str] = {
     "SENSEX":     "BSE:SENSEX",
     "BANKEX":     "BSE:BANKEX",
 }
-# Kite historical instrument tokens for index VWAP
+# Kite historical instrument tokens for index VWAP (NSE indices only)
+# BSE indices (SENSEX, BANKEX) are not available via Kite historical API — omit so fetch_vwap returns 0
 _HIST_TOKEN: dict[str, int] = {
-    "NIFTY":     256265,
-    "BANKNIFTY": 260105,   # reuse SENSEX token if BANKNIFTY unavailable
-    "SENSEX":    260105,
-    "FINNIFTY":  257801,
-    "BANKEX":    260105,
-    "MIDCPNIFTY":288009,
+    "NIFTY":      256265,
+    "BANKNIFTY":  260105,
+    "FINNIFTY":   257801,
+    "MIDCPNIFTY": 288009,
 }
 # Kite token for NIFTY 50 index (for cross-index check)
 _NIFTY_TOKEN     = 256265
@@ -422,6 +421,54 @@ def _spot_momentum_factor(toi_rows: list) -> dict:
     return _factor("Spot Momentum", f"{last:,.0f} →", "NEUTRAL", 0, "Spot flat — no trend")
 
 
+def _atm_parity_factor(atm_ce_ltp: float, atm_pe_ltp: float) -> dict:
+    """CE vs PE LTP at ATM — market's directional pricing signal. Works on first scan."""
+    if atm_ce_ltp <= 0 or atm_pe_ltp <= 0:
+        return _factor("ATM Parity", "—", "NEUTRAL", 0, "ATM LTPs unavailable")
+    ratio = atm_ce_ltp / atm_pe_ltp
+    if ratio > 1.25:
+        return _factor("ATM Parity", f"CE ₹{atm_ce_ltp:.0f} / PE ₹{atm_pe_ltp:.0f} ({ratio:.2f}x)", "BULL", +2,
+                       "ATM calls significantly pricier — market pricing in upward breakout")
+    if ratio > 1.08:
+        return _factor("ATM Parity", f"CE ₹{atm_ce_ltp:.0f} / PE ₹{atm_pe_ltp:.0f} ({ratio:.2f}x)", "BULL", +1,
+                       "ATM calls slightly pricier — mild bullish expectation")
+    if ratio < 0.80:
+        return _factor("ATM Parity", f"CE ₹{atm_ce_ltp:.0f} / PE ₹{atm_pe_ltp:.0f} ({ratio:.2f}x)", "BEAR", -2,
+                       "ATM puts significantly pricier — market pricing in downward breakout")
+    if ratio < 0.93:
+        return _factor("ATM Parity", f"CE ₹{atm_ce_ltp:.0f} / PE ₹{atm_pe_ltp:.0f} ({ratio:.2f}x)", "BEAR", -1,
+                       "ATM puts slightly pricier — mild bearish expectation")
+    return _factor("ATM Parity", f"CE ₹{atm_ce_ltp:.0f} ≈ PE ₹{atm_pe_ltp:.0f}", "NEUTRAL", 0,
+                   "ATM call/put parity — no directional pricing bias")
+
+
+def _near_atm_skew_factor(chain_df: pd.DataFrame, atm: int, step: int) -> dict:
+    """OI at adjacent strikes: PE@ATM-1 vs CE@ATM+1. Works on first scan."""
+    ce_row = chain_df[chain_df["strike"] == atm + step]
+    pe_row = chain_df[chain_df["strike"] == atm - step]
+    if ce_row.empty or pe_row.empty:
+        return _factor("Near-ATM Skew", "—", "NEUTRAL", 0, "Adjacent strikes not in chain")
+    ce_oi = int(ce_row.iloc[0]["ce_oi"])
+    pe_oi = int(pe_row.iloc[0]["pe_oi"])
+    if pe_oi == 0 and ce_oi == 0:
+        return _factor("Near-ATM Skew", "—", "NEUTRAL", 0, "Zero OI at adjacent strikes")
+    ratio = (pe_oi / ce_oi) if ce_oi > 0 else 999.0
+    if ratio > 2.0:
+        return _factor("Near-ATM Skew", f"PE {pe_oi//1000}k vs CE {ce_oi//1000}k", "BULL", +2,
+                       "Heavy put writing just below ATM — strong support floor being built")
+    if ratio > 1.3:
+        return _factor("Near-ATM Skew", f"PE {pe_oi//1000}k > CE {ce_oi//1000}k", "BULL", +1,
+                       "More put writing than call writing at adjacent strikes — mild support")
+    if ratio < 0.5:
+        return _factor("Near-ATM Skew", f"CE {ce_oi//1000}k vs PE {pe_oi//1000}k", "BEAR", -2,
+                       "Heavy call writing just above ATM — strong resistance ceiling being built")
+    if ratio < 0.77:
+        return _factor("Near-ATM Skew", f"CE {ce_oi//1000}k > PE {pe_oi//1000}k", "BEAR", -1,
+                       "More call writing than put writing at adjacent strikes — mild resistance")
+    return _factor("Near-ATM Skew", f"PE {pe_oi//1000}k | CE {ce_oi//1000}k", "NEUTRAL", 0,
+                   "Balanced OI at adjacent strikes — no directional skew")
+
+
 def _oi_velocity_factor(toi_rows: list, scan_interval_sec: int) -> dict:
     if len(toi_rows) < 3:
         return _factor("OI Velocity", "—", "NEUTRAL", 0, "Need 3+ rows to measure OI velocity")
@@ -625,7 +672,11 @@ def run_smart_signal_v2(
             factors.append(_factor(name, "—", "NEUTRAL", 0,
                                    "Initialize Trending OI tab to unlock this signal"))
 
-    # v2 factors (9–14)
+    # instant-score factors (from chain, fire on every scan even without toi_rows)
+    factors.append(_atm_parity_factor(atm_ce_ltp, atm_pe_ltp))
+    factors.append(_near_atm_skew_factor(chain_df, atm, step))
+
+    # v2 enrichment factors
     factors.append(_vwap_factor(spot, vwap))
     factors.append(_vix_factor(vix))
     factors.append(_iv_spike_factor(iv_ratio))
@@ -636,11 +687,15 @@ def run_smart_signal_v2(
     # 6. Raw score
     score_raw = sum(f["points"] for f in factors)
 
-    # Score threshold — on expiry day, require stronger conviction before 2 PM
+    # Score threshold — adapt to data richness; on expiry before 2 PM require extra conviction
+    has_toi = bool(toi_rows and len(toi_rows) >= 1)
     t = ist_now.time()
     if expiry_day and t < datetime.time(14, 0):
-        strong_thresh, mild_thresh = 8, 7
+        strong_thresh, mild_thresh = 8, 6
+    elif has_toi:
+        strong_thresh, mild_thresh = 7, 5
     else:
+        # Without Trending OI the base factors (PCR+MaxPain+OIWalls+AtmParity+NearATM) max at ~9
         strong_thresh, mild_thresh = 6, 4
 
     # 7. Raw direction (ignoring gates)

@@ -168,6 +168,54 @@ def _oi_wall_factor(spot: float, max_ce_strike: float, max_pe_strike: float) -> 
                    "Spot between key OI walls — no breakout yet")
 
 
+def _atm_parity_factor(atm_ce_ltp: float, atm_pe_ltp: float) -> dict:
+    """CE vs PE LTP at ATM — directional pricing signal. Works on first scan."""
+    if atm_ce_ltp <= 0 or atm_pe_ltp <= 0:
+        return _factor("ATM Parity", "—", "NEUTRAL", 0, "ATM LTPs unavailable")
+    ratio = atm_ce_ltp / atm_pe_ltp
+    if ratio > 1.25:
+        return _factor("ATM Parity", f"CE ₹{atm_ce_ltp:.0f} / PE ₹{atm_pe_ltp:.0f} ({ratio:.2f}x)", "BULL", +2,
+                       "ATM calls significantly pricier — market pricing in upward breakout")
+    if ratio > 1.08:
+        return _factor("ATM Parity", f"CE ₹{atm_ce_ltp:.0f} / PE ₹{atm_pe_ltp:.0f} ({ratio:.2f}x)", "BULL", +1,
+                       "ATM calls slightly pricier — mild bullish expectation")
+    if ratio < 0.80:
+        return _factor("ATM Parity", f"CE ₹{atm_ce_ltp:.0f} / PE ₹{atm_pe_ltp:.0f} ({ratio:.2f}x)", "BEAR", -2,
+                       "ATM puts significantly pricier — market pricing in downward breakout")
+    if ratio < 0.93:
+        return _factor("ATM Parity", f"CE ₹{atm_ce_ltp:.0f} / PE ₹{atm_pe_ltp:.0f} ({ratio:.2f}x)", "BEAR", -1,
+                       "ATM puts slightly pricier — mild bearish expectation")
+    return _factor("ATM Parity", f"CE ₹{atm_ce_ltp:.0f} ≈ PE ₹{atm_pe_ltp:.0f}", "NEUTRAL", 0,
+                   "ATM call/put parity — no directional pricing bias")
+
+
+def _near_atm_skew_factor(chain_df: pd.DataFrame, atm: int, step: int) -> dict:
+    """OI at adjacent strikes: PE@ATM-1 vs CE@ATM+1. Works on first scan."""
+    ce_row = chain_df[chain_df["strike"] == atm + step]
+    pe_row = chain_df[chain_df["strike"] == atm - step]
+    if ce_row.empty or pe_row.empty:
+        return _factor("Near-ATM Skew", "—", "NEUTRAL", 0, "Adjacent strikes not in chain")
+    ce_oi = int(ce_row.iloc[0]["ce_oi"])
+    pe_oi = int(pe_row.iloc[0]["pe_oi"])
+    if pe_oi == 0 and ce_oi == 0:
+        return _factor("Near-ATM Skew", "—", "NEUTRAL", 0, "Zero OI at adjacent strikes")
+    ratio = (pe_oi / ce_oi) if ce_oi > 0 else 999.0
+    if ratio > 2.0:
+        return _factor("Near-ATM Skew", f"PE {pe_oi//1000}k vs CE {ce_oi//1000}k", "BULL", +2,
+                       "Heavy put writing just below ATM — strong support floor being built")
+    if ratio > 1.3:
+        return _factor("Near-ATM Skew", f"PE {pe_oi//1000}k > CE {ce_oi//1000}k", "BULL", +1,
+                       "More put writing at adjacent strikes — mild support")
+    if ratio < 0.5:
+        return _factor("Near-ATM Skew", f"CE {ce_oi//1000}k vs PE {pe_oi//1000}k", "BEAR", -2,
+                       "Heavy call writing just above ATM — strong resistance ceiling being built")
+    if ratio < 0.77:
+        return _factor("Near-ATM Skew", f"CE {ce_oi//1000}k > PE {pe_oi//1000}k", "BEAR", -1,
+                       "More call writing at adjacent strikes — mild resistance")
+    return _factor("Near-ATM Skew", f"PE {pe_oi//1000}k | CE {ce_oi//1000}k", "NEUTRAL", 0,
+                   "Balanced OI at adjacent strikes — no directional skew")
+
+
 def _spot_momentum_factor(toi_rows: list) -> dict:
     """Directional momentum from spot price across OI snapshots."""
     if len(toi_rows) < 2:
@@ -284,11 +332,17 @@ def run_smart_signal(
     max_ce_strike = float(chain_df.loc[chain_df["ce_oi"].idxmax(), "strike"])
     max_pe_strike = float(chain_df.loc[chain_df["pe_oi"].idxmax(), "strike"])
 
+    atm_row    = chain_df[chain_df["strike"] == atm]
+    atm_ce_ltp = float(atm_row["ce_ltp"].iloc[0]) if not atm_row.empty else 0.0
+    atm_pe_ltp = float(atm_row["pe_ltp"].iloc[0]) if not atm_row.empty else 0.0
+
     # 3. Build factors
     factors = []
     factors.append(_pcr_factor(pcr))
     factors.append(_maxpain_factor(spot, mp))
     factors.append(_oi_wall_factor(spot, max_ce_strike, max_pe_strike))
+    factors.append(_atm_parity_factor(atm_ce_ltp, atm_pe_ltp))
+    factors.append(_near_atm_skew_factor(chain_df, atm, step))
 
     has_toi = bool(toi_rows and len(toi_rows) >= 1)
 
@@ -385,6 +439,8 @@ def run_smart_signal(
         "max_pain":     int(mp),
         "max_ce_wall":  int(max_ce_strike),
         "max_pe_wall":  int(max_pe_strike),
+        "atm_ce_ltp":   round(atm_ce_ltp, 2),
+        "atm_pe_ltp":   round(atm_pe_ltp, 2),
         "option_type":  opt_type,
         "strike":       rec_strike,
         "ltp":          ltp,
