@@ -187,15 +187,17 @@ def check_gates(
     else:
         gates["Time"] = (True,  f"Market hours clear ({t.strftime('%H:%M')} IST)")
 
-    # Gate 2 — India VIX
+    # Gate 2 — India VIX (only block on true extremes; 10-11 is low but still tradeable)
     if vix <= 0:
         gates["VIX"] = (True, "VIX unavailable — gate skipped")
+    elif vix < 10:
+        gates["VIX"] = (False, f"VIX {vix:.1f} critically low — options near illiquid, skip")
+    elif vix > 25:
+        gates["VIX"] = (False, f"VIX {vix:.1f} extreme — premiums bloated, vega crush risk")
     elif vix < 12:
-        gates["VIX"] = (False, f"VIX {vix:.1f} too low — market range-bound, premium unrecoverable")
-    elif vix > 22:
-        gates["VIX"] = (False, f"VIX {vix:.1f} too high — premiums bloated, vega crush risk")
+        gates["VIX"] = (True, f"VIX {vix:.1f} low but tradeable — prefer tighter targets")
     else:
-        gates["VIX"] = (True,  f"VIX {vix:.1f} in tradeable zone (12–22)")
+        gates["VIX"] = (True,  f"VIX {vix:.1f} in ideal zone (12–25)")
 
     # Gate 3 — IV crush
     if iv_ratio < 0.75:
@@ -205,19 +207,21 @@ def check_gates(
     else:
         gates["IV"] = (True,  f"IV ratio {iv_ratio:.2f} — no adverse IV distortion")
 
-    # Gate 4 — Consecutive confirmation (2 of last 3 scans same direction)
-    if len(direction_history) < 2:
-        gates["Confirm"] = (False, "Need 2+ scans to confirm direction — wait")
+    # Gate 4 — Consecutive confirmation (1 of last 2 same direction; just 1 prior scan needed)
+    if len(direction_history) < 1:
+        gates["Confirm"] = (False, "Need 1+ prior scan to confirm direction — wait")
     else:
-        recent = direction_history[-3:]
+        recent = direction_history[-2:]
         bulls  = recent.count("BULL")
         bears  = recent.count("BEAR")
-        if bulls >= 2:
-            gates["Confirm"] = (True,  f"BULL confirmed in {bulls}/3 recent scans")
-        elif bears >= 2:
-            gates["Confirm"] = (True,  f"BEAR confirmed in {bears}/3 recent scans")
+        if bulls >= 1 and bears == 0:
+            gates["Confirm"] = (True,  f"BULL confirmed in {bulls}/{len(recent)} recent scans")
+        elif bears >= 1 and bulls == 0:
+            gates["Confirm"] = (True,  f"BEAR confirmed in {bears}/{len(recent)} recent scans")
+        elif bulls >= 1 and bears >= 1:
+            gates["Confirm"] = (False, f"Conflicting: {bulls}B {bears}P in last {len(recent)} scans — no conviction")
         else:
-            gates["Confirm"] = (False, f"Mixed: {bulls}B {bears}P in last {len(recent)} scans — no conviction")
+            gates["Confirm"] = (False, "Direction neutral in recent scans — wait for clarity")
 
     return gates
 
@@ -346,9 +350,12 @@ def _vwap_factor(spot: float, vwap: float) -> dict:
 def _vix_factor(vix: float) -> dict:
     if vix <= 0:
         return _factor("India VIX", "—", "NEUTRAL", 0, "VIX unavailable")
+    if vix < 10:
+        return _factor("India VIX", f"{vix:.1f} ⚠", "NEUTRAL", -2,
+                       "VIX critically low — option premiums minimal, movement unlikely")
     if vix < 12:
-        return _factor("India VIX", f"{vix:.1f} ⚠", "NEUTRAL", -1,
-                       "VIX too low — range-bound, option premiums won't recover cost")
+        return _factor("India VIX", f"{vix:.1f} ↓", "NEUTRAL", -1,
+                       "VIX low 10–12 — market calm, prefer tighter SL and targets")
     if vix <= 18:
         return _factor("India VIX", f"{vix:.1f} ✓", "NEUTRAL", 0,
                        "Ideal VIX zone 12–18 — balanced premium / movement")
@@ -391,6 +398,28 @@ def _time_factor(ist_now: datetime.datetime, expiry_date: datetime.date) -> dict
         return _factor("Time Window", "Afternoon drift", "NEUTRAL", -1,
                        "Afternoon — reduced OI responsiveness, lower reliability")
     return _factor("Time Window", t.strftime("%H:%M"), "NEUTRAL", 0, "Standard market hours")
+
+
+def _spot_momentum_factor(toi_rows: list) -> dict:
+    """Directional momentum from spot price across OI snapshots."""
+    if len(toi_rows) < 2:
+        return _factor("Spot Momentum", "—", "NEUTRAL", 0, "Need 2+ OI snapshots for momentum")
+    spots = [r["spot"] for r in toi_rows[-3:]]
+    first, last = spots[0], spots[-1]
+    pct = (last - first) / first * 100 if first else 0
+    if pct > 0.3:
+        return _factor("Spot Momentum", f"{last:,.0f} ↑ +{pct:.2f}%", "BULL", +2,
+                       "Spot rising strongly over recent scans — bullish price flow")
+    if pct > 0.05:
+        return _factor("Spot Momentum", f"{last:,.0f} ↑ +{pct:.2f}%", "BULL", +1,
+                       "Spot drifting up — mild bullish momentum")
+    if pct < -0.3:
+        return _factor("Spot Momentum", f"{last:,.0f} ↓ {pct:.2f}%", "BEAR", -2,
+                       "Spot falling strongly over recent scans — bearish price flow")
+    if pct < -0.05:
+        return _factor("Spot Momentum", f"{last:,.0f} ↓ {pct:.2f}%", "BEAR", -1,
+                       "Spot drifting down — mild bearish momentum")
+    return _factor("Spot Momentum", f"{last:,.0f} →", "NEUTRAL", 0, "Spot flat — no trend")
 
 
 def _oi_velocity_factor(toi_rows: list, scan_interval_sec: int) -> dict:
@@ -596,12 +625,13 @@ def run_smart_signal_v2(
             factors.append(_factor(name, "—", "NEUTRAL", 0,
                                    "Initialize Trending OI tab to unlock this signal"))
 
-    # v2 factors (9–13)
+    # v2 factors (9–14)
     factors.append(_vwap_factor(spot, vwap))
     factors.append(_vix_factor(vix))
     factors.append(_iv_spike_factor(iv_ratio))
     factors.append(_time_factor(ist_now, expiry_date))
     factors.append(_oi_velocity_factor(toi_rows or [], scan_interval_sec))
+    factors.append(_spot_momentum_factor(toi_rows or []))
 
     # 6. Raw score
     score_raw = sum(f["points"] for f in factors)
@@ -625,7 +655,9 @@ def run_smart_signal_v2(
     else:
         raw_signal, raw_conf, opt_type = "WAIT", "LOW", None
 
-    direction = "BULL" if opt_type == "CE" else ("BEAR" if opt_type == "PE" else "NEUTRAL")
+    # Store directional lean based on raw score (not threshold) so Confirm gate
+    # accumulates useful history even when score is below the signal threshold.
+    direction = "BULL" if score_raw > 0 else ("BEAR" if score_raw < 0 else "NEUTRAL")
 
     # 8. Cross-index conflict check
     peer_symbol    = _CONFLICT_PAIRS.get(symbol)

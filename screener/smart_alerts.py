@@ -168,6 +168,28 @@ def _oi_wall_factor(spot: float, max_ce_strike: float, max_pe_strike: float) -> 
                    "Spot between key OI walls — no breakout yet")
 
 
+def _spot_momentum_factor(toi_rows: list) -> dict:
+    """Directional momentum from spot price across OI snapshots."""
+    if len(toi_rows) < 2:
+        return _factor("Spot Momentum", "—", "NEUTRAL", 0, "Need 2+ OI snapshots for momentum")
+    spots = [r["spot"] for r in toi_rows[-3:]]
+    first, last = spots[0], spots[-1]
+    pct = (last - first) / first * 100 if first else 0
+    if pct > 0.3:
+        return _factor("Spot Momentum", f"{last:,.0f} ↑ +{pct:.2f}%", "BULL", +2,
+                       "Spot rising strongly over recent scans")
+    if pct > 0.05:
+        return _factor("Spot Momentum", f"{last:,.0f} ↑ +{pct:.2f}%", "BULL", +1,
+                       "Spot drifting up — mild bullish momentum")
+    if pct < -0.3:
+        return _factor("Spot Momentum", f"{last:,.0f} ↓ {pct:.2f}%", "BEAR", -2,
+                       "Spot falling strongly over recent scans")
+    if pct < -0.05:
+        return _factor("Spot Momentum", f"{last:,.0f} ↓ {pct:.2f}%", "BEAR", -1,
+                       "Spot drifting down — mild bearish momentum")
+    return _factor("Spot Momentum", f"{last:,.0f} →", "NEUTRAL", 0, "Spot flat — no trend")
+
+
 def _diff_oi_factor(toi_rows: list) -> dict:
     if len(toi_rows) < 2:
         return _factor("Diff OI Trend", "—", "NEUTRAL", 0,
@@ -268,7 +290,9 @@ def run_smart_signal(
     factors.append(_maxpain_factor(spot, mp))
     factors.append(_oi_wall_factor(spot, max_ce_strike, max_pe_strike))
 
-    if toi_rows and len(toi_rows) >= 1:
+    has_toi = bool(toi_rows and len(toi_rows) >= 1)
+
+    if has_toi:
         lat = toi_rows[-1]
         prev = toi_rows[-2] if len(toi_rows) >= 2 else None
 
@@ -282,6 +306,7 @@ def run_smart_signal(
             prev["spot"] if prev else lat["spot"],
         ))
         factors.append(_diff_oi_factor(toi_rows))
+        factors.append(_spot_momentum_factor(toi_rows))
     else:
         factors.append(_factor("COI PCR", "—", "NEUTRAL", 0,
                                "Initialize Trending OI tab to unlock COI PCR signal"))
@@ -293,18 +318,27 @@ def run_smart_signal(
                                "Initialize Trending OI tab to unlock diff OI trend"))
         factors.append(_factor("Vol PCR", "—", "NEUTRAL", 0,
                                "Initialize Trending OI tab to unlock Vol PCR"))
+        factors.append(_factor("Spot Momentum", "—", "NEUTRAL", 0,
+                               "Initialize Trending OI tab to unlock spot momentum"))
 
     # 4. Composite score
     score = sum(f["points"] for f in factors)
 
     # 5. Signal classification
-    if score >= 6:
+    # When Trending OI is not running, effective max score is PCR(2)+MaxPain(2)+OIWalls(1)=5
+    # so lower thresholds to ±5 / ±3 to allow signals; with toi_rows, keep full thresholds.
+    if has_toi:
+        strong_thresh, mild_thresh = 6, 4
+    else:
+        strong_thresh, mild_thresh = 5, 3
+
+    if score >= strong_thresh:
         signal, confidence, opt_type = "STRONG BUY CE", "HIGH", "CE"
-    elif score >= 4:
+    elif score >= mild_thresh:
         signal, confidence, opt_type = "BUY CE", "MEDIUM", "CE"
-    elif score <= -6:
+    elif score <= -strong_thresh:
         signal, confidence, opt_type = "STRONG BUY PE", "HIGH", "PE"
-    elif score <= -4:
+    elif score <= -mild_thresh:
         signal, confidence, opt_type = "BUY PE", "MEDIUM", "PE"
     else:
         signal, confidence, opt_type = "WAIT", "LOW", None
