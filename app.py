@@ -582,8 +582,13 @@ with tab2:
     if run_ma_btn:
         with st.spinner(f"Scanning NIFTY 500 on {tf['label']} candles… (3–5 min)"):
             symbols_df = get_nifty500_symbols()
-            ma_results = run_ma_retracement_scan(symbols_df, touch_pct=touch_pct/100,
-                                                  interval=interval, period=period)
+            _ma_kite_key   = st.session_state.get("kite_api_key", "")
+            _ma_kite_token = st.session_state.get("kite_access_token", "")
+            ma_results = run_ma_retracement_scan(
+                symbols_df, touch_pct=touch_pct/100,
+                interval=interval, period=period,
+                api_key=_ma_kite_key, access_token=_ma_kite_token,
+            )
             st.session_state["ma_results"] = ma_results
             st.session_state["ma_tf"] = tf_key
 
@@ -636,7 +641,12 @@ with tab3:
     if run_cross_btn:
         with st.spinner("Scanning NIFTY 500 for 20/50 EMA crossovers… (3–5 min)"):
             symbols_df    = get_nifty500_symbols()
-            cross_results = run_crossover_scan(symbols_df)
+            _cx_kite_key   = st.session_state.get("kite_api_key", "")
+            _cx_kite_token = st.session_state.get("kite_access_token", "")
+            cross_results = run_crossover_scan(
+                symbols_df,
+                api_key=_cx_kite_key, access_token=_cx_kite_token,
+            )
             st.session_state["cross_results"] = cross_results
 
     if "cross_results" in st.session_state:
@@ -689,8 +699,13 @@ with tab4:
     if run_ma50_btn:
         with st.spinner(f"Scanning NIFTY 500 on {tf['label']} candles… (3–6 min)"):
             symbols_df   = get_nifty500_symbols()
-            ma50_results = run_ma50_support_scan(symbols_df, touch_pct=touch_pct_50/100,
-                                                  interval=interval, period=period)
+            _m50_kite_key   = st.session_state.get("kite_api_key", "")
+            _m50_kite_token = st.session_state.get("kite_access_token", "")
+            ma50_results = run_ma50_support_scan(
+                symbols_df, touch_pct=touch_pct_50/100,
+                interval=interval, period=period,
+                api_key=_m50_kite_key, access_token=_m50_kite_token,
+            )
             st.session_state["ma50_results"] = ma50_results
             st.session_state["ma50_tf"]      = tf_key
 

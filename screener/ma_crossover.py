@@ -1,6 +1,7 @@
 import yfinance as yf
 import pandas as pd
 import numpy as np
+from screener.kite_hist import batch_quote_nse, patch_df_with_kite
 
 
 def _ema(series: pd.Series, period: int) -> pd.Series:
@@ -15,7 +16,10 @@ def _rsi(series: pd.Series, period: int = 14) -> pd.Series:
     return 100 - (100 / (1 + rs))
 
 
-def analyze_ma_crossover(nse_symbol: str) -> dict | None:
+def analyze_ma_crossover(
+    nse_symbol: str,
+    kite_quote: dict | None = None,
+) -> dict | None:
     """
     Detect 20 EMA crossing above 50 EMA on daily timeframe for position trading.
 
@@ -32,7 +36,12 @@ def analyze_ma_crossover(nse_symbol: str) -> dict | None:
         if df is None or len(df) < 60:
             return None
 
-        df     = df.copy()
+        df = df.copy()
+
+        # Replace today's candle with live Kite price if available
+        if kite_quote:
+            df = patch_df_with_kite(df, kite_quote)
+
         close  = df["Close"].squeeze()
         volume = df["Volume"].squeeze()
 
@@ -56,10 +65,9 @@ def analyze_ma_crossover(nse_symbol: str) -> dict | None:
             return None
 
         # ── Filter 3: Detect crossover within last 5 candles ─────────────────
-        # crossover = ema20 was below ema50 before, now above
         cross_day = None
         for i in range(1, 6):  # check last 5 candles
-            cur_above  = float(ema20.iloc[-i])  > float(ema50.iloc[-i])
+            cur_above  = float(ema20.iloc[-i])   > float(ema50.iloc[-i])
             prev_below = float(ema20.iloc[-i-1]) <= float(ema50.iloc[-i-1])
             if cur_above and prev_below:
                 cross_day = i  # 1 = today, 2 = yesterday, etc.
@@ -69,7 +77,6 @@ def analyze_ma_crossover(nse_symbol: str) -> dict | None:
             return None
 
         # ── Filter 4: Fake breakout check — 20 EMA stayed above 50 EMA ───────
-        # For crossover that happened N days ago, check all days since stayed above
         confirmed_days = 0
         for i in range(1, cross_day + 1):
             if float(ema20.iloc[-i]) > float(ema50.iloc[-i]):
@@ -92,14 +99,11 @@ def analyze_ma_crossover(nse_symbol: str) -> dict | None:
         price_at_cross  = float(close.iloc[-cross_day])
         pct_move_since  = (latest_close - price_at_cross) / price_at_cross * 100
 
-        # Distance from 200 EMA (buffer above it)
         pct_above_200   = (latest_close - latest_ema200) / latest_ema200 * 100
+        ema_gap_pct     = (latest_ema20 - latest_ema50)  / latest_ema50  * 100
 
-        # Gap between 20 EMA and 50 EMA (momentum of crossover)
-        ema_gap_pct     = (latest_ema20 - latest_ema50) / latest_ema50 * 100
-
-        high_52w = float(close.tail(252).max())
-        low_52w  = float(close.tail(252).min())
+        high_52w  = float(close.tail(252).max())
+        low_52w   = float(close.tail(252).min())
         change_1d = (latest_close - float(close.iloc[-2])) / float(close.iloc[-2]) * 100
 
         # ── Signal strength ───────────────────────────────────────────────────
@@ -109,37 +113,53 @@ def analyze_ma_crossover(nse_symbol: str) -> dict | None:
             signal = "STRONG BUY"
         elif cross_day <= 3 and confirmed_days >= 2:
             signal = "BUY"
-        elif confirmed_days >= 2:
-            signal = "WATCH"
         else:
             signal = "WATCH"
 
         return {
-            "Price":            round(latest_close, 2),
-            "Change 1D%":       round(change_1d, 2),
-            "EMA 20":           round(latest_ema20, 2),
-            "EMA 50":           round(latest_ema50, 2),
-            "EMA 200":          round(latest_ema200, 2),
-            "% Above EMA200":   round(pct_above_200, 2),
-            "EMA Gap%":         round(ema_gap_pct, 2),
-            "RSI":              round(latest_rsi, 1),
-            "Cross Day":        cross_day,
-            "Confirmed Days":   confirmed_days,
-            "Vol on Cross":     round(vol_ratio_cross, 2),
-            "Vol Today":        round(vol_ratio_today, 2),
+            "Price":             round(latest_close, 2),
+            "Change 1D%":        round(change_1d, 2),
+            "EMA 20":            round(latest_ema20, 2),
+            "EMA 50":            round(latest_ema50, 2),
+            "EMA 200":           round(latest_ema200, 2),
+            "% Above EMA200":    round(pct_above_200, 2),
+            "EMA Gap%":          round(ema_gap_pct, 2),
+            "RSI":               round(latest_rsi, 1),
+            "Cross Day":         cross_day,
+            "Confirmed Days":    confirmed_days,
+            "Vol on Cross":      round(vol_ratio_cross, 2),
+            "Vol Today":         round(vol_ratio_today, 2),
             "Move Since Cross%": round(pct_move_since, 2),
-            "52W High":         round(high_52w, 2),
-            "52W Low":          round(low_52w, 2),
-            "Signal":           signal,
+            "52W High":          round(high_52w, 2),
+            "52W Low":           round(low_52w, 2),
+            "Signal":            signal,
         }
     except Exception:
         return None
 
 
-def run_crossover_scan(symbols_df: pd.DataFrame) -> pd.DataFrame:
+def run_crossover_scan(
+    symbols_df: pd.DataFrame,
+    api_key: str = "",
+    access_token: str = "",
+) -> pd.DataFrame:
+    # Batch-fetch live Kite quotes for all symbols in one API call
+    kite_quotes: dict = {}
+    if api_key and access_token:
+        try:
+            plain_syms = list(symbols_df["Symbol"].str.upper())
+            kite_quotes = batch_quote_nse(api_key, access_token, plain_syms)
+        except Exception:
+            pass
+
     rows = []
     for _, row in symbols_df.iterrows():
-        result = analyze_ma_crossover(row["NSE_Symbol"])
+        nse_key = f"NSE:{str(row['Symbol']).upper()}"
+        quote   = kite_quotes.get(nse_key, {})
+        result = analyze_ma_crossover(
+            row["NSE_Symbol"],
+            kite_quote=quote if quote else None,
+        )
         if result:
             rows.append({
                 "Symbol":  row["Symbol"],
@@ -153,6 +173,5 @@ def run_crossover_scan(symbols_df: pd.DataFrame) -> pd.DataFrame:
     df = pd.DataFrame(rows)
     signal_order = {"STRONG BUY": 0, "BUY": 1, "WATCH": 2}
     df["_rank"] = df["Signal"].map(signal_order).fillna(3)
-    # Sort: signal first, then recency of crossover, then volume
     df = df.sort_values(["_rank", "Cross Day", "Vol on Cross"], ascending=[True, True, False])
     return df.drop(columns=["_rank"]).reset_index(drop=True)
