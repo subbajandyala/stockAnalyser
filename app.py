@@ -55,12 +55,14 @@ st.set_page_config(page_title="MarketPulse", layout="wide", page_icon="🐂")
 # ── Global CSS ────────────────────────────────────────────────────────────────
 st.markdown("""
 <style>
-.stApp { background: #0a0e1a; }
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&display=swap');
+* { font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif !important; }
+.stApp { background: #131722; }
 .main .block-container { padding-top: 1rem; }
-[data-testid="stSidebar"] { background: #0d1220 !important; border-right: 1px solid #1a2035 !important; }
+[data-testid="stSidebar"] { background: #1e222d !important; border-right: 1px solid #2a2e39 !important; }
 
 /* Ticker */
-.ticker-wrapper { background: #0d1220; border: 1px solid #1a2035; border-radius: 8px; overflow: hidden; white-space: nowrap; padding: 8px 0; margin-bottom: 18px; }
+.ticker-wrapper { background: #1e222d; border: 1px solid #2a2e39; border-radius: 8px; overflow: hidden; white-space: nowrap; padding: 8px 0; margin-bottom: 18px; }
 .ticker-track { display: inline-block; animation: ticker-scroll 40s linear infinite; }
 .ticker-track:hover { animation-play-state: paused; }
 .ticker-item { display: inline-block; margin: 0 24px; font-size: 0.8rem; font-weight: 600; color: #c9d1d9; }
@@ -76,19 +78,19 @@ st.markdown("""
 .hero-badge { display: inline-block; background: rgba(0,212,170,0.1); border: 1px solid rgba(0,212,170,0.25); color: #00d4aa; font-size: 0.68rem; font-weight: 700; letter-spacing: 1.2px; text-transform: uppercase; padding: 2px 10px; border-radius: 20px; margin-top: 12px; }
 
 /* Metric cards */
-[data-testid="metric-container"] { background: #0f1523 !important; border: 1px solid #1a2035 !important; border-radius: 10px !important; padding: 12px 16px !important; }
+[data-testid="metric-container"] { background: #1e222d !important; border: 1px solid #2a2e39 !important; border-radius: 10px !important; padding: 12px 16px !important; }
 [data-testid="stMetricLabel"] { color: #8b949e !important; font-size: 0.78rem !important; font-weight: 600 !important; text-transform: uppercase; }
 [data-testid="stMetricValue"] { color: #e6edf3 !important; font-size: 1.4rem !important; font-weight: 700 !important; }
 [data-testid="stMetricDelta"] { font-size: 0.85rem !important; }
 
 /* Tabs */
-[data-testid="stTabs"] [role="tablist"] { background: #0a0e1a; border-radius: 0; padding: 0; gap: 6px; border-bottom: 1px solid #1a2035; }
-[data-testid="stTabs"] button[role="tab"] { border-radius: 6px 6px 0 0 !important; font-size: 0.75rem !important; font-weight: 600 !important; color: #6e7681 !important; padding: 5px 14px !important; border: 1px solid transparent !important; border-bottom: none !important; background: #0f1523 !important; letter-spacing: 0.3px !important; text-transform: uppercase !important; transition: all 0.15s !important; }
-[data-testid="stTabs"] button[role="tab"]:hover { color: #c9d1d9 !important; background: #141928 !important; border-color: #1a2035 !important; }
-[data-testid="stTabs"] button[role="tab"][aria-selected="true"] { background: #141928 !important; color: #00d4aa !important; border-color: #1a2035 !important; border-bottom: 2px solid #00d4aa !important; font-weight: 700 !important; }
+[data-testid="stTabs"] [role="tablist"] { background: #131722; border-radius: 0; padding: 0; gap: 6px; border-bottom: 1px solid #2a2e39; }
+[data-testid="stTabs"] button[role="tab"] { border-radius: 6px 6px 0 0 !important; font-size: 0.75rem !important; font-weight: 600 !important; color: #6e7681 !important; padding: 5px 14px !important; border: 1px solid transparent !important; border-bottom: none !important; background: #1e222d !important; letter-spacing: 0.3px !important; text-transform: uppercase !important; transition: all 0.15s !important; }
+[data-testid="stTabs"] button[role="tab"]:hover { color: #c9d1d9 !important; background: #262b36 !important; border-color: #2a2e39 !important; }
+[data-testid="stTabs"] button[role="tab"][aria-selected="true"] { background: #262b36 !important; color: #00d4aa !important; border-color: #2a2e39 !important; border-bottom: 2px solid #00d4aa !important; font-weight: 700 !important; }
 
 /* Buttons */
-button[kind="primary"] { background: linear-gradient(135deg, #00b894, #00d4aa) !important; border: none !important; border-radius: 8px !important; color: #0a0e1a !important; font-weight: 700 !important; box-shadow: 0 2px 8px rgba(0,212,170,0.3) !important; transition: all 0.2s !important; }
+button[kind="primary"] { background: linear-gradient(135deg, #00b894, #00d4aa) !important; border: none !important; border-radius: 8px !important; color: #131722 !important; font-weight: 700 !important; box-shadow: 0 2px 8px rgba(0,212,170,0.3) !important; transition: all 0.2s !important; }
 button[kind="primary"]:hover { box-shadow: 0 4px 14px rgba(0,212,170,0.5) !important; transform: translateY(-1px) !important; }
 
 /* Misc */
@@ -96,11 +98,11 @@ button[kind="primary"]:hover { box-shadow: 0 4px 14px rgba(0,212,170,0.5) !impor
 [data-testid="stDialog"] > div { max-width: 98vw !important; width: 98vw !important; }
 [data-testid="stDialog"] section { max-width: 98vw !important; }
 [data-testid="stDataFrame"] { border-radius: 8px; overflow: hidden; }
-hr { border-color: #1a2035 !important; margin: 10px 0 !important; }
+hr { border-color: #2a2e39 !important; margin: 10px 0 !important; }
 .stCaption { color: #8b949e !important; }
 
 /* Sidebar nav */
-.sb-brand { padding: 20px 16px 14px; border-bottom: 1px solid #1a2035; }
+.sb-brand { padding: 20px 16px 14px; border-bottom: 1px solid #2a2e39; }
 .sb-brand-name { font-size: 1.3rem; font-weight: 900; color: #fff; letter-spacing: -0.5px; }
 .sb-brand-sub { font-size: 0.67rem; color: #4a5568; margin-top: 2px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.8px; }
 .sb-sec { font-size: 0.61rem; font-weight: 700; text-transform: uppercase; letter-spacing: 1.8px; color: #3d4a5c; padding: 14px 16px 5px; }
@@ -109,7 +111,7 @@ hr { border-color: #1a2035 !important; margin: 10px 0 !important; }
 .sb-item:active { background: rgba(0,212,170,0.15); }
 .sb-lbl { color: #adbac7; font-size: 0.8rem; }
 .sb-badge { background: rgba(0,212,170,0.12); border: 1px solid rgba(0,212,170,0.25); color: #00d4aa; font-size: 0.61rem; font-weight: 700; padding: 1px 6px; border-radius: 10px; }
-.sb-div { height: 1px; background: #1a2035; margin: 14px 0; }
+.sb-div { height: 1px; background: #2a2e39; margin: 14px 0; }
 .sb-live { display: flex; align-items: center; gap: 8px; padding: 8px 16px; font-size: 0.72rem; font-weight: 600; color: #00d4aa; }
 .sb-dot { width: 7px; height: 7px; background: #00d4aa; border-radius: 50%; display: inline-block; animation: sb-pulse 1.5s ease-in-out infinite; }
 @keyframes sb-pulse { 0%,100% { opacity:1; transform:scale(1); } 50% { opacity:0.3; transform:scale(0.6); } }
@@ -117,7 +119,7 @@ hr { border-color: #1a2035 !important; margin: 10px 0 !important; }
 /* OI table */
 .oc-wrap { width:100%; overflow-x:auto; margin:4px 0 16px; }
 .oc-tbl { width:100%; border-collapse:collapse; font-size:0.78rem; }
-.oc-tbl th { background:#0f1523; color:#6e7681; font-weight:700; text-transform:uppercase; font-size:0.64rem; letter-spacing:0.6px; padding:8px 10px; border-bottom:1px solid #1a2035; }
+.oc-tbl th { background:#1e222d; color:#6e7681; font-weight:700; text-transform:uppercase; font-size:0.64rem; letter-spacing:0.6px; padding:8px 10px; border-bottom:1px solid #2a2e39; }
 .oc-tbl th.r { text-align:right; } .oc-tbl th.l { text-align:left; } .oc-tbl th.c { text-align:center; }
 .oc-tbl td { padding:5px 8px; border-bottom:1px solid rgba(26,32,53,0.6); color:#c9d1d9; vertical-align:middle; white-space:nowrap; }
 .oc-tbl td.r { text-align:right; font-variant-numeric:tabular-nums; }
@@ -261,7 +263,7 @@ def chart_modal(nse_symbol: str, company: str, tf_key: str, extra_levels: dict |
     fig.update_layout(
         xaxis=dict(type="category", tickvals=vis_ticks, ticktext=vis_ticks, tickangle=-40,
                    tickfont=dict(size=10, color="#8b949e"), showgrid=False, zeroline=False),
-        yaxis=dict(title="Price (₹)", side="left", showgrid=True, gridcolor="#1a2035", gridwidth=1,
+        yaxis=dict(title="Price (₹)", side="left", showgrid=True, gridcolor="#2a2e39", gridwidth=1,
                    tickfont=dict(color="#8b949e"), title_font=dict(color="#8b949e")),
         yaxis2=dict(overlaying="y", side="right", showgrid=False, title="Volume",
                     title_font=dict(color="#8b949e"), tickfont=dict(color="#8b949e")),
@@ -271,8 +273,8 @@ def chart_modal(nse_symbol: str, company: str, tf_key: str, extra_levels: dict |
         height=560,
         margin=dict(t=10, b=55, l=10, r=110),
         template="plotly_dark",
-        plot_bgcolor="#0a0e1a",
-        paper_bgcolor="#0a0e1a",
+        plot_bgcolor="#131722",
+        paper_bgcolor="#131722",
     )
     st.plotly_chart(fig, use_container_width=True)
 
@@ -1182,12 +1184,12 @@ def page_option_chain():
                                           yanchor="bottom")
                 fig_oi.update_layout(
                     barmode="group", template="plotly_dark",
-                    plot_bgcolor="#0a0e1a", paper_bgcolor="#0a0e1a",
+                    plot_bgcolor="#131722", paper_bgcolor="#131722",
                     height=340, margin=dict(t=10, b=50, l=10, r=10),
                     legend=dict(orientation="h", yanchor="bottom", y=1.01, x=0,
                                 font=dict(color="#c9d1d9"), bgcolor="rgba(0,0,0,0)"),
                     xaxis=dict(tickfont=dict(color="#8b949e", size=9), showgrid=False, tickangle=-45),
-                    yaxis=dict(tickfont=dict(color="#8b949e"), gridcolor="#1a2035"),
+                    yaxis=dict(tickfont=dict(color="#8b949e"), gridcolor="#2a2e39"),
                 )
                 st.plotly_chart(fig_oi, use_container_width=True)
 
@@ -1211,12 +1213,12 @@ def page_option_chain():
                                             yanchor="bottom")
                 fig_chng.update_layout(
                     barmode="group", template="plotly_dark",
-                    plot_bgcolor="#0a0e1a", paper_bgcolor="#0a0e1a",
+                    plot_bgcolor="#131722", paper_bgcolor="#131722",
                     height=340, margin=dict(t=10, b=50, l=10, r=10),
                     legend=dict(orientation="h", yanchor="bottom", y=1.01, x=0,
                                 font=dict(color="#c9d1d9"), bgcolor="rgba(0,0,0,0)"),
                     xaxis=dict(tickfont=dict(color="#8b949e", size=9), showgrid=False, tickangle=-45),
-                    yaxis=dict(tickfont=dict(color="#8b949e"), gridcolor="#1a2035"),
+                    yaxis=dict(tickfont=dict(color="#8b949e"), gridcolor="#2a2e39"),
                 )
                 st.plotly_chart(fig_chng, use_container_width=True)
 
@@ -1688,7 +1690,7 @@ def page_sensex_expiry():
                             )
                         _fig_vol.update_layout(
                             barmode="group", template="plotly_dark",
-                            plot_bgcolor="#0a0e1a", paper_bgcolor="#0a0e1a",
+                            plot_bgcolor="#131722", paper_bgcolor="#131722",
                             height=300, margin=dict(t=10, b=50, l=10, r=10),
                             legend=dict(orientation="h", y=1.05, x=0,
                                         font=dict(color="#c9d1d9"),
@@ -1696,7 +1698,7 @@ def page_sensex_expiry():
                             xaxis=dict(tickfont=dict(color="#8b949e", size=9),
                                        showgrid=False, tickangle=-45),
                             yaxis=dict(tickfont=dict(color="#8b949e"),
-                                       gridcolor="#1a2035", title="Contracts"),
+                                       gridcolor="#2a2e39", title="Contracts"),
                         )
                         st.plotly_chart(_fig_vol, use_container_width=True)
 
@@ -1722,7 +1724,7 @@ def page_sensex_expiry():
                                                  line_color="#00d4aa")
                         _fig_ratio.update_layout(
                             barmode="group", template="plotly_dark",
-                            plot_bgcolor="#0a0e1a", paper_bgcolor="#0a0e1a",
+                            plot_bgcolor="#131722", paper_bgcolor="#131722",
                             height=300, margin=dict(t=10, b=50, l=10, r=10),
                             legend=dict(orientation="h", y=1.05, x=0,
                                         font=dict(color="#c9d1d9"),
@@ -1730,14 +1732,14 @@ def page_sensex_expiry():
                             xaxis=dict(tickfont=dict(color="#8b949e", size=9),
                                        showgrid=False, tickangle=-45),
                             yaxis=dict(tickfont=dict(color="#8b949e"),
-                                       gridcolor="#1a2035", title="Vol / OI",
+                                       gridcolor="#2a2e39", title="Vol / OI",
                                        title_font=dict(color="#8b949e")),
                         )
                         st.plotly_chart(_fig_ratio, use_container_width=True)
 
             # ── How to read legend ────────────────────────────────────────────
             st.markdown(
-                """<div style="background:#0f1523;border:1px solid #1a2035;
+                """<div style="background:#1e222d;border:1px solid #2a2e39;
                 border-radius:8px;padding:14px 18px;margin-top:6px;">
                 <div style="color:#00d4aa;font-size:0.73rem;font-weight:700;
                 text-transform:uppercase;letter-spacing:1px;margin-bottom:8px;">
@@ -1839,15 +1841,15 @@ def page_sensex_expiry():
                                 annotation_position="top left",
                                 annotation_font=dict(color="#00d4aa", size=11))
             _fig_norm.update_layout(
-                template="plotly_dark", plot_bgcolor="#0a0e1a",
-                paper_bgcolor="#0a0e1a", height=380,
+                template="plotly_dark", plot_bgcolor="#131722",
+                paper_bgcolor="#131722", height=380,
                 margin=dict(t=20, b=50, l=10, r=10),
                 xaxis=dict(tickfont=dict(color="#8b949e", size=9),
                            showgrid=False, tickangle=-45,
                            tickvals=["09:15","10:15","11:15","12:15",
                                      "13:15","14:15","15:15","15:30"]),
                 yaxis=dict(tickfont=dict(color="#8b949e"),
-                           gridcolor="#1a2035", title="Move from Open (%)",
+                           gridcolor="#2a2e39", title="Move from Open (%)",
                            title_font=dict(color="#8b949e")),
                 legend=dict(orientation="h", y=1.05, x=0,
                             font=dict(color="#c9d1d9"),
@@ -1874,13 +1876,13 @@ def page_sensex_expiry():
                         textfont=dict(color="#c9d1d9", size=10),
                     ))
                     _fig_slot.update_layout(
-                        template="plotly_dark", plot_bgcolor="#0a0e1a",
-                        paper_bgcolor="#0a0e1a", height=300,
+                        template="plotly_dark", plot_bgcolor="#131722",
+                        paper_bgcolor="#131722", height=300,
                         margin=dict(t=10, b=60, l=10, r=10),
                         xaxis=dict(tickfont=dict(color="#8b949e", size=9),
                                    showgrid=False, tickangle=-30),
                         yaxis=dict(tickfont=dict(color="#8b949e"),
-                                   gridcolor="#1a2035"),
+                                   gridcolor="#2a2e39"),
                     )
                     st.plotly_chart(_fig_slot, use_container_width=True)
 
@@ -1895,13 +1897,13 @@ def page_sensex_expiry():
                         textfont=dict(color="#c9d1d9", size=10),
                     ))
                     _fig_rng.update_layout(
-                        template="plotly_dark", plot_bgcolor="#0a0e1a",
-                        paper_bgcolor="#0a0e1a", height=300,
+                        template="plotly_dark", plot_bgcolor="#131722",
+                        paper_bgcolor="#131722", height=300,
                         margin=dict(t=10, b=60, l=10, r=10),
                         xaxis=dict(tickfont=dict(color="#8b949e", size=9),
                                    showgrid=False, tickangle=-30),
                         yaxis=dict(tickfont=dict(color="#8b949e"),
-                                   gridcolor="#1a2035"),
+                                   gridcolor="#2a2e39"),
                     )
                     st.plotly_chart(_fig_rng, use_container_width=True)
 
@@ -2570,11 +2572,11 @@ def page_smart_alerts():
     # ── Design tokens (injected once per render) ──────────────────────────────
     st.markdown("""
 <style>
-.sa-card{background:#0d1220;border:1px solid #1a2035;border-radius:12px;padding:18px 22px;margin-bottom:12px;}
+.sa-card{background:#1e222d;border:1px solid #2a2e39;border-radius:12px;padding:18px 22px;margin-bottom:12px;}
 .sa-sec{font-size:0.58rem;font-weight:800;text-transform:uppercase;letter-spacing:2px;color:#3d4a5c;margin-bottom:10px;}
 .sa-kv-lbl{font-size:0.58rem;font-weight:700;text-transform:uppercase;letter-spacing:1.1px;color:#4a5568;margin-bottom:3px;}
 .sa-kv-val{font-size:1.08rem;font-weight:800;color:#e6edf3;line-height:1.3;}
-.sa-divider{height:1px;background:#1a2035;margin:14px 0;}
+.sa-divider{height:1px;background:#2a2e39;margin:14px 0;}
 .sa-bbull{background:rgba(0,212,170,0.13);border:1px solid rgba(0,212,170,0.4);color:#00d4aa;
   font-size:0.62rem;font-weight:800;padding:2px 9px;border-radius:6px;letter-spacing:.5px;white-space:nowrap;}
 .sa-bbear{background:rgba(248,81,73,0.11);border:1px solid rgba(248,81,73,0.4);color:#f85149;
@@ -2583,11 +2585,11 @@ def page_smart_alerts():
   font-size:0.62rem;font-weight:600;padding:2px 9px;border-radius:6px;white-space:nowrap;}
 .sa-tbl{width:100%;border-collapse:collapse;}
 .sa-tbl th{padding:8px 14px;font-size:0.58rem;font-weight:800;text-transform:uppercase;
-  letter-spacing:1.2px;color:#3d4a5c;text-align:left;background:#0a0e1a;border-bottom:1px solid #1a2035;}
+  letter-spacing:1.2px;color:#3d4a5c;text-align:left;background:#131722;border-bottom:1px solid #2a2e39;}
 .sa-tbl th.r{text-align:right;}
 .sa-tbl td{padding:7px 14px;border-bottom:1px solid rgba(26,32,53,0.7);vertical-align:middle;}
 .sa-tbl tr:last-child td{border-bottom:none;}
-.sa-tbl tfoot td{background:#0a0e1a;border-top:2px solid #1a2035;padding:8px 14px;}
+.sa-tbl tfoot td{background:#131722;border-top:2px solid #2a2e39;padding:8px 14px;}
 /* ── Active Trade Monitor ── */
 .atm-card{border-radius:14px;padding:20px 24px;margin:6px 0 14px;position:relative;overflow:hidden;}
 .atm-open{background:linear-gradient(135deg,#0a1a12 0%,#0d1f1a 100%);border:1.5px solid #00d4aa;}
@@ -2599,7 +2601,7 @@ def page_smart_alerts():
 .atm-label{font-size:0.56rem;font-weight:800;letter-spacing:2px;text-transform:uppercase;margin-bottom:4px;}
 .atm-pnl-pos{font-size:1.5rem;font-weight:900;color:#00d4aa;}
 .atm-pnl-neg{font-size:1.5rem;font-weight:900;color:#f85149;}
-.atm-bar-wrap{position:relative;height:10px;background:#1a2035;border-radius:5px;margin:10px 0 4px;overflow:visible;}
+.atm-bar-wrap{position:relative;height:10px;background:#2a2e39;border-radius:5px;margin:10px 0 4px;overflow:visible;}
 .atm-bar-fill{height:100%;border-radius:5px;transition:width .4s ease;}
 .atm-marker{position:absolute;top:-4px;width:3px;height:18px;border-radius:2px;transform:translateX(-50%);}
 .atm-rev-banner{background:rgba(230,184,0,.1);border:1px solid rgba(230,184,0,.4);border-radius:8px;
@@ -2870,7 +2872,7 @@ def page_smart_alerts():
   </div>
   <div>
     <div style="display:flex;justify-content:space-between;font-size:0.56rem;color:#3d4a5c;font-weight:700;text-transform:uppercase;letter-spacing:.8px;margin-bottom:5px;"><span>Strong PE -12</span><span>Neutral 0</span><span>Strong CE +12</span></div>
-    <div style="height:7px;background:#1a2035;border-radius:4px;overflow:hidden;"><div style="height:100%;width:100%;background:linear-gradient(90deg,#f85149 0%,#e6b800 50%,#00d4aa 100%);border-radius:4px;"></div></div>
+    <div style="height:7px;background:#2a2e39;border-radius:4px;overflow:hidden;"><div style="height:100%;width:100%;background:linear-gradient(90deg,#f85149 0%,#e6b800 50%,#00d4aa 100%);border-radius:4px;"></div></div>
     <div style="position:relative;height:10px;"><div style="position:absolute;left:{_gauge_pct:.1f}%;transform:translateX(-50%);top:0;width:3px;height:10px;background:{_sc};border-radius:2px;box-shadow:0 0 6px {_sc};"></div></div>
   </div>
 </div>""", unsafe_allow_html=True)
@@ -3235,7 +3237,7 @@ def page_smart_alerts_pro():
 .sp-conflict{background:rgba(248,81,73,0.08);border:1px solid rgba(248,81,73,0.25);border-radius:8px;padding:8px 14px;font-size:0.78rem;color:#f85149;margin-bottom:10px;}
 .sp-expiry-badge{background:rgba(230,184,0,0.12);border:1px solid rgba(230,184,0,0.35);color:#e6b800;font-size:0.65rem;font-weight:700;padding:2px 9px;border-radius:10px;letter-spacing:.5px;}
 .sp-ctx-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;}
-.sp-ctx-item{background:#0a0e1a;border:1px solid #1a2035;border-radius:8px;padding:10px 12px;}
+.sp-ctx-item{background:#131722;border:1px solid #2a2e39;border-radius:8px;padding:10px 12px;}
 </style>""", unsafe_allow_html=True)
 
     _sp_kite_key   = st.session_state.get("kite_api_key",      _get_secret("KITE_API_KEY", ""))
@@ -3520,7 +3522,7 @@ def page_smart_alerts_pro():
   </div>
   <div>
     <div style="display:flex;justify-content:space-between;font-size:0.56rem;color:#3d4a5c;font-weight:700;text-transform:uppercase;letter-spacing:.8px;margin-bottom:5px;"><span>Strong PE -14</span><span>Neutral 0</span><span>Strong CE +14</span></div>
-    <div style="height:7px;background:#1a2035;border-radius:4px;overflow:hidden;"><div style="height:100%;width:100%;background:linear-gradient(90deg,#f85149 0%,#e6b800 50%,#00d4aa 100%);border-radius:4px;"></div></div>
+    <div style="height:7px;background:#2a2e39;border-radius:4px;overflow:hidden;"><div style="height:100%;width:100%;background:linear-gradient(90deg,#f85149 0%,#e6b800 50%,#00d4aa 100%);border-radius:4px;"></div></div>
     <div style="position:relative;height:10px;"><div style="position:absolute;left:{_sp_gauge:.1f}%;transform:translateX(-50%);top:0;width:3px;height:10px;background:{_spc};border-radius:2px;box-shadow:0 0 6px {_spc};"></div></div>
   </div>
 </div>""", unsafe_allow_html=True)
