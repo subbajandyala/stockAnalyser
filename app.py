@@ -47,6 +47,12 @@ try:
 except ImportError:
     _HAS_AUTOREFRESH = False
 
+try:
+    from streamlit_js_eval import streamlit_js_eval as _js_eval
+    _HAS_JS_EVAL = True
+except ImportError:
+    _HAS_JS_EVAL = False
+
 
 st.set_page_config(page_title="MarketPulse", layout="wide", page_icon="🐂")
 
@@ -308,6 +314,15 @@ with st.sidebar:
     st.divider()
 
     with st.expander("⚡ Zerodha Kite Connect", expanded=False):
+        # ── Restore credentials from browser localStorage (survives new tabs) ──
+        if _HAS_JS_EVAL and "kite_api_key" not in st.session_state:
+            _ls_key = _js_eval("localStorage.getItem('mp_kite_api_key')", key="_ls_r_key") or ""
+            _ls_tok = _js_eval("localStorage.getItem('mp_kite_access_token')", key="_ls_r_tok") or ""
+            if _ls_key:
+                st.session_state["kite_api_key"] = _ls_key
+            if _ls_tok:
+                st.session_state["kite_access_token"] = _ls_tok
+
         _sidebar_api_key = st.text_input(
             "API Key", type="password", key="kite_api_key",
             value=_get_secret("KITE_API_KEY", ""),
@@ -318,6 +333,17 @@ with st.sidebar:
             value=_get_secret("KITE_ACCESS_TOKEN", ""),
             placeholder="Daily token — refresh each morning",
         )
+
+        # ── Persist credentials to localStorage so new tabs auto-fill ─────────
+        _cur_key = st.session_state.get("kite_api_key", "")
+        _cur_tok = st.session_state.get("kite_access_token", "")
+        if _HAS_JS_EVAL and (_cur_key or _cur_tok):
+            _js_eval(
+                f"localStorage.setItem('mp_kite_api_key', {repr(_cur_key)});"
+                f"localStorage.setItem('mp_kite_access_token', {repr(_cur_tok)});",
+                key="_ls_w_creds",
+            )
+
         _kite_ok = bool(
             st.session_state.get("kite_api_key", "")
             and st.session_state.get("kite_access_token", "")
