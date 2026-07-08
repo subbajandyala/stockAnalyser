@@ -15,7 +15,12 @@ from screener.option_chain import (
     fetch_option_chain, get_expiries, parse_chain,
     atm_strike, calc_pcr, calc_max_pain,
 )
-from screener.fundamental import fetch_fundamental_stocks
+try:
+    from screener.fundamental import fetch_fundamental_stocks as _fetch_fundamental_stocks
+    _HAS_FUNDAMENTAL = True
+except Exception:
+    _HAS_FUNDAMENTAL = False
+    _fetch_fundamental_stocks = None  # type: ignore[assignment]
 from screener.fo_scanner import run_fo_scan
 from screener.sensex_option_moves import (
     run_sensex_option_moves_scan,
@@ -1225,6 +1230,15 @@ def page_option_chain():
 
 # ── PAGE: Fundamentals ────────────────────────────────────────────────────────
 def page_fundamentals():
+    if not _HAS_FUNDAMENTAL:
+        try:
+            from screener.fundamental import fetch_fundamental_stocks as _fetch_fundamental_stocks_lazy
+        except Exception as _imp_err:
+            st.error(f"Fundamentals screener unavailable: {_imp_err}")
+            return
+    else:
+        _fetch_fundamental_stocks_lazy = _fetch_fundamental_stocks  # type: ignore[assignment]
+
     st.markdown("#### 📊 Fundamentally Strong Stocks — Quality Filter")
 
     with st.container(border=True):
@@ -1243,7 +1257,7 @@ def page_fundamentals():
         _fund_prog = st.progress(0, text="Scanning NIFTY 500 fundamentals… (1–2 min)")
         try:
             _symbols_df = get_nifty500_symbols()
-            fund_results = fetch_fundamental_stocks(
+            fund_results = _fetch_fundamental_stocks_lazy(
                 _symbols_df,
                 progress_cb=lambda p: _fund_prog.progress(p, text=f"Scanning… {int(p*100)}% done"),
             )
