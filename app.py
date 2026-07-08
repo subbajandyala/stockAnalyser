@@ -47,11 +47,7 @@ try:
 except ImportError:
     _HAS_AUTOREFRESH = False
 
-try:
-    from streamlit_js_eval import streamlit_js_eval as _js_eval
-    _HAS_JS_EVAL = True
-except ImportError:
-    _HAS_JS_EVAL = False
+import streamlit.components.v1 as _scomp
 
 
 st.set_page_config(page_title="MarketPulse", layout="wide", page_icon="🐂")
@@ -313,16 +309,48 @@ with st.sidebar:
     )
     st.divider()
 
-    with st.expander("⚡ Zerodha Kite Connect", expanded=False):
-        # ── Restore credentials from browser localStorage (survives new tabs) ──
-        if _HAS_JS_EVAL and "kite_api_key" not in st.session_state:
-            _ls_key = _js_eval("localStorage.getItem('mp_kite_api_key')", key="_ls_r_key") or ""
-            _ls_tok = _js_eval("localStorage.getItem('mp_kite_access_token')", key="_ls_r_tok") or ""
-            if _ls_key:
-                st.session_state["kite_api_key"] = _ls_key
-            if _ls_tok:
-                st.session_state["kite_access_token"] = _ls_tok
+    # ── localStorage sync (save + restore across browser tabs) ─────────────────
+    # Runs in a hidden iframe on every page load.
+    # • If credentials are in session: saves them to localStorage.
+    # • If session is empty: tries to fill the password inputs from localStorage
+    #   by dispatching React-compatible input events (same-origin iframe access).
+    _ses_key = st.session_state.get("kite_api_key", "")
+    _ses_tok = st.session_state.get("kite_access_token", "")
+    _scomp.html(f"""<script>
+(function(){{
+  const CK={repr(_ses_key)}, CT={repr(_ses_tok)};
+  if(CK) localStorage.setItem('mp_kite_api_key', CK);
+  if(CT) localStorage.setItem('mp_kite_access_token', CT);
+  if(CK||CT) return;                        // already have creds — nothing to restore
+  const lsK=localStorage.getItem('mp_kite_api_key')||'';
+  const lsT=localStorage.getItem('mp_kite_access_token')||'';
+  if(!lsK&&!lsT) return;
+  function fill(){{
+    try{{
+      const doc=window.parent.document;
+      doc.querySelectorAll('input[type="password"]').forEach(inp=>{{
+        let el=inp;
+        for(let i=0;i<12;i++){{
+          el=el.parentElement; if(!el) break;
+          const lbl=el.querySelector(':scope>label,:scope>div>label');
+          if(!lbl) continue;
+          const t=lbl.textContent.trim().toLowerCase();
+          const v=t.includes('api key')?lsK:t.includes('access token')?lsT:'';
+          if(v&&!inp.value){{
+            Object.getOwnPropertyDescriptor(Object.getPrototypeOf(inp),'value').set.call(inp,v);
+            inp.dispatchEvent(new Event('input',{{bubbles:true}}));
+            inp.dispatchEvent(new Event('change',{{bubbles:true}}));
+          }}
+          break;
+        }}
+      }});
+    }}catch(e){{}}
+  }}
+  [600,1800,4000].forEach(t=>setTimeout(fill,t));
+}})();
+</script>""", height=0)
 
+    with st.expander("⚡ Zerodha Kite Connect", expanded=False):
         _sidebar_api_key = st.text_input(
             "API Key", type="password", key="kite_api_key",
             value=_get_secret("KITE_API_KEY", ""),
@@ -333,17 +361,6 @@ with st.sidebar:
             value=_get_secret("KITE_ACCESS_TOKEN", ""),
             placeholder="Daily token — refresh each morning",
         )
-
-        # ── Persist credentials to localStorage so new tabs auto-fill ─────────
-        _cur_key = st.session_state.get("kite_api_key", "")
-        _cur_tok = st.session_state.get("kite_access_token", "")
-        if _HAS_JS_EVAL and (_cur_key or _cur_tok):
-            _js_eval(
-                f"localStorage.setItem('mp_kite_api_key', {repr(_cur_key)});"
-                f"localStorage.setItem('mp_kite_access_token', {repr(_cur_tok)});",
-                key="_ls_w_creds",
-            )
-
         _kite_ok = bool(
             st.session_state.get("kite_api_key", "")
             and st.session_state.get("kite_access_token", "")
