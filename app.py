@@ -280,34 +280,6 @@ def chart_modal(nse_symbol: str, company: str, tf_key: str, extra_levels: dict |
                 st.markdown(f"**{label}:** ₹{price:,.2f}")
 
 
-# ── Sidebar ───────────────────────────────────────────────────────────────────
-_news_count  = len(st.session_state.get("news_results",  pd.DataFrame()))
-_ma_count    = len(st.session_state.get("ma_results",    pd.DataFrame()))
-_cross_count = len(st.session_state.get("cross_results", pd.DataFrame()))
-_ma50_count  = len(st.session_state.get("ma50_results",  pd.DataFrame()))
-_fund_count  = len(st.session_state.get("fund_results",  pd.DataFrame()))
-_fo_count    = len(st.session_state.get("fo_results",    pd.DataFrame()))
-_oc_loaded   = any(k in st.session_state for k in ("oc_NIFTY", "oc_BANKNIFTY", "oc_FINNIFTY", "oc_MIDCPNIFTY", "oc_SENSEX", "oc_BANKEX"))
-_em_count    = len(st.session_state.get("em_summary",    pd.DataFrame()))
-_toi_count   = len(st.session_state.get("toi_rows",     []))
-_sa_count    = len(st.session_state.get("sa_history",   []))
-_sa2_count   = len(st.session_state.get("sa2_history",  []))
-_gb_count    = len(st.session_state.get("gb_history",   []))
-_cpr_count   = len(st.session_state.get("cpr_results",  pd.DataFrame()))
-
-def _sb_row(icon: str, label: str, count: int, tab_kw: str = "") -> str:
-    badge = f'<span class="sb-badge">{count}</span>' if count > 0 else ""
-    kw = tab_kw or label
-    onclick = (
-        "var btns=window.parent.document.querySelectorAll('[data-baseweb=\"tab\"]');"
-        f"var kw='{kw}';"
-        "for(var i=0;i<btns.length;i++){if(btns[i].textContent.includes(kw)){btns[i].click();break;}}"
-    )
-    return (
-        f'<div class="sb-item" onclick="{onclick}">'
-        f'<span class="sb-lbl">{icon} {label}</span>{badge}</div>'
-    )
-
 def _get_secret(key: str, default: str = "") -> str:
     try:
         return st.secrets.get(key, default)
@@ -315,31 +287,25 @@ def _get_secret(key: str, default: str = "") -> str:
         return default
 
 with st.sidebar:
-    st.markdown(f"""
+    st.markdown("""
 <div class="sb-brand">
   <div class="sb-brand-name">🐂 MarketPulse</div>
   <div class="sb-brand-sub">NSE India · NIFTY 500</div>
 </div>
-<div class="sb-sec">WORKSPACE</div>
-{_sb_row("📰", "News + Breakout", _news_count, "News")}
-{_sb_row("🔁", "20 MA Retracement", _ma_count, "Retracement")}
-<div class="sb-sec">SCANNERS</div>
-{_sb_row("📈", "EMA Crossover", _cross_count, "Crossover")}
-{_sb_row("🛡️", "50 MA Support", _ma50_count, "Support")}
-<div class="sb-sec">ANALYSIS</div>
-{_sb_row("📊", "Fundamentals", _fund_count, "Fundamentals")}
-<div class="sb-sec">TOOLS</div>
-{_sb_row("🔗", "Option Chain", 1 if _oc_loaded else 0, "Option Chain")}
-{_sb_row("🎯", "F&O Scanner", _fo_count, "F&O")}
-{_sb_row("🚀", "Sensex Expiry Moves", _em_count, "Sensex")}
-{_sb_row("📡", "Trending OI", _toi_count, "Trending")}
-{_sb_row("💡", "Smart Alerts", _sa_count, "Smart Alerts")}
-{_sb_row("⚡", "Smart Alerts Pro", _sa2_count, "Smart Alerts Pro")}
-{_sb_row("💥", "Expiry Gamma Blast", _gb_count, "Gamma Blast")}
-{_sb_row("🎯", "CPR Retracement", _cpr_count, "CPR Retracement")}
-<div class="sb-div"></div>
 <div class="sb-live"><span class="sb-dot"></span>NSE feed LIVE</div>
 """, unsafe_allow_html=True)
+
+    st.markdown(
+        '<p style="color:#6e7681;font-size:.75rem;font-weight:600;text-transform:uppercase;'
+        'letter-spacing:.5px;margin:12px 0 4px;">⏱ TIMEFRAME</p>',
+        unsafe_allow_html=True,
+    )
+    st.segmented_control(
+        label="Timeframe", options=list(TF_CONFIG.keys()),
+        format_func=lambda k: TF_CONFIG[k]["label"],
+        default="1D", key="global_tf", label_visibility="collapsed",
+    )
+    st.divider()
 
     with st.expander("⚡ Zerodha Kite Connect", expanded=False):
         _sidebar_api_key = st.text_input(
@@ -441,57 +407,13 @@ if _ticker_parts:
     )
 
 
-# ── Hero section ──────────────────────────────────────────────────────────────
-st.markdown("""
-<div class="hero-h1">Real-time technical pulse,<br><span class="tl">screened by the second.</span></div>
-<div class="hero-sub">NIFTY 500 &nbsp;·&nbsp; Live technical screener &nbsp;·&nbsp; NSE India</div>
-<div><span class="hero-badge">● LIVE · NSE INDIA</span></div>
-<div style="margin-top:20px;"></div>
-""", unsafe_allow_html=True)
 
-# ── Timeframe bar ─────────────────────────────────────────────────────────────
-tc1, tc2 = st.columns([1, 4])
-tc1.markdown('<p style="color:#6e7681;font-size:.82rem;font-weight:600;text-transform:uppercase;letter-spacing:.5px;margin:8px 0 0;">⏱ Timeframe</p>', unsafe_allow_html=True)
-with tc2:
-    tf_key = st.segmented_control(
-        label="Timeframe", options=list(TF_CONFIG.keys()),
-        format_func=lambda k: TF_CONFIG[k]["label"],
-        default="1D", key="global_tf", label_visibility="collapsed",
-    )
-
-tf       = TF_CONFIG[tf_key]
-interval = tf["interval"]
-period   = tf["screener_period"]
-
-mkt_note = " &nbsp;·&nbsp; Charts: 9:15 AM – 3:30 PM IST only" if tf["market_hours"] else ""
-st.markdown(
-    f'<p style="color:#6e7681;font-size:.82rem;margin:2px 0 12px;">'
-    f'📌 Screener on <b style="color:#adbac7">{tf["label"]}</b> candles &nbsp;·&nbsp; '
-    f'Period: <b style="color:#adbac7">{tf["display_period"]}</b>{mkt_note}</p>',
-    unsafe_allow_html=True,
-)
-
-st.divider()
-
-# ── Tabs ──────────────────────────────────────────────────────────────────────
-tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13 = st.tabs([
-    "📰 News + Breakout",
-    "🔁 20 MA Retracement",
-    "📈 EMA Crossover",
-    "🛡️ 50 MA Support",
-    "🔗 Option Chain Insights",
-    "📊 Fundamentals",
-    "🎯 F&O Scanner",
-    "🚀 Sensex Expiry Moves",
-    "📡 Trending OI",
-    "💡 Smart Alerts",
-    "⚡ Smart Alerts Pro",
-    "💥 Expiry Gamma Blast",
-    "🎯 CPR Retracement",
-])
-
-# ── TAB 1 ─────────────────────────────────────────────────────────────────────
-with tab1:
+# ── PAGE: News + Breakout ─────────────────────────────────────────────────────
+def page_news_breakout():
+    tf_key   = st.session_state.get("global_tf", "1D")
+    tf       = TF_CONFIG.get(tf_key, TF_CONFIG["1D"])
+    interval = tf["interval"]
+    period   = tf["screener_period"]
     st.markdown("#### 📰 In-the-news stocks in uptrend — ready for breakout")
 
     with st.container(border=True):
@@ -570,8 +492,12 @@ with tab1:
         st.info("🔎 Configure filters above and click **Run News Screener** to begin.")
 
 
-# ── TAB 2 ─────────────────────────────────────────────────────────────────────
-with tab2:
+# ── PAGE: 20 MA Retracement ───────────────────────────────────────────────────
+def page_ma_retracement():
+    tf_key   = st.session_state.get("global_tf", "1D")
+    tf       = TF_CONFIG.get(tf_key, TF_CONFIG["1D"])
+    interval = tf["interval"]
+    period   = tf["screener_period"]
     st.markdown("#### 🔁 Stocks retesting 20 EMA in uptrend with bullish continuation")
 
     with st.container(border=True):
@@ -630,8 +556,8 @@ with tab2:
         st.info("🔎 Configure filters above and click **Run MA Screener** to scan.")
 
 
-# ── TAB 3 ─────────────────────────────────────────────────────────────────────
-with tab3:
+# ── PAGE: EMA Crossover ───────────────────────────────────────────────────────
+def page_ema_crossover():
     st.markdown("#### 📈 20 EMA crossing above 50 EMA — position trading setups (Daily TF)")
 
     with st.container(border=True):
@@ -687,8 +613,12 @@ with tab3:
         st.info("🔎 Click **Run Crossover Scan** above to identify position trading setups.")
 
 
-# ── TAB 4 ─────────────────────────────────────────────────────────────────────
-with tab4:
+# ── PAGE: 50 MA Support ───────────────────────────────────────────────────────
+def page_ma50_support():
+    tf_key   = st.session_state.get("global_tf", "1D")
+    tf       = TF_CONFIG.get(tf_key, TF_CONFIG["1D"])
+    interval = tf["interval"]
+    period   = tf["screener_period"]
     st.markdown("#### 🛡️ Stocks bouncing off 50 EMA in strong uptrend, above Monthly CPR")
 
     with st.container(border=True):
@@ -975,7 +905,7 @@ def _build_oc_html(view_df: pd.DataFrame, atm: float) -> str:
     )
 
 
-with tab5:
+def page_option_chain():
     _kite_key   = st.session_state.get("kite_api_key",   _get_secret("KITE_API_KEY", ""))
     _kite_token = st.session_state.get("kite_access_token", _get_secret("KITE_ACCESS_TOKEN", ""))
     _kite_live  = bool(_kite_key and _kite_token)
@@ -1248,8 +1178,8 @@ with tab5:
                 st.plotly_chart(fig_chng, use_container_width=True)
 
 
-# ── TAB 6 — Fundamental Analysis ──────────────────────────────────────────────
-with tab6:
+# ── PAGE: Fundamentals ────────────────────────────────────────────────────────
+def page_fundamentals():
     st.markdown("#### 📊 Fundamentally Strong Stocks — Quality Filter")
 
     with st.container(border=True):
@@ -1318,8 +1248,8 @@ with tab6:
         st.info("🔎 Click **Run** above to screen NIFTY 500 stocks by fundamental quality.")
 
 
-# ── TAB 7 — F&O Scanner ───────────────────────────────────────────────────────
-with tab7:
+# ── PAGE: F&O Scanner ─────────────────────────────────────────────────────────
+def page_fo_scanner():
     _fo_kite_key   = st.session_state.get("kite_api_key",   _get_secret("KITE_API_KEY", ""))
     _fo_kite_token = st.session_state.get("kite_access_token", _get_secret("KITE_ACCESS_TOKEN", ""))
     _fo_kite_live  = bool(_fo_kite_key and _fo_kite_token)
@@ -1431,8 +1361,8 @@ with tab7:
             st.info("Click **🔍 Scan** to analyse all F&O stocks. Takes 2–3 minutes.")
 
 
-# ── TAB 8 — Sensex Expiry Moves ───────────────────────────────────────────────
-with tab8:
+# ── PAGE: Sensex Expiry Moves ─────────────────────────────────────────────────
+def page_sensex_expiry():
     _em_kite_key   = st.session_state.get("kite_api_key",      _get_secret("KITE_API_KEY", ""))
     _em_kite_token = st.session_state.get("kite_access_token", _get_secret("KITE_ACCESS_TOKEN", ""))
     _em_kite_live  = bool(_em_kite_key and _em_kite_token)
@@ -2281,7 +2211,7 @@ def _build_toi_html(rows: list) -> str:
     return hdr + "".join(rows_html) + "</tbody></table></div>"
 
 
-with tab9:
+def page_trending_oi():
     _toi_kite_key   = st.session_state.get("kite_api_key",      _get_secret("KITE_API_KEY", ""))
     _toi_kite_token = st.session_state.get("kite_access_token", _get_secret("KITE_ACCESS_TOKEN", ""))
     _toi_kite_live  = bool(_toi_kite_key and _toi_kite_token)
@@ -2591,8 +2521,8 @@ with tab9:
             )
 
 
-# ── TAB 10 — Smart Alerts ─────────────────────────────────────────────────────
-with tab10:
+# ── PAGE: Smart Alerts ────────────────────────────────────────────────────────
+def page_smart_alerts():
 
     # ── Design tokens (injected once per render) ──────────────────────────────
     st.markdown("""
@@ -3250,8 +3180,8 @@ with tab10:
 </div>""", unsafe_allow_html=True)
 
 
-# ── TAB 11 — Smart Alerts Pro ──────────────────────────────────────────────────
-with tab11:
+# ── PAGE: Smart Alerts Pro ────────────────────────────────────────────────────
+def page_smart_alerts_pro():
 
     # ── CSS (shared sa- classes already injected in tab10; add pro-specific) ──
     st.markdown("""
@@ -3698,8 +3628,8 @@ with tab11:
   </div>
 </div>""", unsafe_allow_html=True)
 
-# ── Tab 12: Expiry Gamma Blast ─────────────────────────────────────────────
-with tab12:
+# ── PAGE: Expiry Gamma Blast ──────────────────────────────────────────────────
+def page_gamma_blast():
     _IST_GB = datetime.timezone(datetime.timedelta(hours=5, minutes=30))
 
     st.markdown("""
@@ -4172,8 +4102,8 @@ with tab12:
             )
 
 
-# ── TAB 13 — CPR Retracement ──────────────────────────────────────────────────
-with tab13:
+# ── PAGE: CPR Retracement ─────────────────────────────────────────────────────
+def page_cpr_retracement():
     st.markdown("#### 🎯 CPR Retracement — Bounces & Rejections at Pivot Levels")
     st.markdown(
         '<small style="color:#8b949e;">'
@@ -4308,3 +4238,30 @@ with tab13:
             "🔎 Click **Run CPR Scan** to find stocks bouncing off or being rejected by "
             "CPR (Central Pivot Range) levels."
         )
+
+
+# ── Navigation ────────────────────────────────────────────────────────────────
+pg = st.navigation({
+    "⚡ Live Signals": [
+        st.Page(page_smart_alerts,      title="Smart Alerts",        icon="💡", default=True),
+        st.Page(page_smart_alerts_pro,  title="Smart Alerts Pro",    icon="⚡"),
+        st.Page(page_gamma_blast,       title="Expiry Gamma Blast",  icon="💥"),
+    ],
+    "📊 Index & Options": [
+        st.Page(page_option_chain,      title="Option Chain",        icon="🔗"),
+        st.Page(page_trending_oi,       title="Trending OI",         icon="📡"),
+        st.Page(page_sensex_expiry,     title="Sensex Expiry Moves", icon="🚀"),
+        st.Page(page_fo_scanner,        title="F&O Scanner",         icon="🎯"),
+    ],
+    "📈 Stock Screeners": [
+        st.Page(page_cpr_retracement,   title="CPR Retracement",     icon="🎯"),
+        st.Page(page_ma_retracement,    title="20 MA Retracement",   icon="🔁"),
+        st.Page(page_ema_crossover,     title="EMA Crossover",       icon="📈"),
+        st.Page(page_ma50_support,      title="50 MA Support",       icon="🛡️"),
+    ],
+    "🔍 Research": [
+        st.Page(page_fundamentals,      title="Fundamentals",        icon="📊"),
+        st.Page(page_news_breakout,     title="News + Breakout",     icon="📰"),
+    ],
+})
+pg.run()
