@@ -3816,7 +3816,7 @@ def page_gamma_blast():
         with st.container(border=True):
             _gb_c1, _gb_c2, _gb_c3, _gb_c4 = st.columns([2, 3, 2, 3])
             with _gb_c1:
-                _gb_sym = st.selectbox("Index", ["NIFTY", "BANKNIFTY", "FINNIFTY"], key="gb_sym")
+                _gb_sym = st.selectbox("Index", ["NIFTY", "BANKNIFTY", "FINNIFTY", "SENSEX", "BANKEX", "MIDCPNIFTY"], key="gb_sym")
             with _gb_c2:
                 # Get expiry list from sa_instr if already loaded, else show text input
                 _gb_instr = st.session_state.get("gb_instr")
