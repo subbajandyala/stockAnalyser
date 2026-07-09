@@ -30,15 +30,17 @@ import requests
 _KITE_BASE = "https://api.kite.trade"
 _IST = datetime.timezone(datetime.timedelta(hours=5, minutes=30))
 
-SYMBOLS = ["NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX", "BANKEX"]
+SYMBOLS = ["NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX", "BANKEX", "CRUDEOIL"]
 
 _STRIKE_STEP: dict[str, int] = {
     "NIFTY": 50, "BANKNIFTY": 100, "FINNIFTY": 50,
     "MIDCPNIFTY": 25, "SENSEX": 100, "BANKEX": 100,
+    "CRUDEOIL": 50,
 }
 _EXCHANGE: dict[str, str] = {
     "NIFTY": "NFO", "BANKNIFTY": "NFO", "FINNIFTY": "NFO",
     "MIDCPNIFTY": "NFO", "SENSEX": "BFO", "BANKEX": "BFO",
+    "CRUDEOIL": "MCX",
 }
 _SPOT_QUOTE: dict[str, str] = {
     "NIFTY":      "NSE:NIFTY 50",
@@ -47,6 +49,7 @@ _SPOT_QUOTE: dict[str, str] = {
     "MIDCPNIFTY": "NSE:NIFTY MID SELECT",
     "SENSEX":     "BSE:SENSEX",
     "BANKEX":     "BSE:BANKEX",
+    # CRUDEOIL spot is fetched dynamically via near-month futures in gamma_blast
 }
 
 INTERVALS = {"1 Min": 60, "3 Min": 180, "5 Min": 300, "15 Min": 900}

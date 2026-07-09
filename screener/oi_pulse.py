@@ -18,13 +18,28 @@ import pandas as pd
 from .gamma_blast import fetch_chain_snapshot   # reuse: fetch spot + ±n strikes from Kite
 
 _IST = datetime.timezone(datetime.timedelta(hours=5, minutes=30))
+_MCX_SYMBOLS = {"CRUDEOIL"}
 
 
 # ── Session time phases ───────────────────────────────────────────────────────
 
-def _time_phase(ist_now: datetime.datetime) -> tuple[str, str, int]:
+def _time_phase(ist_now: datetime.datetime, symbol: str = "") -> tuple[str, str, int]:
     """Return (phase_key, phase_label, bonus_pts). bonus = -99 → block signal."""
     m = ist_now.hour * 60 + ist_now.minute
+
+    # MCX commodities trade 9:00 AM – 11:30 PM IST
+    if symbol in _MCX_SYMBOLS:
+        if m < 9 * 60:
+            return "PRE",    "MCX market not open yet (opens 9:00 AM IST)",  -99
+        if m >= 23 * 60:
+            return "CLOSED", "MCX market closed (after 11:00 PM IST)",       -99
+        if m < 9 * 60 + 15:
+            return "MCX_OPEN", "MCX opening 9:00–9:15 AM — OI settling",     0
+        if 9 * 60 + 15 <= m < 15 * 60 + 30:
+            return "MCX_EQUITY", "MCX + equity session overlap — high activity", 1
+        return "MCX_EVE",  f"MCX evening session ({ist_now.strftime('%H:%M')} IST)", 0
+
+    # Equity / index options (NFO / BFO)
     if m < 9 * 60 + 15:
         return "PRE",        "Market not open yet",                         -99
     if m < 9 * 60 + 30:
@@ -53,6 +68,7 @@ def score_oi_pulse(
     spot_history: list | None = None,
     prev_chain: dict | None = None,
     ist_now: datetime.datetime | None = None,
+    symbol: str = "",
 ) -> dict:
     if ist_now is None:
         ist_now = datetime.datetime.now(_IST)
@@ -69,7 +85,7 @@ def score_oi_pulse(
     }
 
     # ── Time gate ────────────────────────────────────────────────────────────
-    phase_key, phase_label, time_pts = _time_phase(ist_now)
+    phase_key, phase_label, time_pts = _time_phase(ist_now, symbol)
     if time_pts == -99:
         res["signal"] = "WAIT"
         res["signal_detail"] = phase_label
@@ -257,6 +273,7 @@ def run_oi_pulse_scan(
         spot_history=spot_history,
         prev_chain=prev_chain,
         ist_now=ist_now,
+        symbol=symbol,
     )
 
     # Build prev_chain for next scan

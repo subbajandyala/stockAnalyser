@@ -23,6 +23,7 @@ import requests
 _KITE_BASE = "https://api.kite.trade"
 _IST = datetime.timezone(datetime.timedelta(hours=5, minutes=30))
 _BFO = {"SENSEX", "BANKEX"}
+_MCX = {"CRUDEOIL"}
 
 _SPOT_SYM: dict[str, str] = {
     "NIFTY":      "NSE:NIFTY 50",
@@ -31,7 +32,10 @@ _SPOT_SYM: dict[str, str] = {
     "MIDCPNIFTY": "NSE:NIFTY MID SELECT",
     "SENSEX":     "BSE:SENSEX",
     "BANKEX":     "BSE:BANKEX",
+    # MCX commodities (CRUDEOIL etc.): spot fetched dynamically via near-month futures
 }
+
+_MONTH_ABBR = ["JAN","FEB","MAR","APR","MAY","JUN","JUL","AUG","SEP","OCT","NOV","DEC"]
 
 
 def _hdrs(api_key: str, access_token: str) -> dict:
@@ -53,8 +57,21 @@ def fetch_chain_snapshot(
     Returns {"spot", "atm", "chain": DataFrame, "strike_gap"} or None on error.
     """
     hdrs = _hdrs(api_key, access_token)
-    xch      = "BFO" if symbol in _BFO else "NFO"
-    spot_sym = _SPOT_SYM.get(symbol, f"NSE:{symbol}")
+
+    if symbol in _MCX:
+        xch = "MCX"
+        # Spot price = near-month futures LTP (constructed from expiry date)
+        try:
+            _exp_dt  = datetime.datetime.strptime(expiry, "%Y-%m-%d")
+            spot_sym = f"MCX:{symbol}{str(_exp_dt.year)[2:]}{_MONTH_ABBR[_exp_dt.month - 1]}FUT"
+        except Exception:
+            return None
+    elif symbol in _BFO:
+        xch      = "BFO"
+        spot_sym = _SPOT_SYM.get(symbol, f"BSE:{symbol}")
+    else:
+        xch      = "NFO"
+        spot_sym = _SPOT_SYM.get(symbol, f"NSE:{symbol}")
 
     # Spot price
     r = requests.get(
