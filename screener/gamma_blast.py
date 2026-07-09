@@ -60,12 +60,28 @@ def fetch_chain_snapshot(
 
     if symbol in _MCX:
         xch = "MCX"
-        # Spot price = near-month futures LTP (constructed from expiry date)
-        try:
-            _exp_dt  = datetime.datetime.strptime(expiry, "%Y-%m-%d")
-            spot_sym = f"MCX:{symbol}{str(_exp_dt.year)[2:]}{_MONTH_ABBR[_exp_dt.month - 1]}FUT"
-        except Exception:
-            return None
+        # Spot price = near-month futures LTP.
+        # Prefer finding the actual FUT row from instr_df (included when loaded via
+        # fetch_instruments for MCX) rather than constructing the symbol blindly —
+        # weekly options expiries don't always match the monthly futures month.
+        _today = datetime.date.today()
+        _fut_df = instr_df[instr_df.get("instrument_type", pd.Series(dtype=str)) == "FUT"].copy() \
+            if "instrument_type" in instr_df.columns else pd.DataFrame()
+        if not _fut_df.empty:
+            _fut_df["_exp_d"] = pd.to_datetime(_fut_df["expiry"], errors="coerce").dt.date
+            _upcoming = _fut_df[_fut_df["_exp_d"] >= _today]
+            if not _upcoming.empty:
+                _near = _upcoming.loc[_upcoming["_exp_d"].idxmin()]
+                spot_sym = f"MCX:{_near['tradingsymbol']}"
+            else:
+                return None   # no active futures found
+        else:
+            # Fallback: construct from expiry (less reliable for weekly options)
+            try:
+                _exp_dt  = datetime.datetime.strptime(expiry, "%Y-%m-%d")
+                spot_sym = f"MCX:{symbol}{str(_exp_dt.year)[2:]}{_MONTH_ABBR[_exp_dt.month - 1]}FUT"
+            except Exception:
+                return None
     elif symbol in _BFO:
         xch      = "BFO"
         spot_sym = _SPOT_SYM.get(symbol, f"BSE:{symbol}")

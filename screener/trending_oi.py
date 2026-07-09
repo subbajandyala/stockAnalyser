@@ -79,6 +79,8 @@ def fetch_instruments(api_key: str, access_token: str, symbol: str) -> pd.DataFr
     """
     Download options instruments for symbol from Kite.
     Returns DataFrame filtered to CE/PE for that symbol only.
+    For MCX symbols (e.g. CRUDEOIL), also includes FUT rows so callers can
+    derive the near-month futures symbol for spot-price lookup.
     Caller should cache this in session_state (large download, daily stable).
     """
     exch = _EXCHANGE[symbol]
@@ -95,9 +97,11 @@ def fetch_instruments(api_key: str, access_token: str, symbol: str) -> pd.DataFr
     df = pd.read_csv(StringIO(resp.text))
     df["expiry_dt"] = pd.to_datetime(df["expiry"], errors="coerce")
     df["strike"]    = pd.to_numeric(df["strike"], errors="coerce")
+    # MCX: include FUT so fetch_chain_snapshot can find near-month spot symbol
+    types = ["CE", "PE", "FUT"] if exch == "MCX" else ["CE", "PE"]
     return df[
         (df["name"] == symbol) &
-        (df["instrument_type"].isin(["CE", "PE"]))
+        (df["instrument_type"].isin(types))
     ].copy()
 
 
