@@ -45,6 +45,7 @@ from screener.trending_oi import (
 from screener.smart_alerts import run_smart_signal
 from screener.smart_alerts_v2 import run_smart_signal_v2
 from screener.gamma_blast import run_gamma_blast_scan
+from screener.oi_pulse import run_oi_pulse_scan
 
 try:
     from streamlit_autorefresh import st_autorefresh as _st_autorefresh
@@ -4322,12 +4323,526 @@ def page_cpr_retracement():
         )
 
 
+# ── PAGE: Intraday OI Pulse ───────────────────────────────────────────────────
+def page_oi_pulse():
+    _IST_OP = datetime.timezone(datetime.timedelta(hours=5, minutes=30))
+
+    st.markdown("""
+<style>
+.op-header{display:flex;align-items:center;gap:12px;margin-bottom:4px;}
+.op-title{font-size:1.45rem;font-weight:800;color:#f0f6fc;letter-spacing:-0.5px;}
+.op-badge-live{background:#0d2818;border:1px solid #2ea043;color:#2ea043;font-size:0.68rem;font-weight:700;padding:3px 9px;border-radius:20px;letter-spacing:0.8px;}
+.op-badge-day{background:#12191f;border:1px solid #00d4aa;color:#00d4aa;font-size:0.68rem;font-weight:700;padding:3px 9px;border-radius:20px;letter-spacing:0.8px;}
+.op-cdown-wrap{display:flex;align-items:center;gap:6px;background:#12191f;border:1px solid #21262d;border-radius:8px;padding:6px 14px;margin-bottom:10px;}
+.op-countdown{font-size:1.1rem;font-weight:700;color:#00d4aa;font-variant-numeric:tabular-nums;}
+.op-countdown-lbl{font-size:0.72rem;color:#6e7681;margin-right:6px;}
+/* Strike Ladder */
+.op-ladder-wrap{overflow-x:auto;border-radius:10px;border:1px solid #21262d;}
+.op-tbl{width:100%;border-collapse:collapse;font-size:0.82rem;}
+.op-tbl th{background:#0d1117;color:#6e7681;font-size:0.72rem;font-weight:600;letter-spacing:0.6px;padding:7px 10px;text-transform:uppercase;border-bottom:1px solid #21262d;}
+.op-tbl td{padding:7px 10px;border-bottom:1px solid #161b22;white-space:nowrap;vertical-align:middle;}
+.op-tbl tr:last-child td{border-bottom:none;}
+.op-row-atm td{background:rgba(0,212,170,0.07)!important;}
+.op-row-atm .op-strike-cell{color:#00d4aa!important;font-weight:800;}
+.op-row-ce-wall td{background:rgba(248,81,73,0.07)!important;}
+.op-row-pe-wall td{background:rgba(0,212,170,0.07)!important;}
+.op-ce-side{text-align:right;}
+.op-pe-side{text-align:left;}
+.op-strike-cell{text-align:center;font-weight:700;color:#c9d1d9;font-size:0.88rem;}
+.op-dist-cell{text-align:center;font-size:0.73rem;color:#6e7681;}
+.op-ltp{font-weight:600;color:#c9d1d9;}
+.op-oi-bar-ce{display:flex;align-items:center;justify-content:flex-end;gap:6px;}
+.op-oi-bar-pe{display:flex;align-items:center;justify-content:flex-start;gap:6px;}
+.op-bar-fill-ce{height:6px;background:#00d4aa;border-radius:3px;min-width:2px;}
+.op-bar-fill-pe{height:6px;background:#f85149;border-radius:3px;min-width:2px;}
+.op-oi-num{color:#adbac7;font-size:0.79rem;}
+.op-delta-pos{color:#f85149;font-size:0.73rem;font-weight:600;}
+.op-delta-neg{color:#00d4aa;font-size:0.73rem;font-weight:600;}
+.op-delta-neu{color:#6e7681;font-size:0.73rem;}
+/* Signal banners */
+.op-banner{border-radius:12px;padding:20px 24px;margin:12px 0;position:relative;overflow:hidden;}
+.op-banner-strong-ce{background:linear-gradient(135deg,#001a0d 0%,#002a15 100%);border:2px solid #2ea043;box-shadow:0 0 20px rgba(46,160,67,0.3);}
+.op-banner-ce{background:linear-gradient(135deg,#001008 0%,#001a10 100%);border:2px solid #00d4aa;}
+.op-banner-strong-pe{background:linear-gradient(135deg,#1a0000 0%,#2a0d0d 100%);border:2px solid #f85149;box-shadow:0 0 20px rgba(248,81,73,0.3);}
+.op-banner-pe{background:linear-gradient(135deg,#120000 0%,#1a0808 100%);border:2px solid #da3633;}
+.op-banner-watch{background:linear-gradient(135deg,#0d1117 0%,#12191f 100%);border:1px solid #e6b800;}
+.op-banner-wait{background:#0d1117;border:1px solid #21262d;}
+.op-sig-label{font-size:0.72rem;color:#6e7681;letter-spacing:1px;text-transform:uppercase;margin-bottom:4px;}
+.op-sig-strong-ce{font-size:1.8rem;font-weight:900;color:#2ea043;letter-spacing:-1px;}
+.op-sig-ce{font-size:1.5rem;font-weight:800;color:#00d4aa;}
+.op-sig-strong-pe{font-size:1.8rem;font-weight:900;color:#f85149;letter-spacing:-1px;}
+.op-sig-pe{font-size:1.5rem;font-weight:800;color:#da3633;}
+.op-sig-watch{font-size:1.4rem;font-weight:700;color:#e6b800;}
+.op-sig-wait{font-size:1.4rem;font-weight:700;color:#6e7681;}
+.op-sig-sub{font-size:0.84rem;color:#6e7681;margin-top:4px;}
+.op-score-box{position:absolute;top:16px;right:20px;text-align:right;}
+.op-score-lbl{font-size:0.68rem;color:#6e7681;letter-spacing:0.8px;}
+.op-score-ce{font-size:1.1rem;font-weight:700;color:#00d4aa;}
+.op-score-pe{font-size:1.1rem;font-weight:700;color:#f85149;}
+/* Trade setup */
+.op-setup{background:#0d1117;border:1px solid #21262d;border-radius:10px;padding:16px;}
+.op-kv{display:flex;justify-content:space-between;align-items:center;padding:5px 0;border-bottom:1px solid #161b22;}
+.op-kv:last-child{border-bottom:none;}
+.op-kv-lbl{font-size:0.74rem;color:#6e7681;letter-spacing:0.4px;}
+.op-kv-val{font-size:0.92rem;font-weight:700;color:#f0f6fc;}
+.op-kv-sl{color:#f85149!important;}
+.op-kv-tgt{color:#00d4aa!important;}
+/* Factor table */
+.op-factor-dir-bull{display:inline-block;background:#0d2818;color:#2ea043;border:1px solid #2ea043;font-size:0.68rem;padding:1px 7px;border-radius:4px;font-weight:700;}
+.op-factor-dir-bear{display:inline-block;background:#2a0d0d;color:#f85149;border:1px solid #f85149;font-size:0.68rem;padding:1px 7px;border-radius:4px;font-weight:700;}
+.op-factor-dir-neu{display:inline-block;background:#161b22;color:#6e7681;border:1px solid #30363d;font-size:0.68rem;padding:1px 7px;border-radius:4px;}
+</style>
+""", unsafe_allow_html=True)
+
+    # ── Header ────────────────────────────────────────────────────────────────
+    _op_now   = datetime.datetime.now(_IST_OP)
+    _op_close = _op_now.replace(hour=15, minute=30, second=0, microsecond=0)
+    _op_left  = max(0, int((_op_close - _op_now).total_seconds()))
+    _op_hh, _op_mm, _op_ss = _op_left // 3600, (_op_left % 3600) // 60, _op_left % 60
+
+    st.markdown("""
+<div class="op-header">
+  <span class="op-title">📡 Intraday OI Pulse</span>
+  <span class="op-badge-day">ANY DAY</span>
+  <span class="op-badge-live">LIVE</span>
+</div>""", unsafe_allow_html=True)
+
+    st.markdown(
+        f'<div class="op-cdown-wrap">'
+        f'<span class="op-countdown-lbl">Market closes in</span>'
+        f'<span class="op-countdown">{_op_hh:02d}:{_op_mm:02d}:{_op_ss:02d}</span>'
+        f'<span class="op-countdown-lbl" style="margin-left:10px;">OI build-up / unwinding scanner · ATM options</span>'
+        f'</div>',
+        unsafe_allow_html=True,
+    )
+
+    # ── Kite check ────────────────────────────────────────────────────────────
+    _op_key = st.session_state.get("kite_api_key", "")
+    _op_tok = st.session_state.get("kite_access_token", "")
+    _kite_ok = bool(_op_key and _op_tok)
+
+    if not _kite_ok:
+        st.markdown(
+            '<div class="sa-card" style="text-align:center;padding:40px 20px;">'
+            '<div style="font-size:2rem;">🔑</div>'
+            '<div style="color:#6e7681;margin-top:8px;">Enter Kite API Key &amp; Access Token in the sidebar to start scanning</div>'
+            '</div>',
+            unsafe_allow_html=True,
+        )
+    else:
+        # ── Control panel ─────────────────────────────────────────────────────
+        with st.container(border=True):
+            _op_c1, _op_c2, _op_c3, _op_c4 = st.columns([2, 3, 2, 3])
+            with _op_c1:
+                _op_sym = st.selectbox("Index", TOI_SYMBOLS, key="op_sym",
+                                       index=TOI_SYMBOLS.index("NIFTY") if "NIFTY" in TOI_SYMBOLS else 0)
+            with _op_c2:
+                _op_instr = st.session_state.get("op_instr")
+                if _op_instr is not None and not _op_instr.empty:
+                    _op_exp_opts = sorted(
+                        _op_instr[
+                            (_op_instr["name"] == _op_sym) &
+                            (_op_instr["instrument_type"].isin(["CE", "PE"]))
+                        ]["expiry"].unique()
+                    )
+                    _op_expiry = (
+                        st.selectbox("Expiry", _op_exp_opts, key="op_expiry_sel")
+                        if _op_exp_opts
+                        else st.text_input("Expiry (load first)", key="op_expiry_txt", placeholder="e.g. 2025-07-10")
+                    )
+                else:
+                    _op_expiry = st.text_input("Expiry (load first)", key="op_expiry_txt",
+                                               placeholder="e.g. 2025-07-10")
+            with _op_c3:
+                _op_interval = st.selectbox("Refresh", [30, 45, 60], format_func=lambda x: f"{x}s",
+                                            key="op_interval")
+            with _op_c4:
+                _op_lc1, _op_lc2 = st.columns(2)
+                with _op_lc1:
+                    _op_load_btn = st.button("📥 Load", key="op_load", use_container_width=True)
+                with _op_lc2:
+                    _op_scan_btn = st.button("🔍 Scan Now", key="op_scan",
+                                             use_container_width=True, type="primary")
+
+        # ── Load instruments ──────────────────────────────────────────────────
+        if _op_load_btn:
+            with st.spinner("Downloading instruments…"):
+                try:
+                    _op_raw = toi_fetch_instruments(_op_key, _op_tok, _op_sym)
+                    st.session_state["op_instr"]      = _op_raw
+                    st.session_state["op_prev_chain"] = None
+                    st.session_state["op_spot_hist"]  = []
+                    st.session_state["op_history"]    = []
+                    st.success(f"Loaded {len(_op_raw)} instruments")
+                    st.rerun()
+                except Exception as _e:
+                    st.error(f"Load failed: {_e}")
+
+        # ── Auto-refresh during market hours ──────────────────────────────────
+        _op_h_now = _op_now.hour * 60 + _op_now.minute
+        _op_mkt   = (9 * 60 + 30) <= _op_h_now < (15 * 60 + 15)
+        if _op_mkt and st.session_state.get("op_instr") is not None:
+            _st_autorefresh(interval=_op_interval * 1000, key="op_refresh")
+
+        # ── Run scan ──────────────────────────────────────────────────────────
+        def _do_op_scan():
+            _instr = st.session_state.get("op_instr")
+            if _instr is None or _instr.empty:
+                st.warning("Load instruments first (click 📥 Load)")
+                return
+            _exp = st.session_state.get("op_expiry_sel") or st.session_state.get("op_expiry_txt", "")
+            if not _exp:
+                st.warning("Select an expiry date")
+                return
+            with st.spinner("Scanning option chain…"):
+                try:
+                    _res = run_oi_pulse_scan(
+                        _op_key, _op_tok,
+                        _op_sym, _exp, _instr,
+                        spot_history=st.session_state.get("op_spot_hist"),
+                        prev_chain=st.session_state.get("op_prev_chain"),
+                    )
+                    if "error" in _res:
+                        st.error(_res["error"])
+                        return
+                    st.session_state["op_last_signal"] = _res
+                    st.session_state["op_last_fetch"]  = datetime.datetime.now(_IST_OP)
+                    st.session_state["op_prev_chain"]  = _res["new_prev_chain"]
+                    _sh = st.session_state.get("op_spot_hist", [])
+                    _sh.append(_res["spot"])
+                    st.session_state["op_spot_hist"] = _sh[-20:]
+                    _sig = _res["signal"]
+                    if _sig not in ("WAIT", "WATCH"):
+                        _hist = st.session_state.get("op_history", [])
+                        _hist.append({
+                            "ts":     _res["ist_now"].strftime("%H:%M:%S"),
+                            "signal": _sig,
+                            "spot":   _res["spot"],
+                            "ce_sc":  _res["score_ce"],
+                            "pe_sc":  _res["score_pe"],
+                            "strike": _res.get("recommended_strike"),
+                            "type":   _res.get("recommended_type"),
+                            "ltp":    _res.get("ltp_entry"),
+                        })
+                        st.session_state["op_history"] = _hist[-30:]
+                except Exception as _e:
+                    st.error(f"Scan error: {_e}")
+
+        if _op_scan_btn:
+            _do_op_scan()
+        elif _op_mkt and st.session_state.get("op_instr") is not None:
+            _do_op_scan()
+
+        # ── Display results ───────────────────────────────────────────────────
+        _op_res      = st.session_state.get("op_last_signal")
+        _op_fetch_ts = st.session_state.get("op_last_fetch")
+
+        if _op_fetch_ts:
+            _op_age = int((datetime.datetime.now(_IST_OP) - _op_fetch_ts).total_seconds())
+            st.caption(f"Last scan: {_op_fetch_ts.strftime('%H:%M:%S')} IST  ·  {_op_age}s ago")
+
+        if _op_res:
+            _op_sig   = _op_res["signal"]
+            _op_chain = _op_res["chain"]
+            _op_spot  = _op_res["spot"]
+            _op_atm   = _op_res["atm"]
+
+            # ── Signal banner ─────────────────────────────────────────────────
+            if _op_sig == "STRONG BUY CE":
+                _banner_cls = "op-banner-strong-ce"
+                _sig_cls    = "op-sig-strong-ce"
+                _sig_emoji  = "🚀 "
+            elif _op_sig == "BUY CE":
+                _banner_cls = "op-banner-ce"
+                _sig_cls    = "op-sig-ce"
+                _sig_emoji  = "📈 "
+            elif _op_sig == "STRONG BUY PE":
+                _banner_cls = "op-banner-strong-pe"
+                _sig_cls    = "op-sig-strong-pe"
+                _sig_emoji  = "🔻 "
+            elif _op_sig == "BUY PE":
+                _banner_cls = "op-banner-pe"
+                _sig_cls    = "op-sig-pe"
+                _sig_emoji  = "📉 "
+            elif _op_sig == "WATCH":
+                _banner_cls = "op-banner-watch"
+                _sig_cls    = "op-sig-watch"
+                _sig_emoji  = "👁 "
+            else:
+                _banner_cls = "op-banner-wait"
+                _sig_cls    = "op-sig-wait"
+                _sig_emoji  = ""
+
+            _op_detail  = _op_res.get("signal_detail", "")
+            _op_sd_txt  = _op_res.get("spot_direction", "FLAT")
+            _op_dir_arr = {"UP": "⬆ Spot rising", "DOWN": "⬇ Spot falling", "FLAT": "➡ Sideways"}.get(_op_sd_txt, "")
+
+            st.markdown(
+                f'<div class="op-banner {_banner_cls}">'
+                f'<div class="op-sig-label">OI PULSE SIGNAL</div>'
+                f'<div class="{_sig_cls}">{_sig_emoji}{_op_sig}</div>'
+                f'<div class="op-sig-sub">{_op_detail if _op_detail else _op_dir_arr}</div>'
+                f'<div class="op-score-box">'
+                f'<div class="op-score-lbl">CE SCORE</div>'
+                f'<div class="op-score-ce">+{_op_res["score_ce"]}</div>'
+                f'<div class="op-score-lbl" style="margin-top:4px;">PE SCORE</div>'
+                f'<div class="op-score-pe">+{_op_res["score_pe"]}</div>'
+                f'</div>'
+                f'</div>',
+                unsafe_allow_html=True,
+            )
+
+            # ── Two columns: Setup | Strike Ladder ───────────────────────────
+            _op_col1, _op_col2 = st.columns([1, 2])
+
+            with _op_col1:
+                st.markdown('<div class="sa-sec">Trade Setup</div>', unsafe_allow_html=True)
+                _rs  = _op_res.get("recommended_strike")
+                _rt  = _op_res.get("recommended_type")
+                _ltp = _op_res.get("ltp_entry")
+                _sl  = _op_res.get("ltp_sl")
+                _tgt = _op_res.get("ltp_target")
+
+                if _rs and _rt and _ltp:
+                    st.markdown(
+                        f'<div class="op-setup">'
+                        f'<div class="op-kv"><span class="op-kv-lbl">INSTRUMENT</span>'
+                        f'<span class="op-kv-val">{_op_sym} {int(_rs)} {_rt}</span></div>'
+                        f'<div class="op-kv"><span class="op-kv-lbl">ENTRY LTP</span>'
+                        f'<span class="op-kv-val">₹{_ltp:.1f}</span></div>'
+                        f'<div class="op-kv"><span class="op-kv-lbl">STOP LOSS</span>'
+                        f'<span class="op-kv-val op-kv-sl">₹{_sl:.1f} (−30%)</span></div>'
+                        f'<div class="op-kv"><span class="op-kv-lbl">TARGET</span>'
+                        f'<span class="op-kv-val op-kv-tgt">₹{_tgt:.1f} (2×)</span></div>'
+                        f'<div class="op-kv"><span class="op-kv-lbl">SPOT</span>'
+                        f'<span class="op-kv-val">{_op_spot:,.2f}</span></div>'
+                        f'<div class="op-kv"><span class="op-kv-lbl">ATM</span>'
+                        f'<span class="op-kv-val">{int(_op_atm)}</span></div>'
+                        f'<div class="op-kv"><span class="op-kv-lbl">DIRECTION</span>'
+                        f'<span class="op-kv-val">{_op_sd_txt} {_op_dir_arr}</span></div>'
+                        f'<div style="margin-top:10px;padding:8px;background:#001a0d;border-radius:6px;border:1px solid #2ea043;">'
+                        f'<div style="color:#2ea043;font-size:0.72rem;font-weight:700;">ℹ INTRADAY RULES</div>'
+                        f'<div style="color:#6e7681;font-size:0.71rem;margin-top:4px;">'
+                        f'Exit by 3:00 PM — no overnight holds.<br>'
+                        f'30% SL is firm. 2× target then exit.<br>'
+                        f'OI signal confirms on 2nd+ scan.</div>'
+                        f'</div>'
+                        f'</div>',
+                        unsafe_allow_html=True,
+                    )
+                else:
+                    st.markdown(
+                        '<div class="op-setup" style="text-align:center;padding:30px 16px;">'
+                        '<div style="color:#6e7681;font-size:0.84rem;">No trade setup yet.<br>'
+                        'Scan again to detect OI changes.</div>'
+                        '</div>',
+                        unsafe_allow_html=True,
+                    )
+
+                # OI Walls
+                st.markdown('<div class="sa-sec" style="margin-top:12px;">OI Walls</div>', unsafe_allow_html=True)
+                _ce_ws   = _op_res.get("top_ce_strike")
+                _pe_ws   = _op_res.get("top_pe_strike")
+                _ce_oi_w = _op_res.get("ce_oi_wall", 0)
+                _pe_oi_w = _op_res.get("pe_oi_wall", 0)
+                _cov_ce  = _op_res.get("covering_ce", False)
+                _cov_pe  = _op_res.get("covering_pe", False)
+
+                _wall_rows = ""
+                if _ce_ws:
+                    _dist_ce = abs(_ce_ws - _op_spot) / _op_spot * 100
+                    _cov_b   = ' <span style="color:#ff6b35;font-size:0.7rem;">🔥 COVERING</span>' if _cov_ce else ""
+                    _wall_rows += (
+                        f'<div class="op-kv">'
+                        f'<span class="op-kv-lbl">CE WALL {int(_ce_ws)}{_cov_b}</span>'
+                        f'<span class="op-kv-val" style="color:#f85149;">{_ce_oi_w/1e5:.1f}L · {_dist_ce:.2f}% above</span>'
+                        f'</div>'
+                    )
+                if _pe_ws:
+                    _dist_pe = abs(_op_spot - _pe_ws) / _op_spot * 100
+                    _cov_b2  = ' <span style="color:#ff6b35;font-size:0.7rem;">🔥 COVERING</span>' if _cov_pe else ""
+                    _wall_rows += (
+                        f'<div class="op-kv">'
+                        f'<span class="op-kv-lbl">PE WALL {int(_pe_ws)}{_cov_b2}</span>'
+                        f'<span class="op-kv-val" style="color:#00d4aa;">{_pe_oi_w/1e5:.1f}L · {_dist_pe:.2f}% below</span>'
+                        f'</div>'
+                    )
+                if _wall_rows:
+                    st.markdown(f'<div class="op-setup">{_wall_rows}</div>', unsafe_allow_html=True)
+
+            with _op_col2:
+                st.markdown('<div class="sa-sec">Strike Ladder — Nearby OI</div>', unsafe_allow_html=True)
+
+                _max_ce = max(_op_chain["CE OI"].max(), 1)
+                _max_pe = max(_op_chain["PE OI"].max(), 1)
+
+                _ladder_rows = ""
+                for _, _row in _op_chain.iterrows():
+                    _s    = _row["Strike"]
+                    _ce_o = int(_row["CE OI"])
+                    _pe_o = int(_row["PE OI"])
+                    _ce_l = _row["CE LTP"]
+                    _pe_l = _row["PE LTP"]
+                    _ce_d = int(_row.get("CE ΔOI", 0))
+                    _pe_d = int(_row.get("PE ΔOI", 0))
+
+                    _is_atm    = (_s == _op_atm)
+                    _is_ce_wall = (_ce_ws is not None and _s == _ce_ws)
+                    _is_pe_wall = (_pe_ws is not None and _s == _pe_ws)
+                    _row_cls = (
+                        "op-row-atm"    if _is_atm    else
+                        "op-row-ce-wall" if _is_ce_wall else
+                        "op-row-pe-wall" if _is_pe_wall else ""
+                    )
+
+                    _dist_pct = (_s - _op_spot) / _op_spot * 100
+                    _dist_str = "← SPOT" if abs(_dist_pct) < 0.01 else f"{_dist_pct:+.2f}%"
+
+                    _ce_bar_w = int(_ce_o / _max_ce * 120)
+                    _pe_bar_w = int(_pe_o / _max_pe * 120)
+
+                    def _dstr(d):
+                        if d == 0: return '<span class="op-delta-neu">—</span>'
+                        cls = "op-delta-neg" if d < 0 else "op-delta-pos"
+                        return f'<span class="{cls}">{d/1e5:+.1f}L</span>'
+
+                    _wall_icon = (
+                        "🔥" if ((_is_ce_wall and _cov_ce) or (_is_pe_wall and _cov_pe))
+                        else ("⬆" if _is_ce_wall else ("⬇" if _is_pe_wall else ""))
+                    )
+
+                    _ladder_rows += (
+                        f'<tr class="{_row_cls}">'
+                        f'<td class="op-ce-side">'
+                        f'  <div class="op-oi-bar-ce">'
+                        f'    <span class="op-oi-num">{_ce_o/1e5:.1f}L</span>'
+                        f'    <div class="op-bar-fill-ce" style="width:{_ce_bar_w}px;"></div>'
+                        f'  </div>'
+                        f'</td>'
+                        f'<td class="op-ce-side"><span class="op-ltp">{"₹"+str(round(_ce_l,1)) if _ce_l > 0 else "—"}</span></td>'
+                        f'<td class="op-ce-side">{_dstr(_ce_d)}</td>'
+                        f'<td class="op-strike-cell">{_wall_icon}{int(_s)}</td>'
+                        f'<td class="op-dist-cell">{_dist_str}</td>'
+                        f'<td class="op-pe-side">{_dstr(_pe_d)}</td>'
+                        f'<td class="op-pe-side"><span class="op-ltp">{"₹"+str(round(_pe_l,1)) if _pe_l > 0 else "—"}</span></td>'
+                        f'<td class="op-pe-side">'
+                        f'  <div class="op-oi-bar-pe">'
+                        f'    <div class="op-bar-fill-pe" style="width:{_pe_bar_w}px;"></div>'
+                        f'    <span class="op-oi-num">{_pe_o/1e5:.1f}L</span>'
+                        f'  </div>'
+                        f'</td>'
+                        f'</tr>'
+                    )
+
+                st.markdown(
+                    f'<div class="op-ladder-wrap">'
+                    f'<table class="op-tbl">'
+                    f'<thead><tr>'
+                    f'<th class="op-ce-side">CE OI (L)</th>'
+                    f'<th class="op-ce-side">CE LTP</th>'
+                    f'<th class="op-ce-side">CE ΔOI</th>'
+                    f'<th style="text-align:center;">STRIKE</th>'
+                    f'<th style="text-align:center;">DIST</th>'
+                    f'<th class="op-pe-side">PE ΔOI</th>'
+                    f'<th class="op-pe-side">PE LTP</th>'
+                    f'<th class="op-pe-side">PE OI (L)</th>'
+                    f'</tr></thead>'
+                    f'<tbody>{_ladder_rows}</tbody>'
+                    f'</table>'
+                    f'</div>',
+                    unsafe_allow_html=True,
+                )
+
+            # ── Factor breakdown ──────────────────────────────────────────────
+            _op_factors = _op_res.get("factors", [])
+            if _op_factors:
+                st.markdown('<div class="sa-sec" style="margin-top:14px;">Factor Breakdown</div>', unsafe_allow_html=True)
+                _op_frows = ""
+                for _fn, _fv, _fd, _fp in _op_factors:
+                    _dir_cls = (
+                        "op-factor-dir-bull" if _fd == "BULL" else
+                        ("op-factor-dir-bear" if _fd == "BEAR" else "op-factor-dir-neu")
+                    )
+                    _pts_col = "#00d4aa" if _fp > 0 else ("#f85149" if _fp < 0 else "#6e7681")
+                    _op_frows += (
+                        f'<tr>'
+                        f'<td style="color:#adbac7;font-size:0.82rem;white-space:nowrap;">{_fn}</td>'
+                        f'<td style="color:#c9d1d9;font-size:0.8rem;">{_fv}</td>'
+                        f'<td><span class="{_dir_cls}">{_fd}</span></td>'
+                        f'<td style="font-weight:700;color:{_pts_col};font-size:0.85rem;">{_fp:+d}</td>'
+                        f'</tr>'
+                    )
+                st.markdown(
+                    f'<div class="sa-card" style="padding:0;overflow:hidden;">'
+                    f'<div style="overflow-x:auto;">'
+                    f'<table class="sa-tbl">'
+                    f'<thead><tr><th>Factor</th><th>Reading</th><th>Direction</th><th>Pts</th></tr></thead>'
+                    f'<tbody>{_op_frows}</tbody>'
+                    f'</table>'
+                    f'</div>'
+                    f'</div>',
+                    unsafe_allow_html=True,
+                )
+
+        # ── Signal history ────────────────────────────────────────────────────
+        _op_hist = st.session_state.get("op_history", [])
+        if _op_hist:
+            st.markdown('<div class="sa-sec" style="margin-top:14px;">Signal History (This Session)</div>', unsafe_allow_html=True)
+
+            def _op_sig_col(sig):
+                if "STRONG BUY CE" in sig: return "#2ea043"
+                if "BUY CE"        in sig: return "#00d4aa"
+                if "STRONG BUY PE" in sig: return "#f85149"
+                if "BUY PE"        in sig: return "#da3633"
+                return "#adbac7"
+
+            _op_hrows = ""
+            for _h in reversed(_op_hist[-20:]):
+                _ltp_s = ("₹" + str(round(_h["ltp"], 1))) if _h.get("ltp") else "—"
+                _str_s = str(int(_h["strike"])) if _h.get("strike") else "—"
+                _op_hrows += (
+                    f'<tr>'
+                    f'<td style="color:#6e7681;font-size:0.8rem;white-space:nowrap;">{_h["ts"]}</td>'
+                    f'<td style="font-weight:700;color:{_op_sig_col(_h["signal"])};font-size:0.81rem;">{_h["signal"]}</td>'
+                    f'<td style="color:#c9d1d9;font-size:0.81rem;">{_h["spot"]:,.2f}</td>'
+                    f'<td style="color:#00d4aa;font-size:0.82rem;">{_h["ce_sc"]:+d}</td>'
+                    f'<td style="color:#f85149;font-size:0.82rem;">{_h["pe_sc"]:+d}</td>'
+                    f'<td style="color:#adbac7;">{_str_s} {_h.get("type","")}</td>'
+                    f'<td style="color:#adbac7;">{_ltp_s}</td>'
+                    f'</tr>'
+                )
+            st.markdown(
+                f'<div class="sa-card" style="padding:0;overflow:hidden;">'
+                f'<div style="overflow-x:auto;">'
+                f'<table class="sa-tbl">'
+                f'<thead><tr><th>Time</th><th>Signal</th><th>Spot</th>'
+                f'<th>CE Sc</th><th>PE Sc</th><th>Strike</th><th>LTP</th></tr></thead>'
+                f'<tbody>{_op_hrows}</tbody>'
+                f'</table>'
+                f'</div>'
+                f'</div>',
+                unsafe_allow_html=True,
+            )
+        elif st.session_state.get("op_last_signal") is None:
+            st.markdown(
+                '<div class="sa-card" style="text-align:center;padding:32px 20px;">'
+                '<div style="font-size:1.8rem;">📡</div>'
+                '<div style="color:#6e7681;margin-top:8px;">'
+                'Load instruments → select an expiry → click <b style="color:#f0f6fc;">Scan Now</b><br>'
+                '<span style="font-size:0.78rem;">OI change signals appear from the 2nd scan onward</span>'
+                '</div>'
+                '</div>',
+                unsafe_allow_html=True,
+            )
+
+
 # ── Navigation ────────────────────────────────────────────────────────────────
 pg = st.navigation({
     "⚡ Live Signals": [
         st.Page(page_smart_alerts,      title="Smart Alerts",        icon="💡", default=True),
         st.Page(page_smart_alerts_pro,  title="Smart Alerts Pro",    icon="⚡"),
         st.Page(page_gamma_blast,       title="Expiry Gamma Blast",  icon="💥"),
+        st.Page(page_oi_pulse,          title="Intraday OI Pulse",   icon="📡"),
     ],
     "📊 Index & Options": [
         st.Page(page_option_chain,      title="Option Chain",        icon="🔗"),
