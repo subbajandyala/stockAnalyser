@@ -11,6 +11,7 @@ from typing import Optional
 import numpy as np
 import pandas as pd
 import requests
+import yfinance as yf
 
 _KITE_BASE = "https://api.kite.trade"
 _IST = datetime.timezone(datetime.timedelta(hours=5, minutes=30))
@@ -266,6 +267,44 @@ def _sentiment_factor(sentiment: str) -> dict:
                    "No clear directional bias from OI sentiment")
 
 
+# ── Gate helpers ───────────────────────────────────────────────────────────────
+
+def _fetch_vix() -> float:
+    """Fetch India VIX daily close. Returns 0.0 on failure."""
+    try:
+        df = yf.download("^INDIAVIX", period="5d", interval="1d",
+                         progress=False, auto_adjust=True)
+        if df.empty:
+            return 0.0
+        return float(df["Close"].squeeze().dropna().iloc[-1])
+    except Exception:
+        return 0.0
+
+
+def _check_gates(ist_now: datetime.datetime, vix: float) -> dict:
+    """Time and VIX hard gates for v1.  Returns {name: (passes, reason)}."""
+    gates: dict = {}
+
+    t = ist_now.time()
+    if datetime.time(9, 15) <= t < datetime.time(9, 30):
+        gates["Time"] = (False, "Opening noise 9:15–9:30 — OI not settled yet")
+    elif t >= datetime.time(15, 0):
+        gates["Time"] = (False, "Last 30 min of session — too volatile to enter")
+    else:
+        gates["Time"] = (True, f"Market hours clear ({t.strftime('%H:%M')} IST)")
+
+    if vix <= 0:
+        gates["VIX"] = (True, "VIX unavailable — gate skipped")
+    elif vix < 10:
+        gates["VIX"] = (False, f"VIX {vix:.1f} critically low — options near illiquid, skip")
+    elif vix > 25:
+        gates["VIX"] = (False, f"VIX {vix:.1f} extreme — premiums bloated, vega crush risk")
+    else:
+        gates["VIX"] = (True, f"VIX {vix:.1f} — acceptable range")
+
+    return gates
+
+
 # ── Main scanner ───────────────────────────────────────────────────────────────
 
 def run_smart_signal(
@@ -283,9 +322,13 @@ def run_smart_signal(
         ts, spot, atm, expiry, signal, confidence, score, max_pain,
         pcr, strike, option_type, ltp, sl, target, rr, factors, error(opt)
     """
-    exch = _EXCHANGE[symbol]
-    step = _STRIKE_STEP[symbol]
-    hdrs = _hdrs(api_key, access_token)
+    exch    = _EXCHANGE[symbol]
+    step    = _STRIKE_STEP[symbol]
+    hdrs    = _hdrs(api_key, access_token)
+    ist_now = datetime.datetime.now(_IST)
+
+    # 0. Ancillary data (gates need these before factor build)
+    vix = _fetch_vix()
 
     # 1. Spot
     spot = _get_spot(api_key, access_token, symbol)
@@ -378,24 +421,34 @@ def run_smart_signal(
     # 4. Composite score
     score = sum(f["points"] for f in factors)
 
-    # 5. Signal classification
-    # When Trending OI is not running, effective max score is PCR(2)+MaxPain(2)+OIWalls(1)=5
-    # so lower thresholds to ±5 / ±3 to allow signals; with toi_rows, keep full thresholds.
+    # 5. Gates
+    gates     = _check_gates(ist_now, vix)
+    gate_pass = all(v[0] for v in gates.values())
+
+    # 6. Signal classification
+    # Without Trending OI: ATM Parity+NearATM+PCR+MaxPain+OIWalls max ±9 → thresholds ±3/±5
+    # With Trending OI: adds up to ±9 more → thresholds ±4/±6
     if has_toi:
         strong_thresh, mild_thresh = 6, 4
     else:
         strong_thresh, mild_thresh = 5, 3
 
     if score >= strong_thresh:
-        signal, confidence, opt_type = "STRONG BUY CE", "HIGH", "CE"
+        raw_signal, confidence, opt_type = "STRONG BUY CE", "HIGH", "CE"
     elif score >= mild_thresh:
-        signal, confidence, opt_type = "BUY CE", "MEDIUM", "CE"
+        raw_signal, confidence, opt_type = "BUY CE", "MEDIUM", "CE"
     elif score <= -strong_thresh:
-        signal, confidence, opt_type = "STRONG BUY PE", "HIGH", "PE"
+        raw_signal, confidence, opt_type = "STRONG BUY PE", "HIGH", "PE"
     elif score <= -mild_thresh:
-        signal, confidence, opt_type = "BUY PE", "MEDIUM", "PE"
+        raw_signal, confidence, opt_type = "BUY PE", "MEDIUM", "PE"
     else:
+        raw_signal, confidence, opt_type = "WAIT", "LOW", None
+
+    if not gate_pass:
+        block_reason = next((v[1] for v in gates.values() if not v[0]), "")
         signal, confidence, opt_type = "WAIT", "LOW", None
+    else:
+        signal, block_reason = raw_signal, ""
 
     # 6. Strike selection and LTP
     rec_strike = None
@@ -428,13 +481,18 @@ def run_smart_signal(
             rr     = round((target - ltp) / (ltp - sl), 1) if ltp > sl else None
 
     return {
-        "ts":           datetime.datetime.now(_IST),
+        "ts":           ist_now,
         "spot":         round(spot, 2),
         "atm":          atm,
         "expiry":       expiry,
         "signal":       signal,
+        "raw_signal":   raw_signal,
         "confidence":   confidence,
         "score":        score,
+        "block_reason": block_reason,
+        "gates":        gates,
+        "gate_pass":    gate_pass,
+        "vix":          round(vix, 2),
         "pcr":          pcr,
         "max_pain":     int(mp),
         "max_ce_wall":  int(max_ce_strike),

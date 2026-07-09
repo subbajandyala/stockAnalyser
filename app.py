@@ -2821,7 +2821,8 @@ def page_smart_alerts():
   <div style="color:#e6edf3;font-weight:700;font-size:1.05rem;margin-bottom:8px;">No signal yet</div>
   <div style="color:#4a5568;font-size:0.82rem;max-width:480px;margin:0 auto;line-height:1.7;">
     Click <strong style="color:#c9d1d9;">🔍 Analyze Now</strong> or wait for the auto-scan.<br>
-    Checks: PCR · Max Pain · OI Walls · COI PCR · Vol PCR · Verdict · Sentiment · Diff OI
+    Checks: PCR · Max Pain · OI Walls · COI PCR · Vol PCR · Verdict · Sentiment · Diff OI<br>
+    Gates: Time (blocks 9:15–9:30 &amp; after 3PM) · VIX (blocks &lt;10 or &gt;25)
   </div>
 </div>""", unsafe_allow_html=True)
 
@@ -2860,12 +2861,18 @@ def page_smart_alerts():
                 # score gauge: map -12..+12 → 0%..100%
                 _gauge_pct = max(2, min(98, ((_score + 12) / 24) * 100))
                 _conf_icon = {"HIGH": "🔥", "MEDIUM": "⚡", "LOW": "⏳"}.get(_conf, "")
+                _sa_gate_pass_banner = _sa_sig.get("gate_pass", True)
+                _sa_raw_sig          = _sa_sig.get("raw_signal", _signal)
                 _trade_line = (
                     f"<span style='color:{_sc};font-size:0.95rem;font-weight:700;'>"
                     f"Buy {_sa_symbol} {_sa_strike} {_sa_opt}</span>"
                     f"<span style='color:#4a5568;font-size:0.8rem;margin-left:10px;'>expiry {_sa_expiry}</span>"
                     if _signal != "WAIT" and _sa_strike else
                     "<span style='color:#4a5568;font-size:0.82rem;'>No directional setup — stand aside</span>"
+                )
+                _gate_extra = (
+                    f"<span style='color:#f85149;font-size:0.72rem;margin-left:8px;'>⚠ Gate blocked · raw signal: {_sa_raw_sig}</span>"
+                    if not _sa_gate_pass_banner and _sa_raw_sig != "WAIT" else ""
                 )
 
                 # ── ① SIGNAL BANNER ───────────────────────────────────────────
@@ -2876,7 +2883,7 @@ def page_smart_alerts():
     <div>
       <div style="font-size:0.58rem;font-weight:800;letter-spacing:2px;text-transform:uppercase;color:{_sc};opacity:.75;margin-bottom:5px;">Signal</div>
       <div style="font-size:2.1rem;font-weight:900;color:{_sc};letter-spacing:1px;line-height:1;">{_signal}</div>
-      <div style="margin-top:10px;">{_trade_line}</div>
+      <div style="margin-top:10px;">{_trade_line}{_gate_extra}</div>
     </div>
     <div style="text-align:right;">
       <div style="font-size:0.58rem;font-weight:800;letter-spacing:2px;text-transform:uppercase;color:#3d4a5c;margin-bottom:5px;">Score</div>
@@ -3155,6 +3162,22 @@ def page_smart_alerts():
     {_toi_status}
   </div>
 </div>""", unsafe_allow_html=True)
+
+                # ── ② b GATE STATUS ──────────────────────────────────────────
+                _sa_gates     = _sa_sig.get("gates", {})
+                _sa_gate_pass = _sa_sig.get("gate_pass", True)
+                _sa_block_rsn = _sa_sig.get("block_reason", "")
+                if _sa_gates:
+                    _g_icons = {"Time": "⏱", "VIX": "📊"}
+                    _g_html  = '<div class="sp-gate-row">'
+                    for _gk, (_gp, _gr) in _sa_gates.items():
+                        _gcls = "sp-gate-pass" if _gp else "sp-gate-fail"
+                        _g_html += f'<span class="{_gcls}" title="{_gr}">{_g_icons.get(_gk,"•")} {_gk} {"✓" if _gp else "✗"}</span>'
+                    _g_html += "</div>"
+                    st.markdown('<div class="sa-sec" style="margin-top:10px;">Signal Gates</div>', unsafe_allow_html=True)
+                    st.markdown(_g_html, unsafe_allow_html=True)
+                    if not _sa_gate_pass and _sa_block_rsn:
+                        st.markdown(f'<div class="sp-conflict">🚧 Gate blocked: {_sa_block_rsn}</div>', unsafe_allow_html=True)
 
                 # ── ③ FACTOR BREAKDOWN ────────────────────────────────────────
                 _factors = _sa_sig.get("factors", [])

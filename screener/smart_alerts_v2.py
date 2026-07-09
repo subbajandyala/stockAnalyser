@@ -1,5 +1,5 @@
 """
-Smart Alerts v2 — 13-factor precision option buying signal.
+Smart Alerts v2 — 16-factor precision option buying signal.
 
 Enhancements over v1:
   - VWAP position (Kite 1-min candles from 9:15 AM)
@@ -206,9 +206,11 @@ def check_gates(
     else:
         gates["IV"] = (True,  f"IV ratio {iv_ratio:.2f} — no adverse IV distortion")
 
-    # Gate 4 — Consecutive confirmation (1 of last 2 same direction; just 1 prior scan needed)
+    # Gate 4 — Consecutive confirmation: require consistent direction across last 2 scans.
+    # On first scan (empty history) we pass — blocking would make the first signal impossible
+    # after any page reload.  Conflicting history (BULL then BEAR) is the only hard block.
     if len(direction_history) < 1:
-        gates["Confirm"] = (False, "Need 1+ prior scan to confirm direction — wait")
+        gates["Confirm"] = (True, "First scan — no prior history, allowing through")
     else:
         recent = direction_history[-2:]
         bulls  = recent.count("BULL")
@@ -218,7 +220,7 @@ def check_gates(
         elif bears >= 1 and bulls == 0:
             gates["Confirm"] = (True,  f"BEAR confirmed in {bears}/{len(recent)} recent scans")
         elif bulls >= 1 and bears >= 1:
-            gates["Confirm"] = (False, f"Conflicting: {bulls}B {bears}P in last {len(recent)} scans — no conviction")
+            gates["Confirm"] = (False, f"Conflicting signals: {bulls}× BULL, {bears}× BEAR in last {len(recent)} scans — no conviction")
         else:
             gates["Confirm"] = (False, "Direction neutral in recent scans — wait for clarity")
 
