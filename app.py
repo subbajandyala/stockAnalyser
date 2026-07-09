@@ -4395,9 +4395,13 @@ def page_oi_pulse():
 """, unsafe_allow_html=True)
 
     # ── Header ────────────────────────────────────────────────────────────────
-    _op_now   = datetime.datetime.now(_IST_OP)
-    _op_close = _op_now.replace(hour=15, minute=30, second=0, microsecond=0)
-    _op_left  = max(0, int((_op_close - _op_now).total_seconds()))
+    _op_now    = datetime.datetime.now(_IST_OP)
+    _op_sym_now = st.session_state.get("op_sym", "NIFTY")
+    _op_is_mcx  = _op_sym_now in {"CRUDEOIL"}
+    _op_close  = _op_now.replace(
+        hour=23, minute=30, second=0, microsecond=0
+    ) if _op_is_mcx else _op_now.replace(hour=15, minute=30, second=0, microsecond=0)
+    _op_left   = max(0, int((_op_close - _op_now).total_seconds()))
     _op_hh, _op_mm, _op_ss = _op_left // 3600, (_op_left % 3600) // 60, _op_left % 60
 
     st.markdown("""
@@ -4407,11 +4411,13 @@ def page_oi_pulse():
   <span class="op-badge-live">LIVE</span>
 </div>""", unsafe_allow_html=True)
 
+    _op_session_lbl = "MCX session closes in" if _op_is_mcx else "Market closes in"
+    _op_session_sub = "MCX Crude Oil · 9:00 AM – 11:30 PM IST · ATM options" if _op_is_mcx else "OI build-up / unwinding scanner · ATM options"
     st.markdown(
         f'<div class="op-cdown-wrap">'
-        f'<span class="op-countdown-lbl">Market closes in</span>'
+        f'<span class="op-countdown-lbl">{_op_session_lbl}</span>'
         f'<span class="op-countdown">{_op_hh:02d}:{_op_mm:02d}:{_op_ss:02d}</span>'
-        f'<span class="op-countdown-lbl" style="margin-left:10px;">OI build-up / unwinding scanner · ATM options</span>'
+        f'<span class="op-countdown-lbl" style="margin-left:10px;">{_op_session_sub}</span>'
         f'</div>',
         unsafe_allow_html=True,
     )

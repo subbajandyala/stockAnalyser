@@ -123,91 +123,104 @@ def score_oi_pulse(
         else:
             res["factors"].append(("Spot Momentum", f"Choppy avg {avg:+.1f} pts", "NEUTRAL", 0))
 
+    # ── Adaptive OI thresholds (% of strike's own OI so it works for any instrument) ──
+    # Heavy unwind: >15% OI drop  |  Moderate: >5%
+    # Heavy buildup: >15% increase |  Moderate: >5%
+    # Static wall (first scan): strike holds >25% of its side's total chain OI
+    tot_ce_chain = max(chain_df["CE OI"].sum(), 1)
+    tot_pe_chain = max(chain_df["PE OI"].sum(), 1)
+
+    def _oi_delta_score(oi_now: int, prev_oi: int) -> tuple[int, str]:
+        """Returns (score_delta, label). Positive = bullish (CE unwind / PE build)."""
+        if prev_oi <= 0:
+            return 0, "stable"
+        pct = (oi_now - prev_oi) / prev_oi * 100
+        abs_d = abs(oi_now - prev_oi)
+        min_abs = max(10, int(prev_oi * 0.01))   # at least 1% absolute change to matter
+        if pct < -15 and abs_d >= min_abs:
+            return 4, f"🔥 -{abs(pct):.0f}% OI drop"
+        if pct < -5 and abs_d >= min_abs:
+            return 2, f"-{abs(pct):.0f}% OI drop"
+        if pct > 15 and abs_d >= min_abs:
+            return -2, f"+{pct:.0f}% OI buildup"
+        if pct > 5 and abs_d >= min_abs:
+            return -1, f"+{pct:.0f}% OI buildup"
+        return 0, f"{pct:+.1f}% (stable)"
+
+    def _fmt_oi(oi: int) -> str:
+        if oi >= 100_000: return f"{oi/1e5:.1f}L"
+        if oi >= 1_000:   return f"{oi/1_000:.1f}K"
+        return str(oi)
+
     # ── CE Wall — highest OI calls ABOVE spot ─────────────────────────────────
     above = chain_df[chain_df["Strike"] > spot].copy()
     if not above.empty and above["CE OI"].max() > 0:
-        top  = above.loc[above["CE OI"].idxmax()]
-        ce_s = float(top["Strike"])
+        top   = above.loc[above["CE OI"].idxmax()]
+        ce_s  = float(top["Strike"])
         ce_oi = int(top["CE OI"])
         res["top_ce_strike"] = ce_s
         res["ce_oi_wall"]    = ce_oi
-        oi_l = ce_oi / 1e5
 
         if prev_chain and ce_s in prev_chain:
-            delta   = ce_oi - prev_chain[ce_s].get("CE OI", ce_oi)
-            delta_l = delta / 1e5
-            if delta < -100_000:
-                res["score_ce"] += 4
+            prev_ce = prev_chain[ce_s].get("CE OI", ce_oi)
+            sc, lbl = _oi_delta_score(ce_oi, prev_ce)
+            pct_chg = (ce_oi - prev_ce) / max(prev_ce, 1) * 100
+            if sc > 0:       # unwinding → bullish
+                res["score_ce"] += sc
                 res["covering_ce"] = True
                 res["factors"].append((f"CE Unwinding @ {ce_s:.0f}",
-                    f"🔥 Heavy CE short-covering -{abs(delta_l):.1f}L → bulls breaking resistance", "BULL", 4))
-            elif delta < -30_000:
-                res["score_ce"] += 2
-                res["covering_ce"] = True
-                res["factors"].append((f"CE Unwinding @ {ce_s:.0f}",
-                    f"CE covering -{abs(delta_l):.1f}L → resistance weakening", "BULL", 2))
-            elif delta > 100_000:
-                res["score_pe"] += 2
+                    f"{lbl} → resistance weakening", "BULL", sc))
+            elif sc < 0:     # buildup → bearish
+                res["score_pe"] += abs(sc)
                 res["factors"].append((f"CE Buildup @ {ce_s:.0f}",
-                    f"Heavy call writing +{delta_l:.1f}L → strong resistance", "BEAR", 2))
-            elif delta > 30_000:
-                res["score_pe"] += 1
-                res["factors"].append((f"CE Buildup @ {ce_s:.0f}",
-                    f"Call writing +{delta_l:.1f}L → resistance building", "BEAR", 1))
+                    f"{lbl} → resistance building", "BEAR", abs(sc)))
             else:
                 res["factors"].append((f"CE OI @ {ce_s:.0f}",
-                    f"Stable {oi_l:.1f}L ({delta_l:+.1f}L change)", "NEUTRAL", 0))
+                    f"{_fmt_oi(ce_oi)} ({pct_chg:+.1f}% change — stable)", "NEUTRAL", 0))
         else:
-            if ce_oi > 5_000_000:
+            wall_pct = ce_oi / tot_ce_chain * 100
+            if wall_pct > 25:
                 res["score_pe"] += 1
                 res["factors"].append((f"CE Wall @ {ce_s:.0f}",
-                    f"Massive {oi_l:.1f}L overhead resistance", "BEAR", 1))
+                    f"{_fmt_oi(ce_oi)} ({wall_pct:.0f}% of chain CE OI) — dominant resistance", "BEAR", 1))
             else:
                 res["factors"].append((f"CE Wall @ {ce_s:.0f}",
-                    f"{oi_l:.1f}L overhead (scan again to detect OI changes)", "NEUTRAL", 0))
+                    f"{_fmt_oi(ce_oi)} ({wall_pct:.0f}% of chain) — scan again to detect changes", "NEUTRAL", 0))
 
     # ── PE Wall — highest OI puts BELOW spot ──────────────────────────────────
     below = chain_df[chain_df["Strike"] < spot].copy()
     if not below.empty and below["PE OI"].max() > 0:
-        top  = below.loc[below["PE OI"].idxmax()]
-        pe_s = float(top["Strike"])
+        top   = below.loc[below["PE OI"].idxmax()]
+        pe_s  = float(top["Strike"])
         pe_oi = int(top["PE OI"])
         res["top_pe_strike"] = pe_s
         res["pe_oi_wall"]    = pe_oi
-        oi_l = pe_oi / 1e5
 
         if prev_chain and pe_s in prev_chain:
-            delta   = pe_oi - prev_chain[pe_s].get("PE OI", pe_oi)
-            delta_l = delta / 1e5
-            if delta < -100_000:
-                res["score_pe"] += 4
+            prev_pe = prev_chain[pe_s].get("PE OI", pe_oi)
+            sc, lbl = _oi_delta_score(pe_oi, prev_pe)
+            pct_chg = (pe_oi - prev_pe) / max(prev_pe, 1) * 100
+            if sc > 0:       # unwinding → bearish (support crumbling)
+                res["score_pe"] += sc
                 res["covering_pe"] = True
                 res["factors"].append((f"PE Unwinding @ {pe_s:.0f}",
-                    f"🔥 Heavy PE short-covering -{abs(delta_l):.1f}L → support breaking down", "BEAR", 4))
-            elif delta < -30_000:
-                res["score_pe"] += 2
-                res["covering_pe"] = True
-                res["factors"].append((f"PE Unwinding @ {pe_s:.0f}",
-                    f"PE covering -{abs(delta_l):.1f}L → support weakening", "BEAR", 2))
-            elif delta > 100_000:
-                res["score_ce"] += 2
+                    f"{lbl} → support weakening", "BEAR", sc))
+            elif sc < 0:     # buildup → bullish (support building)
+                res["score_ce"] += abs(sc)
                 res["factors"].append((f"PE Buildup @ {pe_s:.0f}",
-                    f"Heavy put writing +{delta_l:.1f}L → strong support", "BULL", 2))
-            elif delta > 30_000:
-                res["score_ce"] += 1
-                res["factors"].append((f"PE Buildup @ {pe_s:.0f}",
-                    f"Put writing +{delta_l:.1f}L → support building", "BULL", 1))
+                    f"{lbl} → support building", "BULL", abs(sc)))
             else:
                 res["factors"].append((f"PE OI @ {pe_s:.0f}",
-                    f"Stable {oi_l:.1f}L ({delta_l:+.1f}L change)", "NEUTRAL", 0))
+                    f"{_fmt_oi(pe_oi)} ({pct_chg:+.1f}% change — stable)", "NEUTRAL", 0))
         else:
-            if pe_oi > 5_000_000:
+            wall_pct = pe_oi / tot_pe_chain * 100
+            if wall_pct > 25:
                 res["score_ce"] += 1
                 res["factors"].append((f"PE Wall @ {pe_s:.0f}",
-                    f"Massive {oi_l:.1f}L support below", "BULL", 1))
+                    f"{_fmt_oi(pe_oi)} ({wall_pct:.0f}% of chain PE OI) — dominant support", "BULL", 1))
             else:
                 res["factors"].append((f"PE Wall @ {pe_s:.0f}",
-                    f"{oi_l:.1f}L support below (scan again to detect OI changes)", "NEUTRAL", 0))
+                    f"{_fmt_oi(pe_oi)} ({wall_pct:.0f}% of chain) — scan again to detect changes", "NEUTRAL", 0))
 
     # ── PCR (nearby strikes) ──────────────────────────────────────────────────
     tot_ce = chain_df["CE OI"].sum()
