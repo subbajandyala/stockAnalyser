@@ -23,7 +23,7 @@ import requests
 _KITE_BASE = "https://api.kite.trade"
 _IST = datetime.timezone(datetime.timedelta(hours=5, minutes=30))
 _BFO = {"SENSEX", "BANKEX"}
-_MCX = {"CRUDEOIL"}
+_MCX = {"CRUDEOIL", "GOLD", "SILVER"}
 
 _SPOT_SYM: dict[str, str] = {
     "NIFTY":      "NSE:NIFTY 50",

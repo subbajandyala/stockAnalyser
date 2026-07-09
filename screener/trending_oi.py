@@ -30,17 +30,18 @@ import requests
 _KITE_BASE = "https://api.kite.trade"
 _IST = datetime.timezone(datetime.timedelta(hours=5, minutes=30))
 
-SYMBOLS = ["NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX", "BANKEX", "CRUDEOIL"]
+SYMBOLS = ["NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX", "BANKEX",
+           "CRUDEOIL", "GOLD", "SILVER"]
 
 _STRIKE_STEP: dict[str, int] = {
     "NIFTY": 50, "BANKNIFTY": 100, "FINNIFTY": 50,
     "MIDCPNIFTY": 25, "SENSEX": 100, "BANKEX": 100,
-    "CRUDEOIL": 50,
+    "CRUDEOIL": 50, "GOLD": 100, "SILVER": 500,
 }
 _EXCHANGE: dict[str, str] = {
     "NIFTY": "NFO", "BANKNIFTY": "NFO", "FINNIFTY": "NFO",
     "MIDCPNIFTY": "NFO", "SENSEX": "BFO", "BANKEX": "BFO",
-    "CRUDEOIL": "MCX",
+    "CRUDEOIL": "MCX", "GOLD": "MCX", "SILVER": "MCX",
 }
 _SPOT_QUOTE: dict[str, str] = {
     "NIFTY":      "NSE:NIFTY 50",

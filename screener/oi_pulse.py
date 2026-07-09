@@ -18,7 +18,7 @@ import pandas as pd
 from .gamma_blast import fetch_chain_snapshot   # reuse: fetch spot + ±n strikes from Kite
 
 _IST = datetime.timezone(datetime.timedelta(hours=5, minutes=30))
-_MCX_SYMBOLS = {"CRUDEOIL"}
+_MCX_SYMBOLS = {"CRUDEOIL", "GOLD", "SILVER"}
 
 
 # ── Session time phases ───────────────────────────────────────────────────────
