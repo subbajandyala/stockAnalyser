@@ -4486,7 +4486,11 @@ def page_oi_pulse():
 
         # ── Auto-refresh during market hours ──────────────────────────────────
         _op_h_now = _op_now.hour * 60 + _op_now.minute
-        _op_mkt   = (9 * 60 + 30) <= _op_h_now < (15 * 60 + 15)
+        # MCX (CRUDEOIL) trades 9 AM – 11:30 PM; equity is 9:30 AM – 3:15 PM
+        if _op_is_mcx:
+            _op_mkt = (9 * 60) <= _op_h_now < (23 * 60 + 30)
+        else:
+            _op_mkt = (9 * 60 + 30) <= _op_h_now < (15 * 60 + 15)
         if _op_mkt and st.session_state.get("op_instr") is not None:
             _st_autorefresh(interval=_op_interval * 1000, key="op_refresh")
 
