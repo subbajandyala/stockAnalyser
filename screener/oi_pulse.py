@@ -37,7 +37,7 @@ def _time_phase(ist_now: datetime.datetime, symbol: str = "") -> tuple[str, str,
             return "MCX_OPEN", "MCX opening 9:00–9:15 AM — OI settling",     0
         if 9 * 60 + 15 <= m < 15 * 60 + 30:
             return "MCX_EQUITY", "MCX + equity session overlap — high activity", 1
-        return "MCX_EVE",  f"MCX evening session ({ist_now.strftime('%H:%M')} IST)", 0
+        return "MCX_EVE",  f"MCX evening session ({ist_now.strftime('%H:%M')} IST)", 1
 
     # Equity / index options (NFO / BFO)
     if m < 9 * 60 + 15:
@@ -239,23 +239,30 @@ def score_oi_pulse(
     # ── Signal determination ──────────────────────────────────────────────────
     sce, spe = res["score_ce"], res["score_pe"]
 
-    if sce >= 7 and sce > spe + 2:
+    # MCX commodities (CRUDEOIL/GOLD/SILVER) have lower absolute OI than equity
+    # indices so use lower thresholds to avoid under-calling real moves
+    _is_mcx      = symbol in _MCX_SYMBOLS
+    strong_thresh = 6 if _is_mcx else 7
+    buy_thresh    = 4 if _is_mcx else 5
+    watch_thresh  = 2 if _is_mcx else 3
+
+    if sce >= strong_thresh and sce > spe + 2:
         res["signal"] = "STRONG BUY CE"
         res["recommended_type"]   = "CE"
         res["recommended_strike"] = atm
-    elif sce >= 5 and sce > spe:
+    elif sce >= buy_thresh and sce > spe:
         res["signal"] = "BUY CE"
         res["recommended_type"]   = "CE"
         res["recommended_strike"] = atm
-    elif spe >= 7 and spe > sce + 2:
+    elif spe >= strong_thresh and spe > sce + 2:
         res["signal"] = "STRONG BUY PE"
         res["recommended_type"]   = "PE"
         res["recommended_strike"] = atm
-    elif spe >= 5 and spe > sce:
+    elif spe >= buy_thresh and spe > sce:
         res["signal"] = "BUY PE"
         res["recommended_type"]   = "PE"
         res["recommended_strike"] = atm
-    elif max(sce, spe) >= 3:
+    elif max(sce, spe) >= watch_thresh:
         res["signal"] = "WATCH"
     else:
         res["signal"] = "WAIT"
