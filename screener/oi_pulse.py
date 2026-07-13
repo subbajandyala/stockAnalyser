@@ -96,6 +96,17 @@ def score_oi_pulse(
     res["factors"].append(("Session", phase_label, "NEUTRAL", time_pts if time_pts > 0 else 0))
 
     # ── Spot momentum (pct-based so it works for NIFTY ≈24k and SENSEX ≈80k) ─
+    # MCX commodities (crude ~6500, gold ~90000) move slower in % terms per
+    # 30-second interval, so use looser thresholds: strong at -0.05% or 2 down
+    # intervals (vs -0.10% or 3 for equity); leaning at -0.02% or 1 interval.
+    _is_mcx_mom = symbol in _MCX_SYMBOLS
+    _strong_up_pct   =  0.05 if _is_mcx_mom else  0.10
+    _lean_up_pct     =  0.02 if _is_mcx_mom else  0.03
+    _strong_dn_pct   = -0.05 if _is_mcx_mom else -0.10
+    _lean_dn_pct     = -0.02 if _is_mcx_mom else -0.03
+    _strong_consec   =  2    if _is_mcx_mom else  3
+    _lean_consec     =  1    if _is_mcx_mom else  2
+
     if spot_history and len(spot_history) >= 2:
         recent = [spot_history[i] - spot_history[i - 1]
                   for i in range(max(1, len(spot_history) - 4), len(spot_history))]
@@ -104,19 +115,19 @@ def score_oi_pulse(
         avg = sum(recent) / len(recent)
         pct = avg / spot * 100
 
-        if pct > 0.10 or up >= 3:
+        if pct > _strong_up_pct or up >= _strong_consec:
             res["spot_direction"] = "UP"
             res["score_ce"] += 3
             res["factors"].append(("Spot Momentum", f"Strong UP avg {avg:+.1f} pts ({pct:+.3f}%)", "BULL", 3))
-        elif pct > 0.03 or up >= 2:
+        elif pct > _lean_up_pct or up >= _lean_consec:
             res["spot_direction"] = "UP"
             res["score_ce"] += 1
             res["factors"].append(("Spot Momentum", f"Leaning UP avg {avg:+.1f} pts", "BULL", 1))
-        elif pct < -0.10 or dn >= 3:
+        elif pct < _strong_dn_pct or dn >= _strong_consec:
             res["spot_direction"] = "DOWN"
             res["score_pe"] += 3
             res["factors"].append(("Spot Momentum", f"Strong DOWN avg {avg:+.1f} pts ({pct:+.3f}%)", "BEAR", 3))
-        elif pct < -0.03 or dn >= 2:
+        elif pct < _lean_dn_pct or dn >= _lean_consec:
             res["spot_direction"] = "DOWN"
             res["score_pe"] += 1
             res["factors"].append(("Spot Momentum", f"Leaning DOWN avg {avg:+.1f} pts", "BEAR", 1))
