@@ -46,6 +46,7 @@ from screener.smart_alerts import run_smart_signal
 from screener.smart_alerts_v2 import run_smart_signal_v2
 from screener.gamma_blast import run_gamma_blast_scan
 from screener.oi_pulse import run_oi_pulse_scan
+from screener.red_flag import run_red_flag_scan as _run_red_flag, FLAG_DEFS as _RF_FLAG_DEFS
 
 try:
     from streamlit_autorefresh import st_autorefresh as _st_autorefresh
@@ -4863,6 +4864,236 @@ def page_oi_pulse():
             )
 
 
+# ── Red Flag Radar ───────────────────────────────────────────────────────────
+
+def page_red_flag():
+    st.markdown("""
+<style>
+.rf-header{display:flex;align-items:center;gap:12px;margin-bottom:4px;}
+.rf-title{font-size:1.45rem;font-weight:800;color:#f0f6fc;letter-spacing:-0.5px;}
+.rf-badge{background:#2a0d0d;border:1px solid #f85149;color:#f85149;font-size:0.68rem;font-weight:700;padding:3px 9px;border-radius:20px;letter-spacing:0.8px;}
+.rf-sub{font-size:0.82rem;color:#6e7681;margin-bottom:14px;}
+/* Flag chips */
+.rf-chip{display:inline-block;font-size:0.65rem;font-weight:700;padding:2px 8px;border-radius:10px;margin:1px 2px;white-space:nowrap;}
+.rf-chip-VOL_SPIKE{background:rgba(248,81,73,0.15);color:#f85149;border:1px solid #f85149;}
+.rf-chip-BIG_MOVE{background:rgba(230,184,0,0.15);color:#e6b800;border:1px solid #e6b800;}
+.rf-chip-OI_SPIKE{background:rgba(210,168,255,0.15);color:#d2a8ff;border:1px solid #d2a8ff;}
+.rf-chip-PCR_LOW{background:rgba(255,166,87,0.15);color:#ffa657;border:1px solid #ffa657;}
+.rf-chip-PCR_HIGH{background:rgba(121,192,255,0.15);color:#79c0ff;border:1px solid #79c0ff;}
+.rf-chip-HIGH_IV{background:rgba(255,123,114,0.15);color:#ff7b72;border:1px solid #ff7b72;}
+.rf-chip-BULK_DEAL{background:rgba(86,211,100,0.15);color:#56d364;border:1px solid #56d364;}
+/* Table */
+.rf-tbl-wrap{overflow-x:auto;border-radius:10px;border:1px solid #21262d;margin-top:12px;}
+.rf-tbl{width:100%;border-collapse:collapse;font-size:0.82rem;}
+.rf-tbl th{background:#0d1117;color:#6e7681;font-size:0.70rem;font-weight:700;letter-spacing:0.7px;padding:8px 12px;text-transform:uppercase;border-bottom:1px solid #21262d;white-space:nowrap;}
+.rf-tbl td{padding:7px 12px;border-bottom:1px solid #161b22;white-space:nowrap;vertical-align:middle;color:#c9d1d9;}
+.rf-tbl tr:last-child td{border-bottom:none;}
+.rf-tbl tr:hover td{background:rgba(255,255,255,0.025);}
+.rf-count-0{color:#6e7681;font-weight:600;}
+.rf-count-1{color:#e6b800;font-weight:700;}
+.rf-count-2{color:#ffa657;font-weight:800;}
+.rf-count-3{color:#f85149;font-weight:900;font-size:1.05rem;}
+.rf-count-hi{color:#ff0000;font-weight:900;font-size:1.1rem;animation:rf-pulse 1s infinite;}
+@keyframes rf-pulse{0%,100%{opacity:1;}50%{opacity:0.5;}}
+.rf-sym{font-weight:700;color:#f0f6fc;font-size:0.88rem;}
+.rf-up{color:#00d4aa;font-weight:600;}
+.rf-dn{color:#f85149;font-weight:600;}
+.rf-neutral{color:#6e7681;}
+/* Legend */
+.rf-legend{display:flex;flex-wrap:wrap;gap:8px;padding:12px 0 4px;}
+.rf-leg-item{display:flex;align-items:center;gap:5px;font-size:0.73rem;color:#8b949e;}
+</style>
+""", unsafe_allow_html=True)
+
+    st.markdown("""
+<div class="rf-header">
+  <span class="rf-title">🚨 Red Flag Radar</span>
+  <span class="rf-badge">F&amp;O SURVEILLANCE</span>
+</div>""", unsafe_allow_html=True)
+    st.markdown(
+        '<div class="rf-sub">Scans all F&amp;O stocks for unusual activity — volume spikes, big moves, '
+        'options anomalies, bulk deals. Sort by flag count to spot suspicious setups.</div>',
+        unsafe_allow_html=True,
+    )
+
+    _rf_key = st.session_state.get("kite_api_key", "")
+    _rf_tok = st.session_state.get("kite_access_token", "")
+    _kite_ok = bool(_rf_key and _rf_tok)
+
+    if not _kite_ok:
+        st.info("Add Kite API Key + Access Token in the sidebar to unlock OI, IV, and PCR flags. Volume, price, and bulk deal flags run without Kite.", icon="🔑")
+
+    # ── Flag legend ──────────────────────────────────────────────────────────
+    _legend_html = '<div class="rf-legend">'
+    for _col, (_lbl, _desc, _clr) in [
+        ("_vol_spike", ("VOL_SPIKE", "Volume > 3× avg",     "#f85149")),
+        ("_big_move",  ("BIG_MOVE",  "Price move > 5%",     "#e6b800")),
+        ("_oi_spike",  ("OI_SPIKE",  "OI > 100 lots ATM",   "#d2a8ff")),
+        ("_pcr_low",   ("PCR_LOW",   "PCR < 0.5 (calls heavy)", "#ffa657")),
+        ("_pcr_high",  ("PCR_HIGH",  "PCR > 2.5 (puts heavy)",  "#79c0ff")),
+        ("_high_iv",   ("HIGH_IV",   "Straddle > 3% of spot",   "#ff7b72")),
+        ("bulk_deal",  ("BULK_DEAL", "NSE bulk deal today",      "#56d364")),
+    ]:
+        _legend_html += (
+            f'<div class="rf-leg-item">'
+            f'<span class="rf-chip rf-chip-{_lbl}" style="font-size:0.6rem;">{_lbl}</span>'
+            f'{_desc}</div>'
+        )
+    _legend_html += "</div>"
+    st.markdown(_legend_html, unsafe_allow_html=True)
+
+    # ── Controls ─────────────────────────────────────────────────────────────
+    _rfc1, _rfc2, _rfc3 = st.columns([2, 2, 6])
+    with _rfc1:
+        _rf_scan_btn = st.button("🔍 Scan All F&O", key="rf_scan", type="primary",
+                                 use_container_width=True)
+    with _rfc2:
+        _rf_clear_btn = st.button("🗑 Clear", key="rf_clear", use_container_width=True)
+
+    if _rf_clear_btn:
+        st.session_state.pop("rf_result", None)
+        st.rerun()
+
+    if _rf_scan_btn:
+        _rf_prog_bar = st.progress(0, text="Starting scan…")
+        _rf_status   = st.empty()
+
+        def _rf_progress(msg: str, pct: int):
+            _rf_prog_bar.progress(pct, text=msg)
+            _rf_status.caption(msg)
+
+        try:
+            _rf_df = _run_red_flag(
+                api_key=_rf_key,
+                access_token=_rf_tok,
+                progress_cb=_rf_progress,
+            )
+            _rf_prog_bar.progress(100, text="Done!")
+            _rf_status.empty()
+            st.session_state["rf_result"] = _rf_df
+            st.session_state["rf_scanned_at"] = datetime.datetime.now(
+                datetime.timezone(datetime.timedelta(hours=5, minutes=30))
+            )
+        except Exception as _rf_e:
+            st.error(f"Scan error: {_rf_e}")
+
+    # ── Results ───────────────────────────────────────────────────────────────
+    _rf_df   = st.session_state.get("rf_result")
+    _rf_when = st.session_state.get("rf_scanned_at")
+
+    if _rf_df is not None and not _rf_df.empty:
+        _rf_flagged = _rf_df[_rf_df["flag_count"] > 0]
+        _rf_total   = len(_rf_df)
+        _rf_n_flag  = len(_rf_flagged)
+
+        if _rf_when:
+            st.caption(f"Scanned at {_rf_when.strftime('%H:%M:%S')} IST  ·  "
+                       f"{_rf_total} stocks scanned  ·  {_rf_n_flag} flagged")
+
+        # Summary metrics
+        _sm1, _sm2, _sm3, _sm4, _sm5 = st.columns(5)
+        _sm1.metric("Total Scanned",  _rf_total)
+        _sm2.metric("Flagged",        _rf_n_flag)
+        _sm3.metric("Vol Spikes",     int(_rf_df.get("_vol_spike_count", _rf_df["flags"].apply(lambda f: "VOL_SPIKE" in f).sum()) if "_vol_spike_count" in _rf_df.columns else _rf_df["flags"].apply(lambda f: "VOL_SPIKE" in f).sum()))
+        _sm4.metric("Big Moves",      int(_rf_df["flags"].apply(lambda f: "BIG_MOVE" in f).sum()))
+        _sm5.metric("Bulk Deals",     int(_rf_df["flags"].apply(lambda f: "BULK_DEAL" in f).sum()))
+
+        # Filter
+        _all_flag_types = ["VOL_SPIKE","BIG_MOVE","OI_SPIKE","PCR_LOW","PCR_HIGH","HIGH_IV","BULK_DEAL"]
+        _rf_filter = st.multiselect(
+            "Filter by flag", _all_flag_types, default=[],
+            placeholder="Show all (no filter)",
+            key="rf_filter",
+        )
+        _display_df = _rf_df.copy()
+        if _rf_filter:
+            _display_df = _display_df[
+                _display_df["flags"].apply(lambda f: any(x in f for x in _rf_filter))
+            ]
+
+        _display_df = _display_df[_display_df["flag_count"] > 0]
+
+        if _display_df.empty:
+            st.info("No stocks match the selected flag filters.")
+        else:
+            # HTML table
+            _col_has_kite = "pcr" in _display_df.columns
+
+            _th_pcr = '<th>PCR</th><th>Straddle%</th>' if _col_has_kite else ''
+            _tbl_html = (
+                '<div class="rf-tbl-wrap">'
+                '<table class="rf-tbl">'
+                '<thead><tr>'
+                '<th>#</th><th>Symbol</th><th>Price</th><th>Chg%</th>'
+                '<th>Vol Ratio</th>' + _th_pcr +
+                '<th>Flags</th>'
+                '</tr></thead><tbody>'
+            )
+
+            for _ri, _rrow in _display_df.head(150).iterrows():
+                _rank    = int(_ri) + 1
+                _sym     = str(_rrow["symbol"])
+                _close   = f"₹{_rrow['close']:,.1f}" if "close" in _rrow else "—"
+                _chg     = _rrow.get("chg_pct", 0)
+                _chg_cls = "rf-up" if _chg >= 0 else "rf-dn"
+                _chg_str = f"{_chg:+.2f}%"
+                _vr      = _rrow.get("vol_ratio", 0)
+                _vr_str  = f"<b style='color:#f85149;'>{_vr:.1f}×</b>" if _vr > 3 else f"{_vr:.1f}×"
+                _fc      = int(_rrow.get("flag_count", 0))
+                _fc_cls  = "rf-count-hi" if _fc >= 4 else f"rf-count-{min(_fc, 3)}"
+
+                _chips = "".join(
+                    f'<span class="rf-chip rf-chip-{f}">{f}</span>'
+                    for f in _rrow.get("flags", [])
+                )
+
+                _pcr_td = ""
+                if _col_has_kite:
+                    _pcr_v = _rrow.get("pcr", 0) or 0
+                    _str_v = _rrow.get("straddle_pct", 0) or 0
+                    _pcr_col = (
+                        f"<span style='color:#ffa657;font-weight:700;'>{_pcr_v:.2f}</span>"
+                        if _pcr_v < 0.5 else
+                        f"<span style='color:#79c0ff;font-weight:700;'>{_pcr_v:.2f}</span>"
+                        if _pcr_v > 2.5 else
+                        f"{_pcr_v:.2f}"
+                    )
+                    _str_col = (
+                        f"<span style='color:#ff7b72;font-weight:700;'>{_str_v:.2f}%</span>"
+                        if _str_v > 3 else f"{_str_v:.2f}%"
+                    )
+                    _pcr_td = f"<td>{_pcr_col}</td><td>{_str_col}</td>"
+
+                _tbl_html += (
+                    f'<tr>'
+                    f'<td class="rf-neutral" style="font-size:0.75rem;">{_rank}</td>'
+                    f'<td class="rf-sym">{_sym}</td>'
+                    f'<td>{_close}</td>'
+                    f'<td class="{_chg_cls}">{_chg_str}</td>'
+                    f'<td>{_vr_str}</td>'
+                    + _pcr_td +
+                    f'<td class="{_fc_cls}" style="font-size:0.75rem;padding-right:6px;">{_fc}</td>'
+                    f'<td>{_chips}</td>'
+                    f'</tr>'
+                )
+            _tbl_html += '</tbody></table></div>'
+            st.markdown(_tbl_html, unsafe_allow_html=True)
+
+    elif _rf_df is not None and _rf_df.empty:
+        st.warning("Scan returned no data. Check API credentials and try again.")
+    else:
+        st.markdown(
+            '<div class="sa-card" style="text-align:center;padding:40px 20px;">'
+            '<div style="font-size:2.5rem;">🚨</div>'
+            '<div style="color:#6e7681;margin-top:10px;">'
+            'Click <b style="color:#f0f6fc;">Scan All F&amp;O</b> to run the red flag check<br>'
+            '<span style="font-size:0.78rem;">Takes 1–2 min · Volume &amp; price checks run without Kite</span>'
+            '</div>'
+            '</div>',
+            unsafe_allow_html=True,
+        )
+
+
 # ── Navigation ────────────────────────────────────────────────────────────────
 pg = st.navigation({
     "⚡ Live Signals": [
@@ -4884,6 +5115,7 @@ pg = st.navigation({
         st.Page(page_ma50_support,      title="50 MA Support",       icon="🛡️"),
     ],
     "🔍 Research": [
+        st.Page(page_red_flag,          title="Red Flag Radar",      icon="🚨"),
         st.Page(page_fundamentals,      title="Fundamentals",        icon="📊"),
         st.Page(page_news_breakout,     title="News + Breakout",     icon="📰"),
     ],
