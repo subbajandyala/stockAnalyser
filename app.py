@@ -48,6 +48,11 @@ from screener.gamma_blast import run_gamma_blast_scan
 from screener.oi_pulse import run_oi_pulse_scan
 from screener.red_flag import run_red_flag_scan as _run_red_flag, FLAG_DEFS as _RF_FLAG_DEFS
 from screener.rpci import run_rpci_scan as _rpci_scan, analyse_single as _rpci_detail
+from screener.elder_ray import (
+    run_elder_ray_signal, fetch_atm_option,
+    INDEX_CONFIG as _ER_INDEX_CONFIG,
+)
+from plotly.subplots import make_subplots
 
 try:
     from streamlit_autorefresh import st_autorefresh as _st_autorefresh
@@ -5385,6 +5390,418 @@ def page_rpci():
         )
 
 
+# ── Elder Ray Index Options Trading page ──────────────────────────────────────
+
+def page_elder_ray():
+    _IST_TZ = datetime.timezone(datetime.timedelta(hours=5, minutes=30))
+
+    st.markdown("""<style>
+/* Elder Ray page */
+.er-card{background:#1e222d;border:1px solid #2a2e39;border-radius:12px;padding:20px;margin-bottom:12px;}
+.er-signal-strong-ce{background:linear-gradient(135deg,rgba(0,212,170,.22),rgba(0,212,170,.08));border:1.5px solid #00d4aa;border-radius:16px;padding:26px 20px;text-align:center;}
+.er-signal-ce{background:linear-gradient(135deg,rgba(0,212,170,.13),rgba(0,212,170,.04));border:1.5px solid rgba(0,212,170,.5);border-radius:16px;padding:26px 20px;text-align:center;}
+.er-signal-strong-pe{background:linear-gradient(135deg,rgba(248,81,73,.22),rgba(248,81,73,.08));border:1.5px solid #f85149;border-radius:16px;padding:26px 20px;text-align:center;}
+.er-signal-pe{background:linear-gradient(135deg,rgba(248,81,73,.13),rgba(248,81,73,.04));border:1.5px solid rgba(248,81,73,.5);border-radius:16px;padding:26px 20px;text-align:center;}
+.er-signal-watch{background:linear-gradient(135deg,rgba(230,184,0,.15),rgba(230,184,0,.05));border:1.5px solid rgba(230,184,0,.6);border-radius:16px;padding:26px 20px;text-align:center;}
+.er-signal-wait{background:#1e222d;border:1.5px solid #2a2e39;border-radius:16px;padding:26px 20px;text-align:center;}
+.er-sig-label{font-size:2.4rem;font-weight:900;letter-spacing:-1px;margin:0;}
+.er-sig-sub{font-size:0.8rem;color:#6e7681;margin-top:6px;}
+.er-score-bar-wrap{margin:8px 0;display:flex;align-items:center;gap:8px;}
+.er-score-bar-lbl{font-size:0.72rem;font-weight:700;color:#8b949e;width:30px;text-align:right;}
+.er-score-bar-bg{flex:1;background:#0d1117;border-radius:4px;height:10px;overflow:hidden;}
+.er-score-bar-fill-ce{background:#00d4aa;border-radius:4px;height:10px;transition:width .4s;}
+.er-score-bar-fill-pe{background:#f85149;border-radius:4px;height:10px;transition:width .4s;}
+.er-score-val{font-size:0.72rem;font-weight:700;width:20px;}
+.er-factor-row{display:flex;align-items:flex-start;gap:10px;padding:7px 14px;border-bottom:1px solid rgba(42,46,57,.5);font-size:0.79rem;}
+.er-factor-row:last-child{border-bottom:none;}
+.er-factor-name{color:#c9d1d9;font-weight:600;min-width:120px;}
+.er-factor-detail{color:#8b949e;flex:1;}
+.er-factor-bull{color:#00d4aa;font-weight:700;font-size:0.7rem;min-width:44px;text-align:center;background:rgba(0,212,170,.1);border-radius:4px;padding:2px 6px;}
+.er-factor-bear{color:#f85149;font-weight:700;font-size:0.7rem;min-width:44px;text-align:center;background:rgba(248,81,73,.1);border-radius:4px;padding:2px 6px;}
+.er-factor-neut{color:#6e7681;font-weight:600;font-size:0.7rem;min-width:44px;text-align:center;background:rgba(110,118,129,.1);border-radius:4px;padding:2px 6px;}
+.er-opt-card{background:#0d1117;border:1px solid #2a2e39;border-radius:10px;padding:14px 18px;text-align:center;}
+.er-opt-label{font-size:0.63rem;font-weight:800;letter-spacing:1.2px;text-transform:uppercase;margin-bottom:6px;}
+.er-opt-ltp{font-size:1.85rem;font-weight:800;}
+.er-opt-meta{font-size:0.72rem;color:#6e7681;margin-top:4px;}
+.er-hist-row{display:flex;align-items:center;gap:10px;padding:6px 14px;border-bottom:1px solid rgba(42,46,57,.4);font-size:0.78rem;}
+.er-hist-row:last-child{border-bottom:none;}
+</style>""", unsafe_allow_html=True)
+
+    st.markdown(
+        '<h2 style="font-size:1.6rem;font-weight:800;margin:0 0 4px;">⚡ Elder Ray Index Trader</h2>'
+        '<p style="color:#6e7681;font-size:0.82rem;margin-bottom:18px;">Multi-timeframe ATM options signal engine · NIFTY · BANKNIFTY · SENSEX</p>',
+        unsafe_allow_html=True,
+    )
+
+    # ── Sidebar / controls ────────────────────────────────────────────────────
+    col_sym, col_tf, col_ref, col_auto = st.columns([2, 2, 1.2, 1.8])
+    with col_sym:
+        er_symbol = st.selectbox("Index", list(_ER_INDEX_CONFIG.keys()), key="er_symbol")
+    with col_tf:
+        er_chart_tf = st.selectbox("Chart timeframe", ["5m", "15m", "1m"], key="er_chart_tf")
+    with col_ref:
+        er_refresh = st.button("🔄 Refresh", key="er_refresh")
+    with col_auto:
+        er_auto = False
+        if _HAS_AUTOREFRESH:
+            er_auto = st.checkbox("Auto-refresh 60s", key="er_auto")
+            if er_auto:
+                _st_autorefresh(interval=60_000, key="er_autorefresh")
+
+    # Kite credentials (from sidebar session state already set elsewhere)
+    _kite_key  = st.session_state.get("kite_api_key", "")
+    _kite_tok  = st.session_state.get("kite_access_token", "")
+    _kite_ok   = bool(_kite_key and _kite_tok)
+
+    # ── Run / cache signal ────────────────────────────────────────────────────
+    _er_cache_key = f"er_result_{er_symbol}"
+    if er_refresh or _er_cache_key not in st.session_state:
+        with st.spinner(f"Fetching Elder Ray data for {er_symbol} …"):
+            _er_res = run_elder_ray_signal(er_symbol)
+        st.session_state[_er_cache_key] = _er_res
+
+        # Track signal history (last 8)
+        _hist_key = f"er_hist_{er_symbol}"
+        _hist = st.session_state.get(_hist_key, [])
+        if not _er_res.get("error"):
+            _hist.insert(0, {
+                "time":   datetime.datetime.now(_IST_TZ).strftime("%H:%M:%S"),
+                "signal": _er_res.get("signal", "WAIT"),
+                "ce":     _er_res.get("score_ce", 0),
+                "pe":     _er_res.get("score_pe", 0),
+                "price":  _er_res.get("price", 0),
+            })
+            st.session_state[_hist_key] = _hist[:8]
+
+    _er_res = st.session_state.get(_er_cache_key, {})
+
+    if _er_res.get("error"):
+        st.error(f"Data error: {_er_res['error']}")
+        return
+
+    signal    = _er_res.get("signal",    "WAIT")
+    direction = _er_res.get("direction")
+    sce       = _er_res.get("score_ce",  0)
+    spe       = _er_res.get("score_pe",  0)
+    price     = _er_res.get("price",     0)
+    ema5      = _er_res.get("ema_5m",    0)
+    rsi5      = _er_res.get("rsi_5m",    50)
+    vwap5     = _er_res.get("vwap_5m",   0)
+    bull5     = _er_res.get("bull5",     0)
+    bear5     = _er_res.get("bear5",     0)
+    atm       = _er_res.get("atm",       0)
+    lot       = _er_res.get("lot_size",  25)
+    factors   = _er_res.get("factors",   [])
+    ist_now   = _er_res.get("ist_now",   datetime.datetime.now(_IST_TZ))
+    df_15m    = _er_res.get("df_15m",    pd.DataFrame())
+    df_5m     = _er_res.get("df_5m",     pd.DataFrame())
+    df_1m     = _er_res.get("df_1m",     pd.DataFrame())
+
+    cfg_color = _ER_INDEX_CONFIG.get(er_symbol, {}).get("color", "#00d4aa")
+
+    # ── Signal card ───────────────────────────────────────────────────────────
+    _sig_css_map = {
+        "STRONG BUY CE": "er-signal-strong-ce",
+        "BUY CE":        "er-signal-ce",
+        "STRONG BUY PE": "er-signal-strong-pe",
+        "BUY PE":        "er-signal-pe",
+        "WATCH":         "er-signal-watch",
+        "WAIT":          "er-signal-wait",
+    }
+    _sig_color_map = {
+        "STRONG BUY CE": "#00d4aa",
+        "BUY CE":        "#00d4aa",
+        "STRONG BUY PE": "#f85149",
+        "BUY PE":        "#f85149",
+        "WATCH":         "#e6b800",
+        "WAIT":          "#6e7681",
+    }
+    _sig_css   = _sig_css_map.get(signal, "er-signal-wait")
+    _sig_color = _sig_color_map.get(signal, "#6e7681")
+    _updated   = ist_now.strftime("%H:%M:%S IST")
+
+    col_sig, col_scores = st.columns([1, 1])
+
+    with col_sig:
+        _max_score = 13
+        _ce_pct    = min(100, round(sce / _max_score * 100))
+        _pe_pct    = min(100, round(spe / _max_score * 100))
+
+        st.markdown(
+            f'<div class="{_sig_css}">'
+            f'  <div class="er-sig-label" style="color:{_sig_color};">{signal}</div>'
+            f'  <div class="er-sig-sub">'
+            f'    ATM {atm:,} · Lot {lot} · Updated {_updated}'
+            f'  </div>'
+            f'  <div style="margin-top:14px;">'
+            f'    <div class="er-score-bar-wrap">'
+            f'      <span class="er-score-bar-lbl" style="color:#00d4aa;">CE</span>'
+            f'      <div class="er-score-bar-bg">'
+            f'        <div class="er-score-bar-fill-ce" style="width:{_ce_pct}%;"></div>'
+            f'      </div>'
+            f'      <span class="er-score-val" style="color:#00d4aa;">{sce}</span>'
+            f'    </div>'
+            f'    <div class="er-score-bar-wrap">'
+            f'      <span class="er-score-bar-lbl" style="color:#f85149;">PE</span>'
+            f'      <div class="er-score-bar-bg">'
+            f'        <div class="er-score-bar-fill-pe" style="width:{_pe_pct}%;"></div>'
+            f'      </div>'
+            f'      <span class="er-score-val" style="color:#f85149;">{spe}</span>'
+            f'    </div>'
+            f'  </div>'
+            f'</div>',
+            unsafe_allow_html=True,
+        )
+
+    with col_scores:
+        _vwap_vs = "ABOVE" if price > vwap5 else "BELOW"
+        _vwap_col = "#00d4aa" if price > vwap5 else "#f85149"
+        _rsi_col  = "#00d4aa" if rsi5 > 55 else ("#f85149" if rsi5 < 45 else "#e6b800")
+        _bull_col = "#00d4aa" if bull5 > 0 else "#f85149"
+        _bear_col = "#00d4aa" if bear5 > 0 else "#f85149"
+        st.markdown(
+            f'<div class="er-card" style="padding:14px 18px;">'
+            f'  <div style="font-size:0.63rem;font-weight:800;letter-spacing:1.2px;color:#6e7681;margin-bottom:10px;">LIVE INDICATORS</div>'
+            f'  <div style="display:flex;flex-direction:column;gap:8px;">'
+            f'    <div style="display:flex;justify-content:space-between;font-size:0.82rem;">'
+            f'      <span style="color:#8b949e;">Price</span>'
+            f'      <span style="color:#f0f6fc;font-weight:700;">{price:,.2f}</span></div>'
+            f'    <div style="display:flex;justify-content:space-between;font-size:0.82rem;">'
+            f'      <span style="color:#8b949e;">EMA 13 (5m)</span>'
+            f'      <span style="color:{cfg_color};font-weight:600;">{ema5:,.2f}</span></div>'
+            f'    <div style="display:flex;justify-content:space-between;font-size:0.82rem;">'
+            f'      <span style="color:#8b949e;">VWAP</span>'
+            f'      <span style="color:{_vwap_col};font-weight:600;">{_vwap_vs} {vwap5:,.2f}</span></div>'
+            f'    <div style="display:flex;justify-content:space-between;font-size:0.82rem;">'
+            f'      <span style="color:#8b949e;">RSI (5m)</span>'
+            f'      <span style="color:{_rsi_col};font-weight:600;">{rsi5:.1f}</span></div>'
+            f'    <div style="display:flex;justify-content:space-between;font-size:0.82rem;">'
+            f'      <span style="color:#8b949e;">Bull Power</span>'
+            f'      <span style="color:{_bull_col};font-weight:600;">{bull5:+.2f}</span></div>'
+            f'    <div style="display:flex;justify-content:space-between;font-size:0.82rem;">'
+            f'      <span style="color:#8b949e;">Bear Power</span>'
+            f'      <span style="color:{_bear_col};font-weight:600;">{bear5:+.2f}</span></div>'
+            f'  </div>'
+            f'</div>',
+            unsafe_allow_html=True,
+        )
+
+    st.markdown("<br>", unsafe_allow_html=True)
+
+    # ── Elder Ray chart ───────────────────────────────────────────────────────
+    _tf_map = {"5m": df_5m, "15m": df_15m, "1m": df_1m}
+    df_chart = _tf_map.get(er_chart_tf, df_5m)
+
+    if not df_chart.empty:
+        _fig = make_subplots(
+            rows=2, cols=1,
+            shared_xaxes=True,
+            row_heights=[0.65, 0.35],
+            vertical_spacing=0.04,
+            subplot_titles=["", "Elder Ray: Bull / Bear Power"],
+        )
+
+        # ── Candlestick ───────────────────────────────────────────────────────
+        _fig.add_trace(go.Candlestick(
+            x=df_chart.index,
+            open=df_chart["Open"], high=df_chart["High"],
+            low=df_chart["Low"],   close=df_chart["Close"],
+            increasing_line_color="#00d4aa", decreasing_line_color="#f85149",
+            increasing_fillcolor="#00d4aa",  decreasing_fillcolor="#f85149",
+            line_width=1,
+            name="Price",
+        ), row=1, col=1)
+
+        # EMA(13)
+        if "EMA" in df_chart.columns:
+            _fig.add_trace(go.Scatter(
+                x=df_chart.index, y=df_chart["EMA"],
+                line=dict(color=cfg_color, width=1.5),
+                name="EMA 13",
+            ), row=1, col=1)
+
+        # VWAP
+        if "VWAP" in df_chart.columns:
+            _fig.add_trace(go.Scatter(
+                x=df_chart.index, y=df_chart["VWAP"],
+                line=dict(color="#e6b800", width=1.2, dash="dot"),
+                name="VWAP",
+            ), row=1, col=1)
+
+        # ── Bull Power / Bear Power histogram ─────────────────────────────────
+        if "Bull_Power" in df_chart.columns and "Bear_Power" in df_chart.columns:
+            _bp_colors  = ["#00d4aa" if v >= 0 else "#f85149" for v in df_chart["Bull_Power"]]
+            _bep_colors = ["#00d4aa" if v >= 0 else "#f85149" for v in df_chart["Bear_Power"]]
+
+            _fig.add_trace(go.Bar(
+                x=df_chart.index,
+                y=df_chart["Bull_Power"],
+                marker_color=_bp_colors,
+                marker_opacity=0.85,
+                name="Bull Power",
+                showlegend=True,
+            ), row=2, col=1)
+
+            _fig.add_trace(go.Bar(
+                x=df_chart.index,
+                y=df_chart["Bear_Power"],
+                marker_color=_bep_colors,
+                marker_opacity=0.55,
+                name="Bear Power",
+                showlegend=True,
+            ), row=2, col=1)
+
+            # Zero line
+            _fig.add_hline(y=0, line_dash="solid", line_color="#6e7681",
+                           line_width=1, row=2, col=1)
+
+        _fig.update_layout(
+            height=540,
+            paper_bgcolor="#131722",
+            plot_bgcolor="#131722",
+            font=dict(color="#c9d1d9", size=11),
+            margin=dict(l=8, r=8, t=30, b=8),
+            showlegend=True,
+            legend=dict(
+                orientation="h", yanchor="bottom", y=1.01,
+                xanchor="left", x=0,
+                bgcolor="rgba(0,0,0,0)",
+                font=dict(size=10),
+            ),
+            xaxis_rangeslider_visible=False,
+            barmode="overlay",
+        )
+        _fig.update_xaxes(
+            gridcolor="#1e222d", showgrid=True,
+            tickfont=dict(size=9), zeroline=False,
+        )
+        _fig.update_yaxes(
+            gridcolor="#1e222d", showgrid=True,
+            tickfont=dict(size=9), zeroline=False,
+        )
+
+        st.plotly_chart(_fig, use_container_width=True, config={"displayModeBar": False})
+    else:
+        st.info(f"No {er_chart_tf} data available. Market may be closed or outside trading hours.")
+
+    # ── Factor breakdown ──────────────────────────────────────────────────────
+    st.markdown('<div style="font-size:0.63rem;font-weight:800;letter-spacing:1.2px;color:#6e7681;margin:8px 0 6px;">SIGNAL BREAKDOWN</div>', unsafe_allow_html=True)
+    _factor_html = '<div class="er-card" style="padding:0;">'
+    for _fname, _fdetail, _fdir, _fpts in factors:
+        _dir_css = "er-factor-bull" if _fdir == "BULL" else ("er-factor-bear" if _fdir == "BEAR" else "er-factor-neut")
+        _pts_str = f"+{_fpts}" if _fpts > 0 else str(_fpts)
+        _pts_label = f"{_fdir} {_pts_str}" if _fpts > 0 else _fdir
+        _factor_html += (
+            f'<div class="er-factor-row">'
+            f'  <span class="er-factor-name">{_fname}</span>'
+            f'  <span class="er-factor-detail">{_fdetail}</span>'
+            f'  <span class="{_dir_css}">{_pts_label}</span>'
+            f'</div>'
+        )
+    _factor_html += '</div>'
+    st.markdown(_factor_html, unsafe_allow_html=True)
+
+    st.markdown("<br>", unsafe_allow_html=True)
+
+    # ── ATM option card (Kite) ────────────────────────────────────────────────
+    col_opt_hdr, col_opt_btn = st.columns([3, 1])
+    with col_opt_hdr:
+        st.markdown(
+            '<div style="font-size:0.63rem;font-weight:800;letter-spacing:1.2px;color:#6e7681;margin-bottom:6px;">ATM OPTIONS · LIVE QUOTES</div>',
+            unsafe_allow_html=True,
+        )
+    with col_opt_btn:
+        _fetch_opt = st.button("Fetch Kite Quotes", key="er_fetch_opt", disabled=not _kite_ok)
+
+    if not _kite_ok:
+        st.caption("Connect Zerodha Kite in the sidebar to fetch live option quotes.")
+    else:
+        _opt_cache_key = f"er_opt_{er_symbol}"
+        if _fetch_opt or _opt_cache_key not in st.session_state:
+            with st.spinner("Fetching ATM option quotes …"):
+                _opt_data = fetch_atm_option(_kite_key, _kite_tok, er_symbol, price)
+            st.session_state[_opt_cache_key] = _opt_data
+
+        _opt_data = st.session_state.get(_opt_cache_key)
+
+        if _opt_data:
+            _exp_str = _opt_data.get("expiry_str", "")
+            _pcr     = _opt_data.get("pcr", 0)
+            _ce      = _opt_data.get("ce") or {}
+            _pe      = _opt_data.get("pe") or {}
+            _pcr_col = "#00d4aa" if _pcr > 1.2 else ("#f85149" if _pcr < 0.8 else "#e6b800")
+
+            col_ce, col_pe, col_pcr = st.columns([2, 2, 1])
+            with col_ce:
+                _chg_col = "#00d4aa" if _ce.get("chg_pct", 0) >= 0 else "#f85149"
+                st.markdown(
+                    f'<div class="er-opt-card">'
+                    f'  <div class="er-opt-label" style="color:#00d4aa;">ATM {atm} CE · {_exp_str}</div>'
+                    f'  <div class="er-opt-ltp" style="color:#00d4aa;">₹{_ce.get("ltp",0):,.2f}</div>'
+                    f'  <div class="er-opt-meta">'
+                    f'    <span style="color:{_chg_col};">{_ce.get("chg_pct",0):+.2f}%</span> &nbsp;|&nbsp; '
+                    f'    OI: {_ce.get("oi",0):,} &nbsp;|&nbsp; '
+                    f'    IV: {_ce.get("iv",0):.1f}%'
+                    f'  </div>'
+                    f'  <div style="font-size:0.67rem;color:#6e7681;margin-top:4px;">{_ce.get("symbol","")}</div>'
+                    f'</div>',
+                    unsafe_allow_html=True,
+                )
+            with col_pe:
+                _chg_col_pe = "#00d4aa" if _pe.get("chg_pct", 0) >= 0 else "#f85149"
+                st.markdown(
+                    f'<div class="er-opt-card">'
+                    f'  <div class="er-opt-label" style="color:#f85149;">ATM {atm} PE · {_exp_str}</div>'
+                    f'  <div class="er-opt-ltp" style="color:#f85149;">₹{_pe.get("ltp",0):,.2f}</div>'
+                    f'  <div class="er-opt-meta">'
+                    f'    <span style="color:{_chg_col_pe};">{_pe.get("chg_pct",0):+.2f}%</span> &nbsp;|&nbsp; '
+                    f'    OI: {_pe.get("oi",0):,} &nbsp;|&nbsp; '
+                    f'    IV: {_pe.get("iv",0):.1f}%'
+                    f'  </div>'
+                    f'  <div style="font-size:0.67rem;color:#6e7681;margin-top:4px;">{_pe.get("symbol","")}</div>'
+                    f'</div>',
+                    unsafe_allow_html=True,
+                )
+            with col_pcr:
+                st.markdown(
+                    f'<div class="er-opt-card">'
+                    f'  <div class="er-opt-label" style="color:#6e7681;">PCR (ATM)</div>'
+                    f'  <div class="er-opt-ltp" style="color:{_pcr_col};font-size:2rem;">{_pcr:.2f}</div>'
+                    f'  <div class="er-opt-meta">'
+                    f'    {"Bullish" if _pcr>1.2 else ("Bearish" if _pcr<0.8 else "Neutral")}'
+                    f'  </div>'
+                    f'</div>',
+                    unsafe_allow_html=True,
+                )
+        elif _opt_data is None:
+            st.warning("Could not fetch option quotes. Check Kite API credentials or try later.")
+
+    st.markdown("<br>", unsafe_allow_html=True)
+
+    # ── Signal history ────────────────────────────────────────────────────────
+    _hist_key  = f"er_hist_{er_symbol}"
+    _hist_data = st.session_state.get(_hist_key, [])
+    if _hist_data:
+        st.markdown(
+            '<div style="font-size:0.63rem;font-weight:800;letter-spacing:1.2px;color:#6e7681;margin-bottom:6px;">SIGNAL HISTORY (this session)</div>',
+            unsafe_allow_html=True,
+        )
+        _hist_html = '<div class="er-card" style="padding:0;">'
+        for _h in _hist_data:
+            _hsig   = _h["signal"]
+            _hcol   = "#00d4aa" if "CE" in _hsig else ("#f85149" if "PE" in _hsig else "#e6b800")
+            _hist_html += (
+                f'<div class="er-hist-row">'
+                f'  <span style="color:#6e7681;min-width:70px;">{_h["time"]}</span>'
+                f'  <span style="color:{_hcol};font-weight:700;min-width:140px;">{_hsig}</span>'
+                f'  <span style="color:#8b949e;font-size:0.72rem;">CE {_h["ce"]} / PE {_h["pe"]}</span>'
+                f'  <span style="color:#6e7681;margin-left:auto;font-size:0.72rem;">{_h["price"]:,.2f}</span>'
+                f'</div>'
+            )
+        _hist_html += '</div>'
+        st.markdown(_hist_html, unsafe_allow_html=True)
+
+
 # ── Navigation ────────────────────────────────────────────────────────────────
 pg = st.navigation({
     "⚡ Live Signals": [
@@ -5392,6 +5809,7 @@ pg = st.navigation({
         st.Page(page_smart_alerts_pro,  title="Smart Alerts Pro",    icon="⚡"),
         st.Page(page_gamma_blast,       title="Expiry Gamma Blast",  icon="💥"),
         st.Page(page_oi_pulse,          title="Intraday OI Pulse",   icon="📡"),
+        st.Page(page_elder_ray,         title="Elder Ray Trader",    icon="🎯"),
     ],
     "📊 Index & Options": [
         st.Page(page_option_chain,      title="Option Chain",        icon="🔗"),
