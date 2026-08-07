@@ -4905,6 +4905,12 @@ def page_red_flag():
 .rf-up{color:#00d4aa;font-weight:600;}
 .rf-dn{color:#f85149;font-weight:600;}
 .rf-neutral{color:#6e7681;}
+/* Trade signal badges */
+.rf-trade-sce{display:inline-block;background:rgba(0,212,170,.22);color:#00d4aa;border:1px solid #00d4aa;font-size:0.65rem;font-weight:800;padding:3px 8px;border-radius:6px;letter-spacing:.6px;white-space:nowrap;}
+.rf-trade-ce{display:inline-block;background:rgba(0,212,170,.1);color:#00d4aa;border:1px solid rgba(0,212,170,.5);font-size:0.65rem;font-weight:700;padding:3px 8px;border-radius:6px;white-space:nowrap;}
+.rf-trade-spe{display:inline-block;background:rgba(248,81,73,.22);color:#f85149;border:1px solid #f85149;font-size:0.65rem;font-weight:800;padding:3px 8px;border-radius:6px;letter-spacing:.6px;white-space:nowrap;}
+.rf-trade-pe{display:inline-block;background:rgba(248,81,73,.1);color:#f85149;border:1px solid rgba(248,81,73,.5);font-size:0.65rem;font-weight:700;padding:3px 8px;border-radius:6px;white-space:nowrap;}
+.rf-trade-watch{display:inline-block;background:rgba(110,118,129,.12);color:#8b949e;border:1px solid #2a2e39;font-size:0.65rem;font-weight:600;padding:3px 8px;border-radius:6px;white-space:nowrap;}
 /* Legend */
 .rf-legend{display:flex;flex-wrap:wrap;gap:8px;padding:12px 0 4px;}
 .rf-leg-item{display:flex;align-items:center;gap:5px;font-size:0.73rem;color:#8b949e;}
@@ -5032,6 +5038,7 @@ def page_red_flag():
                 '<thead><tr>'
                 '<th>#</th><th>Symbol</th><th>Price</th><th>Chg%</th>'
                 '<th>Vol Ratio</th>' + _th_pcr +
+                '<th>Trade</th>'
                 '<th>Flags</th>'
                 '</tr></thead><tbody>'
             )
@@ -5070,6 +5077,16 @@ def page_red_flag():
                     )
                     _pcr_td = f"<td>{_pcr_col}</td><td>{_str_col}</td>"
 
+                _trade    = str(_rrow.get("trade", "WATCH"))
+                _trade_css = {
+                    "STRONG CE": "rf-trade-sce",
+                    "BUY CE":    "rf-trade-ce",
+                    "STRONG PE": "rf-trade-spe",
+                    "BUY PE":    "rf-trade-pe",
+                    "WATCH":     "rf-trade-watch",
+                }.get(_trade, "rf-trade-watch")
+                _trade_td = f'<span class="{_trade_css}">{_trade}</span>'
+
                 _tbl_html += (
                     f'<tr>'
                     f'<td class="rf-neutral" style="font-size:0.75rem;">{_rank}</td>'
@@ -5078,6 +5095,7 @@ def page_red_flag():
                     f'<td class="{_chg_cls}">{_chg_str}</td>'
                     f'<td>{_vr_str}</td>'
                     + _pcr_td +
+                    f'<td>{_trade_td}</td>'
                     f'<td class="{_fc_cls}" style="font-size:0.75rem;padding-right:6px;">{_fc}</td>'
                     f'<td>{_chips}</td>'
                     f'</tr>'

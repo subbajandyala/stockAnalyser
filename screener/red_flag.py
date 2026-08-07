@@ -325,6 +325,55 @@ def run_red_flag_scan(
     merged["flags"]      = merged.apply(_build_flags, axis=1)
     merged["flag_count"] = merged["flags"].apply(len)
 
+    def _trade_signal(row) -> str:
+        """Derive CE / PE / WATCH from flag combination + price direction."""
+        flags = set(row.get("flags", []))
+        chg   = float(row.get("chg_pct", 0) or 0)
+
+        bull = 0
+        bear = 0
+
+        # PCR — strongest directional signal
+        if "PCR_HIGH" in flags:
+            bull += 2   # heavy put writing = smart money bullish
+        if "PCR_LOW" in flags:
+            bear += 2   # heavy call side   = bearish positioning
+
+        # Big price move — direction = price direction
+        if "BIG_MOVE" in flags:
+            if chg > 0:
+                bull += 2
+            else:
+                bear += 2
+
+        # Volume spike — weight by price direction
+        if "VOL_SPIKE" in flags:
+            if chg > 0:
+                bull += 1
+            else:
+                bear += 1
+
+        # Bulk deal → typically institutional accumulation
+        if "BULK_DEAL" in flags:
+            bull += 1
+
+        # OI spike alone without PCR is ambiguous — neutral
+
+        if bull == 0 and bear == 0:
+            return "WATCH"
+        diff = bull - bear
+        if diff >= 3:
+            return "STRONG CE"
+        if diff >= 1:
+            return "BUY CE"
+        if diff <= -3:
+            return "STRONG PE"
+        if diff <= -1:
+            return "BUY PE"
+        return "WATCH"
+
+    merged["trade"] = merged.apply(_trade_signal, axis=1)
+
     merged = merged.drop(
         columns=[c for c in FLAG_DEFS if c in merged.columns],
         errors="ignore",
