@@ -4928,9 +4928,22 @@ def page_red_flag():
         unsafe_allow_html=True,
     )
 
-    _rf_key = st.session_state.get("kite_api_key", "")
-    _rf_tok = st.session_state.get("kite_access_token", "")
+    _rf_key  = st.session_state.get("kite_api_key", "")
+    _rf_tok  = st.session_state.get("kite_access_token", "")
     _kite_ok = bool(_rf_key and _rf_tok)
+
+    # ── Auto-refresh every 30 s ───────────────────────────────────────────────
+    _rf_tick = 0
+    if _HAS_AUTOREFRESH:
+        _rf_tick = _st_autorefresh(interval=30_000, key="rf_autorefresh")
+
+    # Detect genuine auto-refresh ticks (counter changed) vs user interactions
+    _rf_prev_tick = st.session_state.get("rf_prev_tick", -1)
+    _rf_is_tick   = _rf_tick != _rf_prev_tick
+    st.session_state["rf_prev_tick"] = _rf_tick
+
+    # Auto-scan: on first load (no prior result) or on each 30 s tick
+    _rf_auto_trigger = _rf_is_tick or st.session_state.get("rf_result") is None
 
     if not _kite_ok:
         st.info("Add Kite API Key + Access Token in the sidebar to unlock OI, IV, and PCR flags. Volume, price, and bulk deal flags run without Kite.", icon="🔑")
@@ -4955,19 +4968,33 @@ def page_red_flag():
     st.markdown(_legend_html, unsafe_allow_html=True)
 
     # ── Controls ─────────────────────────────────────────────────────────────
-    _rfc1, _rfc2, _rfc3 = st.columns([2, 2, 6])
+    _rfc1, _rfc2, _rfc3, _rfc4 = st.columns([2, 1.5, 1.5, 5])
     with _rfc1:
-        _rf_scan_btn = st.button("🔍 Scan All F&O", key="rf_scan", type="primary",
+        _rf_scan_btn = st.button("🔍 Scan Now", key="rf_scan", type="primary",
                                  use_container_width=True)
     with _rfc2:
         _rf_clear_btn = st.button("🗑 Clear", key="rf_clear", use_container_width=True)
+    with _rfc3:
+        _rf_auto_badge = (
+            '<span style="display:inline-block;background:rgba(0,212,170,.15);'
+            'color:#00d4aa;border:1px solid rgba(0,212,170,.4);'
+            'font-size:0.65rem;font-weight:700;padding:4px 10px;border-radius:6px;">'
+            '⟳ AUTO 30s</span>'
+            if _HAS_AUTOREFRESH else
+            '<span style="display:inline-block;color:#6e7681;font-size:0.72rem;">'
+            'Install streamlit-autorefresh for auto-refresh</span>'
+        )
+        st.markdown(_rf_auto_badge, unsafe_allow_html=True)
 
     if _rf_clear_btn:
         st.session_state.pop("rf_result", None)
+        st.session_state.pop("rf_scanned_at", None)
         st.rerun()
 
-    if _rf_scan_btn:
-        _rf_prog_bar = st.progress(0, text="Starting scan…")
+    _rf_should_scan = _rf_scan_btn or _rf_auto_trigger
+
+    if _rf_should_scan:
+        _rf_prog_bar = st.progress(0, text="Scanning F&O stocks…")
         _rf_status   = st.empty()
 
         def _rf_progress(msg: str, pct: int):
