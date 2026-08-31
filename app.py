@@ -5150,7 +5150,6 @@ def page_red_flag():
 def page_rpci():
     _IST_TZ = datetime.timezone(datetime.timedelta(hours=5, minutes=30))
 
-    # Condition abbreviations matching rpci.stratlab.in
     _ABBR = {
         "Valuation":             "VAL",
         "Earnings Power":        "ERN",
@@ -5164,6 +5163,14 @@ def page_rpci():
         "Stage Analysis":        "STG",
         "Dow Theory (W)":        "DOW",
     }
+    _COND_FULL = {
+        "VAL": "1. VALUATION",      "ERN": "2. EARNINGS POWER",
+        "MOM": "3. MOMENTUM",       "CON": "4. PRICE CONTRACTION",
+        "TFA": "5. TIMEFRAME ALIGNMENT", "OPF": "6. OUTPERFORMANCE",
+        "INS": "7. INSTITUTIONAL CANDLES", "STX": "8. SHORT-TERM EXTENSION",
+        "LTX": "9. LONG-TERM EXTENSION", "STG": "10. STAGE ANALYSIS",
+        "DOW": "11. DOW THEORY (W)",
+    }
     _LABEL_CLS = {
         "Strongly favourable": ("rpci-lbl-sf", "#00d4aa"),
         "Favourable":          ("rpci-lbl-fv", "#64dd17"),
@@ -5171,16 +5178,60 @@ def page_rpci():
         "Unfavourable":        ("rpci-lbl-uf", "#f85149"),
     }
 
+    def _to_sector(industry: str) -> str:
+        ind = str(industry).lower()
+        if any(k in ind for k in ["pharma", "hospital", "medical", "health", "diagnostic", "biotech"]):
+            return "Healthcare"
+        if any(k in ind for k in ["bank", "finance", "insurance", "nbfc", "financial", "leasing", "brokerage", "investment", "asset management"]):
+            return "Financial Services"
+        if any(k in ind for k in ["software", "it ", "computer", "technology", "saas", "information technology"]):
+            return "Information Technology"
+        if any(k in ind for k in ["fmcg", "personal care", "household", "tobacco", "edible"]):
+            return "Fast Moving Consumer Goods"
+        if any(k in ind for k in ["food", "beverage", "consumer food"]):
+            return "Fast Moving Consumer Goods"
+        if any(k in ind for k in ["automobile", "auto", "vehicle", "tyre", "2 wheeler", "4 wheeler"]):
+            return "Consumer Discretionary"
+        if any(k in ind for k in ["retail", "hotel", "media", "entertainment", "textile", "fashion", "apparel", "travel", "tourism"]):
+            return "Consumer Discretionary"
+        if any(k in ind for k in ["oil", "gas", "petroleum", "refinery", "energy"]):
+            return "Energy"
+        if any(k in ind for k in ["power", "electricity", "utility", "transmission", "renewable"]):
+            return "Utilities"
+        if any(k in ind for k in ["cement", "steel", "metal", "mining", "chemical", "fertiliser", "paper", "material", "plastic"]):
+            return "Materials"
+        if any(k in ind for k in ["telecom", "communication", "broadband"]):
+            return "Telecommunication"
+        if any(k in ind for k in ["real estate", "realty", "construction"]):
+            return "Real Estate"
+        if any(k in ind for k in ["engineering", "capital goods", "defence", "aerospace", "industrial", "machinery", "infrastructure"]):
+            return "Industrials"
+        return "Diversified"
+
     st.markdown("""<style>
 /* RPCI dashboard */
 .rpci-stat-card{background:#1e222d;border:1px solid #2a2e39;border-radius:10px;padding:14px 18px;text-align:center;}
 .rpci-stat-val{font-size:1.7rem;font-weight:800;color:#f0f6fc;line-height:1.1;}
 .rpci-stat-lbl{font-size:0.63rem;font-weight:700;color:#6e7681;letter-spacing:.8px;text-transform:uppercase;margin-top:4px;}
 .rpci-stat-sub{font-size:0.68rem;color:#8b949e;margin-top:2px;}
-/* Score tabs */
-.rpci-tabs{display:flex;gap:6px;margin:14px 0 10px;}
-.rpci-tab{padding:5px 16px;border-radius:6px;font-size:0.75rem;font-weight:700;cursor:pointer;border:1px solid #2a2e39;color:#8b949e;background:#1e222d;}
-.rpci-tab-active{background:#00d4aa;color:#0d1117;border-color:#00d4aa;}
+/* Sector cards */
+.rpci-sec-grid{display:flex;flex-wrap:wrap;gap:10px;margin:10px 0 16px;}
+.rpci-sec-card{background:#1e222d;border:1px solid #2a2e39;border-radius:10px;padding:12px 14px;min-width:150px;flex:1;cursor:pointer;transition:border-color .2s;}
+.rpci-sec-card:hover{border-color:#00d4aa;}
+.rpci-sec-card.selected{border-color:#00d4aa;background:rgba(0,212,170,.07);}
+.rpci-sec-name{font-size:0.7rem;font-weight:700;color:#8b949e;text-transform:uppercase;letter-spacing:.5px;margin-bottom:4px;}
+.rpci-sec-score{font-size:1.4rem;font-weight:800;color:#f0f6fc;line-height:1;}
+.rpci-sec-delta{font-size:0.7rem;font-weight:600;margin-left:5px;}
+.rpci-sec-sub{font-size:0.67rem;color:#6e7681;margin-top:3px;}
+/* What moved */
+.rpci-mv-up{background:rgba(0,212,170,.07);border:1px solid rgba(0,212,170,.25);border-radius:8px;padding:10px 14px;margin-bottom:6px;}
+.rpci-mv-dn{background:rgba(248,81,73,.07);border:1px solid rgba(248,81,73,.2);border-radius:8px;padding:10px 14px;margin-bottom:6px;}
+.rpci-mv-sym{font-weight:800;font-size:.9rem;color:#f0f6fc;}
+.rpci-mv-arr{font-weight:700;color:#8b949e;font-size:.8rem;margin:0 4px;}
+.rpci-mv-badge{font-size:.62rem;font-weight:800;padding:2px 7px;border-radius:4px;letter-spacing:.5px;}
+.rpci-mv-badge-up{background:rgba(0,212,170,.2);color:#00d4aa;border:1px solid rgba(0,212,170,.4);}
+.rpci-mv-badge-dn{background:rgba(248,81,73,.15);color:#f85149;border:1px solid rgba(248,81,73,.35);}
+.rpci-mv-cond{font-size:.68rem;color:#8b949e;margin-top:3px;}
 /* Condition pass-rate bar */
 .rpci-pbar-wrap{margin:4px 0;display:flex;align-items:center;gap:8px;}
 .rpci-pbar-lbl{font-size:0.67rem;font-weight:700;color:#c9d1d9;width:30px;text-align:right;}
@@ -5188,12 +5239,12 @@ def page_rpci():
 .rpci-pbar-fill{background:#00d4aa;border-radius:3px;height:8px;}
 .rpci-pbar-pct{font-size:0.67rem;color:#8b949e;width:34px;}
 /* Condition blocks */
-.rpci-blk-pass{display:inline-block;width:13px;height:13px;background:#00d4aa;border-radius:2px;margin:1px;vertical-align:middle;title:attr(title);}
+.rpci-blk-pass{display:inline-block;width:13px;height:13px;background:#00d4aa;border-radius:2px;margin:1px;vertical-align:middle;}
 .rpci-blk-fail{display:inline-block;width:13px;height:13px;background:#21262d;border:1px solid #2a2e39;border-radius:2px;margin:1px;vertical-align:middle;}
 /* Results table */
 .rpci-tbl-wrap{width:100%;overflow-x:auto;border-radius:10px;border:1px solid #21262d;margin:10px 0;}
 .rpci-tbl{width:100%;border-collapse:collapse;font-size:0.78rem;}
-.rpci-tbl th{background:#0d1117;color:#6e7681;font-size:0.62rem;font-weight:700;letter-spacing:.6px;padding:7px 10px;text-transform:uppercase;border-bottom:1px solid #21262d;white-space:nowrap;text-align:left;cursor:pointer;}
+.rpci-tbl th{background:#0d1117;color:#6e7681;font-size:0.62rem;font-weight:700;letter-spacing:.6px;padding:7px 10px;text-transform:uppercase;border-bottom:1px solid #21262d;white-space:nowrap;text-align:left;}
 .rpci-tbl td{padding:5px 10px;border-bottom:1px solid #161b22;white-space:nowrap;color:#c9d1d9;vertical-align:middle;}
 .rpci-tbl tr:last-child td{border-bottom:none;}
 .rpci-tbl tr:hover td{background:rgba(255,255,255,0.025);}
@@ -5205,6 +5256,7 @@ def page_rpci():
 .rpci-up{color:#00d4aa;font-weight:600;}
 .rpci-dn{color:#f85149;font-weight:600;}
 .rpci-neutral{color:#6e7681;}
+.rpci-held{font-size:.7rem;color:#6e7681;text-align:center;}
 /* Detail panel */
 .rpci-panel{background:#1e222d;border:1px solid #2a2e39;border-radius:12px;overflow:hidden;margin-bottom:16px;}
 .rpci-panel-hdr{background:#0d1117;padding:10px 16px;display:flex;justify-content:space-between;align-items:center;border-bottom:1px solid #2a2e39;}
@@ -5242,7 +5294,8 @@ def page_rpci():
         _clear_btn = st.button("Clear", use_container_width=True, key="rpci_clear_btn")
 
     if _clear_btn:
-        for _k in ("rpci_result", "rpci_scanned_at", "rpci_selected", "rpci_tab"):
+        for _k in ("rpci_result", "rpci_prev_result", "rpci_held", "rpci_scanned_at",
+                   "rpci_selected", "rpci_tab", "rpci_sector_filter"):
             st.session_state.pop(_k, None)
         st.rerun()
 
@@ -5250,12 +5303,25 @@ def page_rpci():
         try:
             _syms_df = get_nifty500_symbols()
             _symbols = [s.replace(".NS", "") for s in _syms_df["NSE_Symbol"].dropna().tolist() if str(s).endswith(".NS")]
+            # Build sector_map from NSE industry data
+            _sector_map: dict = {}
+            for _, _srow in _syms_df.iterrows():
+                _ind = str(_srow.get("Industry", "Unknown"))
+                _sector_map[str(_srow["Symbol"]).strip()] = {
+                    "sector":   _to_sector(_ind),
+                    "industry": _ind if _ind not in ("Unknown", "nan") else "—",
+                }
         except Exception:
             _symbols = []
+            _sector_map = {}
 
         if not _symbols:
             st.error("Could not fetch NIFTY 500 symbols.")
         else:
+            # Store previous scan for "What moved"
+            if "rpci_result" in st.session_state and st.session_state["rpci_result"] is not None:
+                st.session_state["rpci_prev_result"] = st.session_state["rpci_result"].copy()
+
             _prog = st.progress(0, text="Starting…")
             _stat = st.empty()
 
@@ -5263,11 +5329,27 @@ def page_rpci():
                 _prog.progress(max(0, min(pct, 100)), text=msg)
                 _stat.caption(msg)
 
-            _res_df = _rpci_scan(_symbols, progress_cb=_rpci_cb)
+            _res_df = _rpci_scan(_symbols, progress_cb=_rpci_cb, sector_map=_sector_map)
             _prog.progress(100, text="Done!")
             _stat.empty()
+
+            # Compute HELD (consecutive sessions at same score)
+            _prev_held: dict = st.session_state.get("rpci_held", {})
+            _prev_res  = st.session_state.get("rpci_prev_result")
+            _prev_sc: dict = {}
+            if _prev_res is not None and not _prev_res.empty:
+                _prev_sc = dict(zip(_prev_res["symbol"].tolist(), _prev_res["score"].tolist()))
+            _new_held: dict = {}
+            for _sym_h, _sc_h in zip(_res_df["symbol"].tolist(), _res_df["score"].tolist()):
+                if _prev_sc.get(_sym_h) == _sc_h:
+                    _new_held[_sym_h] = _prev_held.get(_sym_h, 0) + 1
+                else:
+                    _new_held[_sym_h] = 0
+            _res_df["held"] = _res_df["symbol"].map(_new_held).fillna(0).astype(int)
+
             st.session_state["rpci_result"]     = _res_df
-            st.session_state["rpci_scanned_at"] = datetime.datetime.now(_IST_TZ)
+            st.session_state["rpci_held"]        = _new_held
+            st.session_state["rpci_scanned_at"]  = datetime.datetime.now(_IST_TZ)
             st.session_state.pop("rpci_selected", None)
 
     # ── Results ───────────────────────────────────────────────────────────────
@@ -5321,11 +5403,167 @@ def page_rpci():
 
     st.markdown("<br>", unsafe_allow_html=True)
 
-    # ── Condition pass rates bar chart ────────────────────────────────────────
+    # ── Condition names list ───────────────────────────────────────────────────
     _ccols  = [c for c in _rdf.columns if c.startswith("_") and not c.endswith("_val")]
     _cnames = [c[1:] for c in _ccols]
 
-    with st.expander("Condition pass rates", expanded=True):
+    # ── Sector-wise cards ─────────────────────────────────────────────────────
+    if "sector" in _rdf.columns:
+        _prev_res = st.session_state.get("rpci_prev_result")
+        _prev_sec_mean: dict = {}
+        if _prev_res is not None and not _prev_res.empty and "sector" in _prev_res.columns:
+            _prev_sec_mean = _prev_res.groupby("sector")["score"].mean().to_dict()
+
+        _sec_data = (
+            _rdf.groupby("sector")
+            .agg(mean_score=("score", "mean"), count=("score", "size"),
+                 at9=("score", lambda x: (x >= 9).sum()))
+            .reset_index()
+            .sort_values("mean_score", ascending=False)
+        )
+
+        _active_sector = st.session_state.get("rpci_sector_filter", "")
+        _sec_html = '<div class="rpci-sec-grid">'
+        for _, _sr in _sec_data.iterrows():
+            _sname = str(_sr["sector"])
+            _smean = float(_sr["mean_score"])
+            _sn9   = int(_sr["at9"])
+            _scnt  = int(_sr["count"])
+            _prev_m = _prev_sec_mean.get(_sname, _smean)
+            _sdelt  = _smean - _prev_m
+            _delt_color = "#00d4aa" if _sdelt >= 0 else "#f85149"
+            _delt_str   = f"+{_sdelt:.2f}" if _sdelt >= 0 else f"{_sdelt:.2f}"
+            _is_sel = "selected" if _active_sector == _sname else ""
+            _sec_html += (
+                f'<div class="rpci-sec-card {_is_sel}">'
+                f'<div class="rpci-sec-name">{_sname}</div>'
+                f'<div>'
+                f'<span class="rpci-sec-score">{_smean:.2f}</span>'
+                + (f'<span class="rpci-sec-delta" style="color:{_delt_color};">&nbsp;{_delt_str} vs prev</span>' if _prev_res is not None else '')
+                + f'</div>'
+                f'<div class="rpci-sec-sub">{_scnt} names · {_sn9} at 9+</div>'
+                f'</div>'
+            )
+        _sec_html += '</div>'
+        st.markdown(_sec_html, unsafe_allow_html=True)
+
+        # Sector filter control (below the cards)
+        _sector_opts = ["All sectors"] + sorted(_rdf["sector"].dropna().unique().tolist())
+        _sec_sel = st.selectbox("Filter by sector", _sector_opts, key="rpci_sector_sel",
+                                label_visibility="collapsed",
+                                format_func=lambda x: f"Sector: {x}")
+        if _sec_sel != "All sectors":
+            st.session_state["rpci_sector_filter"] = _sec_sel
+        else:
+            st.session_state.pop("rpci_sector_filter", None)
+        _active_sector = st.session_state.get("rpci_sector_filter", "")
+    else:
+        _active_sector = ""
+
+    # ── What moved ────────────────────────────────────────────────────────────
+    _prev_res = st.session_state.get("rpci_prev_result")
+    if _prev_res is not None and not _prev_res.empty:
+        _prev_lookup = _prev_res.set_index("symbol")
+
+        _upgrades:   list[dict] = []
+        _downgrades: list[dict] = []
+
+        for _, _rrow in _rdf.iterrows():
+            _sym_m = str(_rrow["symbol"])
+            _sc_m  = int(_rrow["score"])
+            if _sym_m not in _prev_lookup.index:
+                continue
+            _prev_row  = _prev_lookup.loc[_sym_m]
+            _sc_prev_m = int(_prev_row["score"])
+            _diff_m    = _sc_m - _sc_prev_m
+            if _diff_m == 0:
+                continue
+
+            _gained, _lost = [], []
+            for _cn in _cnames:
+                _col = f"_{_cn}"
+                _now_pass  = bool(_rrow.get(_col, False))
+                _prev_pass = bool(_prev_row.get(_col, False)) if _col in _prev_row.index else False
+                _abr = _ABBR.get(_cn, _cn[:3])
+                if _now_pass and not _prev_pass:
+                    _gained.append(_abr)
+                elif not _now_pass and _prev_pass:
+                    _lost.append(_abr)
+
+            _entry = {"sym": _sym_m, "old": _sc_prev_m, "new": _sc_m, "diff": _diff_m,
+                      "gained": _gained, "lost": _lost}
+            if _diff_m > 0:
+                _upgrades.append(_entry)
+            else:
+                _downgrades.append(_entry)
+
+        _upgrades   = sorted(_upgrades,   key=lambda x: -x["diff"])
+        _downgrades = sorted(_downgrades, key=lambda x:  x["diff"])
+        _n_up = len(_upgrades); _n_dn = len(_downgrades)
+        _crossed_in  = sum(1 for u in _upgrades   if u["old"] < 9 <= u["new"])
+        _crossed_out = sum(1 for d in _downgrades if d["old"] >= 9 > d["new"])
+
+        with st.expander(f"What moved  ·  ▲ {_n_up} upgrades  ·  ▼ {_n_dn} downgrades", expanded=True):
+            if _n_up > 0 or _n_dn > 0:
+                st.caption(
+                    f"{_n_up} stocks gained at least one condition and {_n_dn} lost at least one. "
+                    f"Of those, **{_crossed_in}** crossed into the top tier (9+) and "
+                    f"**{_crossed_out}** dropped out of it."
+                )
+
+            _mv_tab_opts = ["ALL", "9–11", "7–8", "5–6", "<5", "±1", "±2"]
+            _mv_sel = st.radio("What moved filter", _mv_tab_opts, horizontal=True,
+                               key="rpci_mv_tab", label_visibility="collapsed")
+
+            def _mv_filter(entries: list[dict], tab: str) -> list[dict]:
+                if tab == "ALL":   return entries
+                if tab == "9–11": return [e for e in entries if e["new"] >= 9]
+                if tab == "7–8":  return [e for e in entries if 7 <= e["new"] <= 8]
+                if tab == "5–6":  return [e for e in entries if 5 <= e["new"] <= 6]
+                if tab == "<5":   return [e for e in entries if e["new"] < 5]
+                if tab == "±1":   return [e for e in entries if abs(e["diff"]) == 1]
+                if tab == "±2":   return [e for e in entries if abs(e["diff"]) >= 2]
+                return entries
+
+            _ups_f = _mv_filter(_upgrades,   _mv_sel)
+            _dns_f = _mv_filter(_downgrades, _mv_sel)
+
+            _mu1, _mu2 = st.columns(2)
+            with _mu1:
+                st.markdown(f"**UPGRADES {len(_ups_f)} of {_n_up}**")
+                for _ue in _ups_f[:30]:
+                    _tier_str = " · ENTERED 9+" if _ue["old"] < 9 <= _ue["new"] else ""
+                    _g_str = f"gained {' · '.join(_ue['gained'])}" if _ue["gained"] else ""
+                    st.markdown(
+                        f'<div class="rpci-mv-up">'
+                        f'<span class="rpci-mv-sym">{_ue["sym"]}</span>'
+                        f'<span class="rpci-mv-arr">&nbsp;{_ue["old"]} → {_ue["new"]}&nbsp;</span>'
+                        f'<span class="rpci-mv-badge rpci-mv-badge-up">+{_ue["diff"]}{_tier_str}</span>'
+                        + (f'<div class="rpci-mv-cond">{_g_str}</div>' if _g_str else '')
+                        + f'</div>',
+                        unsafe_allow_html=True,
+                    )
+
+            with _mu2:
+                st.markdown(f"**DOWNGRADES {len(_dns_f)} of {_n_dn}**")
+                for _de in _dns_f[:30]:
+                    _tier_str = " · LEFT 9+" if _de["old"] >= 9 > _de["new"] else ""
+                    _l_str = f"lost {' · '.join(_de['lost'])}" if _de["lost"] else ""
+                    st.markdown(
+                        f'<div class="rpci-mv-dn">'
+                        f'<span class="rpci-mv-sym">{_de["sym"]}</span>'
+                        f'<span class="rpci-mv-arr">&nbsp;{_de["old"]} → {_de["new"]}&nbsp;</span>'
+                        f'<span class="rpci-mv-badge rpci-mv-badge-dn">{_de["diff"]}{_tier_str}</span>'
+                        + (f'<div class="rpci-mv-cond">{_l_str}</div>' if _l_str else '')
+                        + f'</div>',
+                        unsafe_allow_html=True,
+                    )
+    else:
+        with st.expander("What moved  ·  run scan twice to compare sessions"):
+            st.caption("Run the scan a second time to see which stocks gained or lost conditions since the previous scan.")
+
+    # ── Condition pass rates bar chart ────────────────────────────────────────
+    with st.expander("Condition pass rates", expanded=False):
         _pass_rates = {
             _ABBR.get(cn, cn[:3]): round(float(_rdf[f"_{cn}"].sum()) / _n_total * 100, 1)
             for cn in _cnames if f"_{cn}" in _rdf.columns
@@ -5346,7 +5584,7 @@ def page_rpci():
 
     st.markdown("<br>", unsafe_allow_html=True)
 
-    # ── Score-band tabs ───────────────────────────────────────────────────────
+    # ── Score-band tabs + Filter by condition row ─────────────────────────────
     _tab_opts  = ["ALL", "9–11", "7–8", "5–6", "<5"]
     _tab_counts = {
         "ALL":  _n_total,
@@ -5364,8 +5602,29 @@ def page_rpci():
         label_visibility="collapsed",
     )
 
-    # ── Filter & sort ─────────────────────────────────────────────────────────
+    # ── Filter by condition ───────────────────────────────────────────────────
+    with st.expander("▼ Filter by condition", expanded=False):
+        _cond_keys = list(_ABBR.items())   # [(full_name, abr), ...]
+        _cond_filters: dict[str, str] = {}
+        _fc_cols = st.columns(6)
+        for _fi, (_cn_f, _abr_f) in enumerate(_cond_keys):
+            with _fc_cols[_fi % 6]:
+                _full_label = _COND_FULL.get(_abr_f, _cn_f)
+                _cond_filters[_cn_f] = st.selectbox(
+                    _full_label,
+                    ["Any", "PASS", "FAIL"],
+                    key=f"rpci_cond_{_abr_f}",
+                )
+        _clear_cf = st.button("clear condition filters", key="rpci_clear_cf")
+        if _clear_cf:
+            for _cn_f, _ in _cond_keys:
+                _abr_f = _ABBR[_cn_f]
+                st.session_state.pop(f"rpci_cond_{_abr_f}", None)
+            st.rerun()
+
+    # ── Apply filters ─────────────────────────────────────────────────────────
     _fdf = _rdf.copy()
+    # Score band
     if _sel_tab == "9–11":
         _fdf = _fdf[_fdf["score"] >= 9]
     elif _sel_tab == "7–8":
@@ -5374,35 +5633,55 @@ def page_rpci():
         _fdf = _fdf[(_fdf["score"] >= 5) & (_fdf["score"] < 7)]
     elif _sel_tab == "<5":
         _fdf = _fdf[_fdf["score"] < 5]
-
+    # Sector
+    if _active_sector:
+        _fdf = _fdf[_fdf.get("sector", pd.Series()) == _active_sector] if "sector" in _fdf.columns else _fdf
+    # Ticker search
     if _ticker_search.strip():
         _fdf = _fdf[_fdf["symbol"].str.upper().str.contains(_ticker_search.strip().upper(), na=False)]
+    # Condition filters
+    for _cn_f, _cv_f in _cond_filters.items():
+        _col_f = f"_{_cn_f}"
+        if _cv_f == "PASS" and _col_f in _fdf.columns:
+            _fdf = _fdf[_fdf[_col_f].astype(bool)]
+        elif _cv_f == "FAIL" and _col_f in _fdf.columns:
+            _fdf = _fdf[~_fdf[_col_f].astype(bool)]
+
+    # ── Row count + download ──────────────────────────────────────────────────
+    _dl1, _dl2 = st.columns([5, 1])
+    with _dl1:
+        st.caption(f"{len(_fdf)} of {_n_total} rows")
+    with _dl2:
+        _csv_data = _fdf[["symbol"] + (["sector","industry"] if "sector" in _fdf.columns else []) +
+                          ["score","price","chg_pct","vs_20dma","vol_cr"] +
+                          [f"_{cn}" for cn in _cnames if f"_{cn}" in _fdf.columns]].to_csv(index=False)
+        st.download_button("⬇ CSV", _csv_data, "rpci_scan.csv", "text/csv",
+                           use_container_width=True, key="rpci_dl_csv")
 
     # ── All stocks table ──────────────────────────────────────────────────────
-    _has_extra = "chg_pct" in _fdf.columns and "vs_20dma" in _fdf.columns
+    _has_extra  = "chg_pct" in _fdf.columns and "vs_20dma" in _fdf.columns
+    _has_sector = "sector"  in _fdf.columns
+    _has_held   = "held"    in _fdf.columns
 
-    # Build condition header with numbered abbreviations
-    _th_conds = "".join(
-        f'<th title="{cn}" style="text-align:center;">{_ABBR.get(cn, cn[:3])}</th>'
-        for cn in _cnames
-    )
     _tbl_html = (
         '<div class="rpci-tbl-wrap"><table class="rpci-tbl"><thead><tr>'
         '<th>#</th><th>TICKER</th><th>SCORE</th>'
-        '<th>CONDITIONS 1–11</th>'
-        '<th>CLOSE</th>'
     )
+    if _has_sector:
+        _tbl_html += '<th>SECTOR</th><th>INDUSTRY</th>'
+    _tbl_html += '<th style="text-align:center;">CONDITIONS 1–11</th><th>CLOSE</th>'
     if _has_extra:
-        _tbl_html += '<th>CHG %</th><th>VS 20 DMA</th><th>VOLUME (Cr)</th>'
+        _tbl_html += '<th>CHG%</th><th>VS 20 DMA</th><th>VOLUME (Cr)</th>'
+    if _has_held:
+        _tbl_html += '<th title="Consecutive sessions at this score">HELD</th>'
     _tbl_html += '</tr></thead><tbody>'
 
-    for _ri, _rr in _fdf.head(250).iterrows():
+    for _ri, _rr in _fdf.head(300).iterrows():
         _sym  = str(_rr["symbol"])
         _sc   = int(_rr["score"])
         _scls = "rpci-s9" if _sc >= 9 else "rpci-s7" if _sc >= 7 else "rpci-s5" if _sc >= 5 else "rpci-slow"
         _pr   = f"₹{_rr['price']:,.1f}"
 
-        # 11 colored blocks
         _blocks = "".join(
             f'<span class="rpci-blk-pass" title="{_ABBR.get(cn,cn)}"></span>'
             if bool(_rr.get(f"_{cn}", False))
@@ -5415,9 +5694,13 @@ def page_rpci():
             f'<td class="rpci-neutral" style="font-size:.72rem;">{int(_ri)+1}</td>'
             f'<td class="rpci-sym">{_sym}</td>'
             f'<td class="{_scls}" style="font-weight:800;">{_sc}</td>'
-            f'<td style="line-height:1;">{_blocks}</td>'
-            f'<td>{_pr}</td>'
         )
+        if _has_sector:
+            _sec_v = str(_rr.get("sector", "—"))
+            _ind_v = str(_rr.get("industry", "—"))
+            _row += f'<td class="rpci-neutral" style="font-size:.72rem;">{_sec_v}</td>'
+            _row += f'<td class="rpci-neutral" style="font-size:.72rem;">{_ind_v[:30]}</td>'
+        _row += f'<td style="line-height:1;">{_blocks}</td><td>{_pr}</td>'
         if _has_extra:
             _chg = float(_rr.get("chg_pct", 0) or 0)
             _dma = float(_rr.get("vs_20dma", 0) or 0)
@@ -5429,6 +5712,9 @@ def page_rpci():
                 f'<td class="{_dma_cls}">{_dma:+.2f}%</td>'
                 f'<td class="rpci-neutral">{_vol:.2f}</td>'
             )
+        if _has_held:
+            _hld = int(_rr.get("held", 0))
+            _row += f'<td class="rpci-held">{_hld if _hld > 0 else "—"}</td>'
         _row += '</tr>'
         _tbl_html += _row
 

@@ -304,6 +304,7 @@ def analyse_single(symbol: str) -> dict:
 def run_rpci_scan(
     symbols: list[str],
     progress_cb: Optional[Callable[[str, int], None]] = None,
+    sector_map: Optional[dict] = None,  # {symbol: {"sector": str, "industry": str}}
 ) -> pd.DataFrame:
     """
     Batch RPCI scan using a single multi-ticker yfinance download.
@@ -378,8 +379,11 @@ def run_rpci_scan(
             vol_today = int(vd.iloc[-1]) if len(vd) > 0 else 0
             vol_cr    = round(vol_today * price_now / 1e7, 2)   # value traded in crore
 
+            _sm  = (sector_map or {}).get(sym, {})
             row: dict = {
                 "symbol":   sym,
+                "sector":   _sm.get("sector", "Other"),
+                "industry": _sm.get("industry", "Unknown"),
                 "price":    round(price_now, 2),
                 "chg_pct":  chg_pct,
                 "vs_20dma": vs_20dma,

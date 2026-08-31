@@ -120,11 +120,15 @@ def get_nifty500_symbols() -> pd.DataFrame:
         resp = requests.get(NSE_NIFTY500_URL, headers=HEADERS, timeout=10)
         resp.raise_for_status()
         df = pd.read_csv(io.StringIO(resp.text))
-        df = df[["Symbol", "Company Name"]].dropna()
-        df.columns = ["Symbol", "Company"]
-        df["NSE_Symbol"] = df["Symbol"].str.strip() + ".NS"
+        df = df.rename(columns={"Company Name": "Company"})
+        if "Industry" not in df.columns:
+            df["Industry"] = "Unknown"
+        df = df[["Symbol", "Company", "Industry"]].dropna(subset=["Symbol"])
+        df["Symbol"] = df["Symbol"].str.strip()
+        df["NSE_Symbol"] = df["Symbol"] + ".NS"
         return df.reset_index(drop=True)
     except Exception:
         df = pd.DataFrame(FALLBACK_SYMBOLS, columns=["Symbol", "Company"])
+        df["Industry"] = "Unknown"
         df["NSE_Symbol"] = df["Symbol"].str.strip() + ".NS"
         return df
