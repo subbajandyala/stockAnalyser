@@ -362,12 +362,32 @@ def run_rpci_scan(
             conds = _score_conditions(cd, hd, ld, vd, nifty_close)
             score = sum(1 for v in conds.values() if v["pass"])
 
+            price_now = float(cd.iloc[-1])
+
+            # Extra columns matching reference site
+            chg_pct = 0.0
+            if len(cd) >= 2:
+                chg_pct = round((price_now - float(cd.iloc[-2])) / float(cd.iloc[-2]) * 100, 2)
+
+            vs_20dma = 0.0
+            sma20_s  = cd.rolling(20).mean()
+            if len(sma20_s.dropna()) > 0:
+                sma20_v  = float(sma20_s.iloc[-1])
+                vs_20dma = round((price_now - sma20_v) / sma20_v * 100, 2)
+
+            vol_today = int(vd.iloc[-1]) if len(vd) > 0 else 0
+            vol_cr    = round(vol_today * price_now / 1e7, 2)   # value traded in crore
+
             row: dict = {
-                "symbol": sym,
-                "price":  round(float(cd.iloc[-1]), 2),
-                "score":  score,
-                "total":  len(conds),
-                "label":  _label(score),
+                "symbol":   sym,
+                "price":    round(price_now, 2),
+                "chg_pct":  chg_pct,
+                "vs_20dma": vs_20dma,
+                "volume":   vol_today,
+                "vol_cr":   vol_cr,
+                "score":    score,
+                "total":    len(conds),
+                "label":    _label(score),
             }
             for cname, cv in conds.items():
                 row[f"_{cname}"]     = cv["pass"]

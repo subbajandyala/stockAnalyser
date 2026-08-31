@@ -5150,66 +5150,99 @@ def page_red_flag():
 def page_rpci():
     _IST_TZ = datetime.timezone(datetime.timedelta(hours=5, minutes=30))
 
+    # Condition abbreviations matching rpci.stratlab.in
+    _ABBR = {
+        "Valuation":             "VAL",
+        "Earnings Power":        "ERN",
+        "Momentum":              "MOM",
+        "Price Contraction":     "CON",
+        "Timeframe Alignment":   "TFA",
+        "Outperformance":        "OPF",
+        "Institutional Candles": "INS",
+        "Short-term Extension":  "STX",
+        "Long-term Extension":   "LTX",
+        "Stage Analysis":        "STG",
+        "Dow Theory (W)":        "DOW",
+    }
+    _LABEL_CLS = {
+        "Strongly favourable": ("rpci-lbl-sf", "#00d4aa"),
+        "Favourable":          ("rpci-lbl-fv", "#64dd17"),
+        "Neutral":             ("rpci-lbl-nt", "#ffd600"),
+        "Unfavourable":        ("rpci-lbl-uf", "#f85149"),
+    }
+
     st.markdown("""<style>
-/* RPCI panel */
-.rpci-panel{background:#1e222d;border:1px solid #2a2e39;border-radius:12px;overflow:hidden;margin-bottom:16px;}
-.rpci-panel-hdr{background:#0d1117;padding:10px 16px;display:flex;justify-content:space-between;align-items:center;border-bottom:1px solid #2a2e39;}
-.rpci-ind-lbl{font-size:0.67rem;font-weight:800;letter-spacing:1.3px;text-transform:uppercase;color:#00d4aa;}
-.rpci-res-lbl{font-size:0.67rem;font-weight:700;color:#6e7681;text-transform:uppercase;letter-spacing:0.8px;}
-.rpci-row{display:flex;justify-content:space-between;align-items:center;padding:8px 16px;border-bottom:1px solid rgba(42,46,57,0.5);font-size:0.81rem;}
-.rpci-row:last-child{border-bottom:none;}
-.rpci-row:hover{background:rgba(255,255,255,0.02);}
-.rpci-cname{color:#c9d1d9;font-weight:500;}
-.rpci-cval{color:#8b949e;font-size:0.74rem;margin-right:8px;}
-.rpci-pass{background:rgba(0,212,170,0.14);color:#00d4aa;font-size:0.62rem;font-weight:800;letter-spacing:0.8px;padding:2px 9px;border-radius:4px;border:1px solid rgba(0,212,170,0.3);}
-.rpci-fail{background:rgba(248,81,73,0.11);color:#f85149;font-size:0.62rem;font-weight:800;letter-spacing:0.8px;padding:2px 9px;border-radius:4px;border:1px solid rgba(248,81,73,0.3);}
-.rpci-score-row{background:rgba(0,212,170,0.04);padding:11px 16px;display:flex;justify-content:space-between;align-items:center;border-top:2px solid #2a2e39;}
-.rpci-score-val{font-size:1.1rem;font-weight:800;color:#f0f6fc;}
-.rpci-lbl-sf{color:#00d4aa;font-weight:700;font-size:0.83rem;}
-.rpci-lbl-fv{color:#64dd17;font-weight:700;font-size:0.83rem;}
-.rpci-lbl-nt{color:#ffd600;font-weight:700;font-size:0.83rem;}
-.rpci-lbl-uf{color:#f85149;font-weight:700;font-size:0.83rem;}
+/* RPCI dashboard */
+.rpci-stat-card{background:#1e222d;border:1px solid #2a2e39;border-radius:10px;padding:14px 18px;text-align:center;}
+.rpci-stat-val{font-size:1.7rem;font-weight:800;color:#f0f6fc;line-height:1.1;}
+.rpci-stat-lbl{font-size:0.63rem;font-weight:700;color:#6e7681;letter-spacing:.8px;text-transform:uppercase;margin-top:4px;}
+.rpci-stat-sub{font-size:0.68rem;color:#8b949e;margin-top:2px;}
+/* Score tabs */
+.rpci-tabs{display:flex;gap:6px;margin:14px 0 10px;}
+.rpci-tab{padding:5px 16px;border-radius:6px;font-size:0.75rem;font-weight:700;cursor:pointer;border:1px solid #2a2e39;color:#8b949e;background:#1e222d;}
+.rpci-tab-active{background:#00d4aa;color:#0d1117;border-color:#00d4aa;}
+/* Condition pass-rate bar */
+.rpci-pbar-wrap{margin:4px 0;display:flex;align-items:center;gap:8px;}
+.rpci-pbar-lbl{font-size:0.67rem;font-weight:700;color:#c9d1d9;width:30px;text-align:right;}
+.rpci-pbar-bg{flex:1;background:#0d1117;border-radius:3px;height:8px;overflow:hidden;}
+.rpci-pbar-fill{background:#00d4aa;border-radius:3px;height:8px;}
+.rpci-pbar-pct{font-size:0.67rem;color:#8b949e;width:34px;}
+/* Condition blocks */
+.rpci-blk-pass{display:inline-block;width:13px;height:13px;background:#00d4aa;border-radius:2px;margin:1px;vertical-align:middle;title:attr(title);}
+.rpci-blk-fail{display:inline-block;width:13px;height:13px;background:#21262d;border:1px solid #2a2e39;border-radius:2px;margin:1px;vertical-align:middle;}
 /* Results table */
 .rpci-tbl-wrap{width:100%;overflow-x:auto;border-radius:10px;border:1px solid #21262d;margin:10px 0;}
-.rpci-tbl{width:100%;border-collapse:collapse;font-size:0.79rem;}
-.rpci-tbl th{background:#0d1117;color:#6e7681;font-size:0.63rem;font-weight:700;letter-spacing:0.6px;padding:8px 10px;text-transform:uppercase;border-bottom:1px solid #21262d;white-space:nowrap;text-align:left;}
-.rpci-tbl td{padding:6px 10px;border-bottom:1px solid #161b22;white-space:nowrap;color:#c9d1d9;vertical-align:middle;}
+.rpci-tbl{width:100%;border-collapse:collapse;font-size:0.78rem;}
+.rpci-tbl th{background:#0d1117;color:#6e7681;font-size:0.62rem;font-weight:700;letter-spacing:.6px;padding:7px 10px;text-transform:uppercase;border-bottom:1px solid #21262d;white-space:nowrap;text-align:left;cursor:pointer;}
+.rpci-tbl td{padding:5px 10px;border-bottom:1px solid #161b22;white-space:nowrap;color:#c9d1d9;vertical-align:middle;}
 .rpci-tbl tr:last-child td{border-bottom:none;}
 .rpci-tbl tr:hover td{background:rgba(255,255,255,0.025);}
-.rpci-s9{color:#00d4aa;font-weight:800;font-size:0.9rem;}
+.rpci-s9{color:#00d4aa;font-weight:800;}
 .rpci-s7{color:#64dd17;font-weight:700;}
 .rpci-s5{color:#ffd600;font-weight:600;}
 .rpci-slow{color:#f85149;font-weight:600;}
-.rpci-pp{background:rgba(0,212,170,0.13);color:#00d4aa;font-size:0.59rem;font-weight:800;padding:1px 5px;border-radius:3px;}
-.rpci-ff{background:rgba(248,81,73,0.10);color:#f85149;font-size:0.59rem;font-weight:800;padding:1px 5px;border-radius:3px;}
 .rpci-sym{font-weight:700;color:#f0f6fc;}
+.rpci-up{color:#00d4aa;font-weight:600;}
+.rpci-dn{color:#f85149;font-weight:600;}
+.rpci-neutral{color:#6e7681;}
+/* Detail panel */
+.rpci-panel{background:#1e222d;border:1px solid #2a2e39;border-radius:12px;overflow:hidden;margin-bottom:16px;}
+.rpci-panel-hdr{background:#0d1117;padding:10px 16px;display:flex;justify-content:space-between;align-items:center;border-bottom:1px solid #2a2e39;}
+.rpci-ind-lbl{font-size:0.67rem;font-weight:800;letter-spacing:1.3px;text-transform:uppercase;color:#00d4aa;}
+.rpci-res-lbl{font-size:0.67rem;font-weight:700;color:#6e7681;text-transform:uppercase;letter-spacing:.8px;}
+.rpci-cond-row{display:flex;justify-content:space-between;align-items:center;padding:7px 16px;border-bottom:1px solid rgba(42,46,57,.5);font-size:.81rem;}
+.rpci-cond-row:last-child{border-bottom:none;}
+.rpci-cond-row:hover{background:rgba(255,255,255,.02);}
+.rpci-cname{color:#c9d1d9;font-weight:500;}
+.rpci-cval{color:#8b949e;font-size:.74rem;margin-right:8px;}
+.rpci-pass{background:rgba(0,212,170,.14);color:#00d4aa;font-size:.62rem;font-weight:800;letter-spacing:.8px;padding:2px 9px;border-radius:4px;border:1px solid rgba(0,212,170,.3);}
+.rpci-fail{background:rgba(248,81,73,.11);color:#f85149;font-size:.62rem;font-weight:800;letter-spacing:.8px;padding:2px 9px;border-radius:4px;border:1px solid rgba(248,81,73,.3);}
+.rpci-score-row{background:rgba(0,212,170,.04);padding:11px 16px;display:flex;justify-content:space-between;align-items:center;border-top:2px solid #2a2e39;}
+.rpci-lbl-sf{color:#00d4aa;font-weight:700;font-size:.83rem;}
+.rpci-lbl-fv{color:#64dd17;font-weight:700;font-size:.83rem;}
+.rpci-lbl-nt{color:#ffd600;font-weight:700;font-size:.83rem;}
+.rpci-lbl-uf{color:#f85149;font-weight:700;font-size:.83rem;}
 </style>""", unsafe_allow_html=True)
 
-    st.markdown('<div class="hero-badge">RPCI SCREENER</div>', unsafe_allow_html=True)
-    st.markdown('<div class="hero-h1">RPCI <span class="tl">Price Condition</span> Screener</div>', unsafe_allow_html=True)
     st.markdown(
-        '<div class="hero-sub">11-condition analysis per stock — Valuation · Momentum · Stage Analysis · '
-        'Dow Theory · No Kite API required</div>',
+        '<h2 style="font-size:1.55rem;font-weight:800;margin:0 0 2px;">📈 RPCI Screener</h2>'
+        '<p style="color:#6e7681;font-size:0.8rem;margin-bottom:14px;">'
+        '11-condition analysis per stock · VAL · ERN · MOM · CON · TFA · OPF · INS · STX · LTX · STG · DOW'
+        '</p>',
         unsafe_allow_html=True,
     )
-    st.markdown("<br>", unsafe_allow_html=True)
 
-    _c1, _c2, _c3, _c4 = st.columns([2, 2, 1, 1])
-    with _c1:
-        _min_score = st.slider("Minimum Score", 0, 11, 7, key="rpci_min_score")
-    with _c2:
-        _lbl_filter = st.multiselect(
-            "Filter by label",
-            ["Strongly favourable", "Favourable", "Neutral", "Unfavourable"],
-            default=[], key="rpci_lbl_filter", placeholder="All labels",
-        )
-    with _c3:
-        _scan_btn = st.button("Scan NIFTY 500", type="primary", use_container_width=True, key="rpci_scan_btn")
-    with _c4:
+    # ── Controls ─────────────────────────────────────────────────────────────
+    _cc1, _cc2, _cc3 = st.columns([2, 1, 1])
+    with _cc1:
+        _ticker_search = st.text_input("Search ticker", placeholder="e.g. RELIANCE", key="rpci_ticker", label_visibility="collapsed")
+    with _cc2:
+        _scan_btn  = st.button("▶ Scan NIFTY 500", type="primary", use_container_width=True, key="rpci_scan_btn")
+    with _cc3:
         _clear_btn = st.button("Clear", use_container_width=True, key="rpci_clear_btn")
 
     if _clear_btn:
-        for _k in ("rpci_result", "rpci_scanned_at", "rpci_selected"):
+        for _k in ("rpci_result", "rpci_scanned_at", "rpci_selected", "rpci_tab"):
             st.session_state.pop(_k, None)
         st.rerun()
 
@@ -5241,198 +5274,262 @@ def page_rpci():
     _rdf = st.session_state.get("rpci_result")
     _rat = st.session_state.get("rpci_scanned_at")
 
-    if _rdf is not None and not _rdf.empty:
-        # Apply filters
-        _fdf = _rdf[_rdf["score"] >= _min_score].copy()
-        if _lbl_filter:
-            _fdf = _fdf[_fdf["label"].isin(_lbl_filter)]
+    if _rdf is None or _rdf.empty:
+        if _rdf is not None:
+            st.warning("Scan returned no results.")
+        else:
+            st.markdown(
+                '<div class="sa-card" style="text-align:center;padding:40px 20px;">'
+                '<div style="font-size:2.5rem;">📊</div>'
+                '<div style="color:#6e7681;margin-top:10px;">'
+                'Click <b style="color:#f0f6fc;">▶ Scan NIFTY 500</b> to run the RPCI screener<br>'
+                '<span style="font-size:0.78rem;">Analyses 11 conditions per stock · Takes 2–3 min · No Kite API needed</span>'
+                '</div></div>',
+                unsafe_allow_html=True,
+            )
+        return
 
-        if _rat:
-            st.caption(
-                f"Scanned {_rat.strftime('%d %b %Y %H:%M')} IST  ·  "
-                f"{len(_rdf)} stocks analysed  ·  {len(_fdf)} shown"
+    # ── Stats row ─────────────────────────────────────────────────────────────
+    _n_total   = len(_rdf)
+    _mean_sc   = round(float(_rdf["score"].mean()), 2)
+    _n_9plus   = int((_rdf["score"] >= 9).sum())
+    _n_7plus   = int((_rdf["score"] >= 7).sum())
+    _n_below5  = int((_rdf["score"] < 5).sum())
+    _n_above20 = int((_rdf.get("vs_20dma", pd.Series(dtype=float)) > 0).sum()) if "vs_20dma" in _rdf.columns else 0
+
+    if _rat:
+        st.caption(f"Scanned {_rat.strftime('%d %b %Y %H:%M')} IST  ·  {_n_total} stocks")
+
+    _st1, _st2, _st3, _st4, _st5, _st6 = st.columns(6)
+    for _col, _val, _lbl, _sub in [
+        (_st1, f"{_mean_sc:.2f}", "MEAN SCORE",    f"median {int(_rdf['score'].median())}"),
+        (_st2, str(_n_9plus),     "AT 9+ / 11",    f"{_n_9plus/_n_total*100:.1f}% of universe"),
+        (_st3, str(_n_7plus),     "AT 7+",         f"{_n_7plus/_n_total*100:.1f}% of universe"),
+        (_st4, str(_n_below5),    "BELOW 5",       f"{_n_below5/_n_total*100:.1f}% of universe"),
+        (_st5, str(_n_above20),   "ABOVE 20 DMA",  f"{_n_above20/_n_total*100:.1f}% of universe"),
+        (_st6, str(_n_total),     "SCANNED",       "NIFTY 500"),
+    ]:
+        with _col:
+            st.markdown(
+                f'<div class="rpci-stat-card">'
+                f'<div class="rpci-stat-val">{_val}</div>'
+                f'<div class="rpci-stat-lbl">{_lbl}</div>'
+                f'<div class="rpci-stat-sub">{_sub}</div>'
+                f'</div>',
+                unsafe_allow_html=True,
             )
 
-        # Summary metrics
-        _sm1, _sm2, _sm3, _sm4, _sm5 = st.columns(5)
-        _sm1.metric("Total Scanned",         len(_rdf))
-        _sm2.metric("Strongly Favourable",   int((_rdf["label"] == "Strongly favourable").sum()))
-        _sm3.metric("Favourable",            int((_rdf["label"] == "Favourable").sum()))
-        _sm4.metric("Neutral",               int((_rdf["label"] == "Neutral").sum()))
-        _sm5.metric("Unfavourable",          int((_rdf["label"] == "Unfavourable").sum()))
+    st.markdown("<br>", unsafe_allow_html=True)
 
-        # Condition column names (prefixed _ without _val suffix)
-        _ccols = [c for c in _rdf.columns if c.startswith("_") and not c.endswith("_val")]
-        _cnames = [c[1:] for c in _ccols]  # strip leading _
+    # ── Condition pass rates bar chart ────────────────────────────────────────
+    _ccols  = [c for c in _rdf.columns if c.startswith("_") and not c.endswith("_val")]
+    _cnames = [c[1:] for c in _ccols]
 
-        _ABBR = {
-            "Valuation":             "Val",
-            "Earnings Power":        "EPS",
-            "Momentum":              "Mom",
-            "Price Contraction":     "Ctr",
-            "Timeframe Alignment":   "TFA",
-            "Outperformance":        "Out",
-            "Institutional Candles": "Ins",
-            "Short-term Extension":  "StE",
-            "Long-term Extension":   "LtE",
-            "Stage Analysis":        "Stg",
-            "Dow Theory (W)":        "Dow",
+    with st.expander("Condition pass rates", expanded=True):
+        _pass_rates = {
+            _ABBR.get(cn, cn[:3]): round(float(_rdf[f"_{cn}"].sum()) / _n_total * 100, 1)
+            for cn in _cnames if f"_{cn}" in _rdf.columns
         }
+        _pr_cols = st.columns(2)
+        for _idx, (_abr, _pct) in enumerate(_pass_rates.items()):
+            with _pr_cols[_idx % 2]:
+                st.markdown(
+                    f'<div class="rpci-pbar-wrap">'
+                    f'<span class="rpci-pbar-lbl">{_abr}</span>'
+                    f'<div class="rpci-pbar-bg">'
+                    f'<div class="rpci-pbar-fill" style="width:{_pct}%;"></div>'
+                    f'</div>'
+                    f'<span class="rpci-pbar-pct">{_pct}%</span>'
+                    f'</div>',
+                    unsafe_allow_html=True,
+                )
 
-        _th_conds = "".join(
-            f'<th title="{n}">{_ABBR.get(n, n[:3])}</th>' for n in _cnames
+    st.markdown("<br>", unsafe_allow_html=True)
+
+    # ── Score-band tabs ───────────────────────────────────────────────────────
+    _tab_opts  = ["ALL", "9–11", "7–8", "5–6", "<5"]
+    _tab_counts = {
+        "ALL":  _n_total,
+        "9–11": int((_rdf["score"] >= 9).sum()),
+        "7–8":  int(((_rdf["score"] >= 7) & (_rdf["score"] < 9)).sum()),
+        "5–6":  int(((_rdf["score"] >= 5) & (_rdf["score"] < 7)).sum()),
+        "<5":   _n_below5,
+    }
+    _sel_tab = st.radio(
+        "Score band",
+        _tab_opts,
+        horizontal=True,
+        key="rpci_tab",
+        format_func=lambda t: f"{t}  ({_tab_counts[t]})",
+        label_visibility="collapsed",
+    )
+
+    # ── Filter & sort ─────────────────────────────────────────────────────────
+    _fdf = _rdf.copy()
+    if _sel_tab == "9–11":
+        _fdf = _fdf[_fdf["score"] >= 9]
+    elif _sel_tab == "7–8":
+        _fdf = _fdf[(_fdf["score"] >= 7) & (_fdf["score"] < 9)]
+    elif _sel_tab == "5–6":
+        _fdf = _fdf[(_fdf["score"] >= 5) & (_fdf["score"] < 7)]
+    elif _sel_tab == "<5":
+        _fdf = _fdf[_fdf["score"] < 5]
+
+    if _ticker_search.strip():
+        _fdf = _fdf[_fdf["symbol"].str.upper().str.contains(_ticker_search.strip().upper(), na=False)]
+
+    # ── All stocks table ──────────────────────────────────────────────────────
+    _has_extra = "chg_pct" in _fdf.columns and "vs_20dma" in _fdf.columns
+
+    # Build condition header with numbered abbreviations
+    _th_conds = "".join(
+        f'<th title="{cn}" style="text-align:center;">{_ABBR.get(cn, cn[:3])}</th>'
+        for cn in _cnames
+    )
+    _tbl_html = (
+        '<div class="rpci-tbl-wrap"><table class="rpci-tbl"><thead><tr>'
+        '<th>#</th><th>TICKER</th><th>SCORE</th>'
+        '<th>CONDITIONS 1–11</th>'
+        '<th>CLOSE</th>'
+    )
+    if _has_extra:
+        _tbl_html += '<th>CHG %</th><th>VS 20 DMA</th><th>VOLUME (Cr)</th>'
+    _tbl_html += '</tr></thead><tbody>'
+
+    for _ri, _rr in _fdf.head(250).iterrows():
+        _sym  = str(_rr["symbol"])
+        _sc   = int(_rr["score"])
+        _scls = "rpci-s9" if _sc >= 9 else "rpci-s7" if _sc >= 7 else "rpci-s5" if _sc >= 5 else "rpci-slow"
+        _pr   = f"₹{_rr['price']:,.1f}"
+
+        # 11 colored blocks
+        _blocks = "".join(
+            f'<span class="rpci-blk-pass" title="{_ABBR.get(cn,cn)}"></span>'
+            if bool(_rr.get(f"_{cn}", False))
+            else f'<span class="rpci-blk-fail" title="{_ABBR.get(cn,cn)}"></span>'
+            for cn in _cnames
         )
-        _tbl_html = (
-            '<div class="rpci-tbl-wrap"><table class="rpci-tbl"><thead><tr>'
-            '<th>#</th><th>Symbol</th><th>Price</th><th>Score</th><th>Label</th>'
-            + _th_conds + '</tr></thead><tbody>'
+
+        _row = (
+            f'<tr>'
+            f'<td class="rpci-neutral" style="font-size:.72rem;">{int(_ri)+1}</td>'
+            f'<td class="rpci-sym">{_sym}</td>'
+            f'<td class="{_scls}" style="font-weight:800;">{_sc}</td>'
+            f'<td style="line-height:1;">{_blocks}</td>'
+            f'<td>{_pr}</td>'
         )
-
-        _LABEL_CLS = {
-            "Strongly favourable": "rpci-lbl-sf",
-            "Favourable":          "rpci-lbl-fv",
-            "Neutral":             "rpci-lbl-nt",
-            "Unfavourable":        "rpci-lbl-uf",
-        }
-
-        for _ri, _rr in _fdf.head(200).iterrows():
-            _sym  = str(_rr["symbol"])
-            _pr   = f"₹{_rr['price']:,.1f}"
-            _sc   = int(_rr["score"])
-            _tot  = int(_rr["total"])
-            _lbl  = str(_rr["label"])
-            _scls = "rpci-s9" if _sc >= 9 else "rpci-s7" if _sc >= 7 else "rpci-s5" if _sc >= 5 else "rpci-slow"
-            _lcls = _LABEL_CLS.get(_lbl, "")
-            _cds  = "".join(
-                f'<td><span class="{"rpci-pp" if bool(_rr.get(col, False)) else "rpci-ff"}">{"P" if bool(_rr.get(col, False)) else "F"}</span></td>'
-                for col in _ccols
+        if _has_extra:
+            _chg = float(_rr.get("chg_pct", 0) or 0)
+            _dma = float(_rr.get("vs_20dma", 0) or 0)
+            _vol = float(_rr.get("vol_cr", 0) or 0)
+            _chg_cls = "rpci-up" if _chg >= 0 else "rpci-dn"
+            _dma_cls = "rpci-up" if _dma >= 0 else "rpci-dn"
+            _row += (
+                f'<td class="{_chg_cls}">{_chg:+.2f}%</td>'
+                f'<td class="{_dma_cls}">{_dma:+.2f}%</td>'
+                f'<td class="rpci-neutral">{_vol:.2f}</td>'
             )
-            _tbl_html += (
-                f'<tr>'
-                f'<td style="color:#6e7681;font-size:0.72rem;">{int(_ri)+1}</td>'
-                f'<td class="rpci-sym">{_sym}</td>'
-                f'<td>{_pr}</td>'
-                f'<td class="{_scls}">{_sc}/{_tot}</td>'
-                f'<td class="{_lcls}" style="font-size:0.74rem;">{_lbl}</td>'
-                + _cds + '</tr>'
-            )
-        _tbl_html += '</tbody></table></div>'
-        st.markdown(_tbl_html, unsafe_allow_html=True)
+        _row += '</tr>'
+        _tbl_html += _row
 
-        # Column abbreviation legend
-        _leg_items = " &nbsp;·&nbsp; ".join(f'<b>{v}</b> = {k}' for k, v in _ABBR.items())
-        st.caption(_leg_items + " &nbsp;·&nbsp; <b>P</b> = PASS &nbsp;<b>F</b> = FAIL", unsafe_allow_html=True)
+    _tbl_html += '</tbody></table></div>'
+    st.markdown(_tbl_html, unsafe_allow_html=True)
 
-        # ── Detail view ───────────────────────────────────────────────────────
-        st.markdown("<div style='margin-top:18px;'></div>", unsafe_allow_html=True)
-        _syms_list = _fdf["symbol"].tolist()
-        _detail_sel = st.selectbox(
-            "Select a stock for full RPCI analysis (conditions + momentum chart)",
-            [""] + _syms_list,
-            key="rpci_detail_sel",
-            format_func=lambda x: "— choose a stock —" if x == "" else x,
-        )
+    # Legend
+    _leg = " · ".join(f"<b>{v}</b> {k}" for k, v in _ABBR.items())
+    st.caption(_leg, unsafe_allow_html=True)
 
-        if _detail_sel:
-            st.session_state["rpci_selected"] = _detail_sel
+    # ── Detail view ───────────────────────────────────────────────────────────
+    st.markdown("<div style='margin-top:20px;'></div>", unsafe_allow_html=True)
+    _syms_list = _fdf["symbol"].tolist()
+    _detail_sel = st.selectbox(
+        "Full RPCI detail for stock",
+        [""] + _syms_list,
+        key="rpci_detail_sel",
+        format_func=lambda x: "— select a stock for full conditions + momentum chart —" if x == "" else x,
+    )
 
-        _selected = st.session_state.get("rpci_selected", "")
-        if _selected and _selected in _syms_list:
-            st.markdown("---")
-            st.markdown(f"#### RPCI Detail — **{_selected}**")
+    if _detail_sel:
+        st.session_state["rpci_selected"] = _detail_sel
 
-            with st.spinner(f"Fetching daily + weekly data for {_selected}…"):
-                _det = _rpci_detail(_selected)
+    _selected = st.session_state.get("rpci_selected", "")
+    if _selected and _selected in _syms_list:
+        st.markdown("---")
+        st.markdown(f"#### RPCI — **{_selected}**")
 
-            if _det.get("error"):
-                st.error(_det["error"])
-            else:
-                _d1, _d2 = st.columns([1, 1])
+        with st.spinner(f"Fetching daily + weekly data for {_selected}…"):
+            _det = _rpci_detail(_selected)
 
-                with _d1:
-                    # Conditions panel (replicates screenshot layout)
-                    _conds_d = _det["conditions"]
-                    _score_d = _det["score"]
-                    _total_d = _det["total"]
-                    _label_d = _det["label"]
-                    _lcls_d  = _LABEL_CLS.get(_label_d, "")
+        if _det.get("error"):
+            st.error(_det["error"])
+        else:
+            _d1, _d2 = st.columns([1, 1])
 
-                    _rows_html = ""
-                    for _cn, _cv in _conds_d.items():
-                        _badge = '<span class="rpci-pass">PASS</span>' if _cv["pass"] else '<span class="rpci-fail">FAIL</span>'
-                        _rows_html += (
-                            f'<div class="rpci-row">'
-                            f'<span class="rpci-cname">{_cn}</span>'
-                            f'<span style="display:flex;align-items:center;gap:8px;">'
-                            f'<span class="rpci-cval">{_cv["result"]}</span>'
-                            f'{_badge}</span></div>'
-                        )
+            with _d1:
+                _conds_d = _det["conditions"]
+                _score_d = _det["score"]
+                _total_d = _det["total"]
+                _label_d = _det["label"]
+                _lcls_d, _ = _LABEL_CLS.get(_label_d, ("", "#6e7681"))
 
-                    _scls_d = "rpci-s9" if _score_d >= 9 else "rpci-s7" if _score_d >= 7 else "rpci-s5" if _score_d >= 5 else "rpci-slow"
-
-                    st.markdown(
-                        f'<div class="rpci-panel">'
-                        f'<div class="rpci-panel-hdr">'
-                        f'<span class="rpci-ind-lbl">RPCI INDICATOR</span>'
-                        f'<span class="rpci-res-lbl">Result</span>'
-                        f'</div>'
-                        + _rows_html +
-                        f'<div class="rpci-score-row">'
-                        f'<span style="color:#6e7681;font-size:0.73rem;font-weight:700;text-transform:uppercase;">Score</span>'
-                        f'<span style="display:flex;align-items:center;gap:12px;">'
-                        f'<span class="rpci-score-val {_scls_d}">{_score_d} / {_total_d}</span>'
-                        f'<span class="{_lcls_d}">{_label_d}</span>'
-                        f'</span></div>'
-                        f'</div>',
-                        unsafe_allow_html=True,
+                _rows_html = ""
+                for _num, (_cn, _cv) in enumerate(_conds_d.items(), 1):
+                    _abr   = _ABBR.get(_cn, _cn[:3])
+                    _badge = '<span class="rpci-pass">PASS</span>' if _cv["pass"] else '<span class="rpci-fail">FAIL</span>'
+                    _rows_html += (
+                        f'<div class="rpci-cond-row">'
+                        f'<span style="color:#6e7681;font-size:.7rem;margin-right:6px;">{_num}</span>'
+                        f'<span class="rpci-cname">{_cn} <span style="color:#6e7681;font-size:.68rem;">({_abr})</span></span>'
+                        f'<span style="display:flex;align-items:center;gap:8px;">'
+                        f'<span class="rpci-cval">{_cv["result"]}</span>'
+                        f'{_badge}</span></div>'
                     )
 
-                with _d2:
-                    # RPCI Momentum histogram (6 months)
-                    _hist = _det.get("momentum_hist", pd.Series(dtype=float))
-                    if not _hist.empty:
-                        _hs = _hist.iloc[-126:]
-                        _colors_hist = ["#00d4aa" if float(v) >= 0 else "#f85149" for v in _hs.values]
-                        _fig_hist = go.Figure()
-                        _fig_hist.add_trace(go.Bar(
-                            x=_hs.index,
-                            y=_hs.values,
-                            marker_color=_colors_hist,
-                            name="RPCI Momentum",
-                        ))
-                        _fig_hist.add_hline(y=0, line_color="#2a2e39", line_width=1)
-                        _fig_hist.update_layout(
-                            title=dict(
-                                text=f"RPCI Momentum Indicator — {_selected}",
-                                font=dict(color="#c9d1d9", size=13),
-                            ),
-                            height=380,
-                            paper_bgcolor="#131722",
-                            plot_bgcolor="#131722",
-                            font=dict(color="#6e7681"),
-                            xaxis=dict(gridcolor="#2a2e39", showgrid=False, tickfont=dict(size=10)),
-                            yaxis=dict(gridcolor="#2a2e39", zeroline=False,
-                                       title=dict(text="Momentum", font=dict(size=11))),
-                            margin=dict(l=0, r=0, t=40, b=0),
-                            showlegend=False,
-                        )
-                        st.plotly_chart(_fig_hist, use_container_width=True)
-                    else:
-                        st.info("Momentum data not available for this stock.")
+                _scls_d = "rpci-s9" if _score_d >= 9 else "rpci-s7" if _score_d >= 7 else "rpci-s5" if _score_d >= 5 else "rpci-slow"
 
-    elif _rdf is not None and _rdf.empty:
-        st.warning("Scan returned no results. Check that markets have traded recently.")
-    else:
-        st.markdown(
-            '<div class="sa-card" style="text-align:center;padding:40px 20px;">'
-            '<div style="font-size:2.5rem;">📊</div>'
-            '<div style="color:#6e7681;margin-top:10px;">'
-            'Click <b style="color:#f0f6fc;">Scan NIFTY 500</b> to run the RPCI screener<br>'
-            '<span style="font-size:0.78rem;">Analyses 11 conditions per stock · Takes 2–3 min · No Kite API needed</span>'
-            '</div>'
-            '</div>',
-            unsafe_allow_html=True,
-        )
+                st.markdown(
+                    f'<div class="rpci-panel">'
+                    f'<div class="rpci-panel-hdr">'
+                    f'<span class="rpci-ind-lbl">RPCI INDICATOR</span>'
+                    f'<span class="rpci-res-lbl">Result</span>'
+                    f'</div>'
+                    + _rows_html +
+                    f'<div class="rpci-score-row">'
+                    f'<span style="color:#6e7681;font-size:.73rem;font-weight:700;text-transform:uppercase;">Score</span>'
+                    f'<span style="display:flex;align-items:center;gap:12px;">'
+                    f'<span class="rpci-score-val {_scls_d}">{_score_d} / {_total_d}</span>'
+                    f'<span class="{_lcls_d}">{_label_d}</span>'
+                    f'</span></div>'
+                    f'</div>',
+                    unsafe_allow_html=True,
+                )
+
+            with _d2:
+                _hist = _det.get("momentum_hist", pd.Series(dtype=float))
+                if not _hist.empty:
+                    _hs = _hist.iloc[-126:]
+                    _fig_hist = go.Figure()
+                    _fig_hist.add_trace(go.Bar(
+                        x=_hs.index,
+                        y=_hs.values,
+                        marker_color=["#00d4aa" if float(v) >= 0 else "#f85149" for v in _hs.values],
+                        name="RPCI Momentum",
+                    ))
+                    _fig_hist.add_hline(y=0, line_color="#2a2e39", line_width=1)
+                    _fig_hist.update_layout(
+                        title=dict(text=f"RPCI Momentum — {_selected}", font=dict(color="#c9d1d9", size=13)),
+                        height=380,
+                        paper_bgcolor="#131722", plot_bgcolor="#131722",
+                        font=dict(color="#6e7681"),
+                        xaxis=dict(gridcolor="#2a2e39", showgrid=False, tickfont=dict(size=10)),
+                        yaxis=dict(gridcolor="#2a2e39", zeroline=False,
+                                   title=dict(text="Momentum", font=dict(size=11))),
+                        margin=dict(l=0, r=0, t=40, b=0),
+                        showlegend=False,
+                    )
+                    st.plotly_chart(_fig_hist, use_container_width=True)
+                else:
+                    st.info("Momentum data not available.")
 
 
 # ── Elder Ray Index Options Trading page ──────────────────────────────────────
