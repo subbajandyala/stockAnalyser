@@ -5478,20 +5478,33 @@ def page_elder_ray():
         unsafe_allow_html=True,
     )
 
-    # ── Sidebar / controls ────────────────────────────────────────────────────
-    col_sym, col_tf, col_ref, col_auto = st.columns([2, 2, 1.2, 1.8])
+    # ── Auto-refresh every 30 s (always on) ──────────────────────────────────
+    _er_tick = 0
+    if _HAS_AUTOREFRESH:
+        _er_tick = _st_autorefresh(interval=30_000, key="er_autorefresh")
+
+    _er_prev_tick = st.session_state.get("er_prev_tick", -1)
+    _er_is_tick   = _er_tick != _er_prev_tick
+    st.session_state["er_prev_tick"] = _er_tick
+
+    # ── Controls ──────────────────────────────────────────────────────────────
+    col_sym, col_tf, col_ref, col_badge = st.columns([2, 2, 1.2, 1.8])
     with col_sym:
         er_symbol = st.selectbox("Index", list(_ER_INDEX_CONFIG.keys()), key="er_symbol")
     with col_tf:
         er_chart_tf = st.selectbox("Chart timeframe", ["5m", "15m", "1m"], key="er_chart_tf")
     with col_ref:
         er_refresh = st.button("🔄 Refresh", key="er_refresh")
-    with col_auto:
-        er_auto = False
-        if _HAS_AUTOREFRESH:
-            er_auto = st.checkbox("Auto-refresh 60s", key="er_auto")
-            if er_auto:
-                _st_autorefresh(interval=60_000, key="er_autorefresh")
+    with col_badge:
+        _er_badge = (
+            '<span style="display:inline-block;background:rgba(0,212,170,.15);'
+            'color:#00d4aa;border:1px solid rgba(0,212,170,.4);'
+            'font-size:0.65rem;font-weight:700;padding:6px 10px;border-radius:6px;">'
+            '⟳ AUTO 30s</span>'
+        ) if _HAS_AUTOREFRESH else (
+            '<span style="color:#6e7681;font-size:0.72rem;">No autorefresh</span>'
+        )
+        st.markdown(_er_badge, unsafe_allow_html=True)
 
     # Kite credentials (from sidebar session state already set elsewhere)
     _kite_key  = st.session_state.get("kite_api_key", "")
@@ -5500,7 +5513,7 @@ def page_elder_ray():
 
     # ── Run / cache signal ────────────────────────────────────────────────────
     _er_cache_key = f"er_result_{er_symbol}"
-    if er_refresh or _er_cache_key not in st.session_state:
+    if er_refresh or _er_is_tick or _er_cache_key not in st.session_state:
         with st.spinner(f"Fetching Elder Ray data for {er_symbol} …"):
             _er_res = run_elder_ray_signal(er_symbol)
         st.session_state[_er_cache_key] = _er_res
