@@ -78,10 +78,73 @@ st.set_page_config(page_title="MarketPulse", layout="wide", page_icon="🐂")
 st.markdown("""
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&display=swap');
-* { font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif !important; }
+@import url('https://fonts.googleapis.com/icon?family=Material+Icons+Round');
+
+/* Apply Inter everywhere EXCEPT Material Icon spans */
+*:not(.material-icons):not(.material-icons-round):not(.material-icons-outlined):not([data-testid="stSidebarCollapsedControl"] span):not([data-testid="collapsedControl"] span) {
+  font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif !important;
+}
+/* Restore icon font for Streamlit's sidebar toggle and any material icon element */
+.material-icons, .material-icons-round, .material-icons-outlined,
+[data-testid="stSidebarCollapsedControl"] span,
+[data-testid="collapsedControl"] span {
+  font-family: 'Material Icons Round' !important;
+  font-size: 20px !important;
+  display: inline-flex !important;
+  align-items: center !important;
+}
+
 .stApp { background: #131722; }
 .main .block-container { padding-top: 1rem; }
 [data-testid="stSidebar"] { background: #1e222d !important; border-right: 1px solid #2a2e39 !important; }
+
+/* ── Dark select / input widgets (TradingView-style) ─────────────────────── */
+[data-baseweb="select"] > div:first-child {
+  background: #1a1e2a !important;
+  border: 1px solid #2a2e39 !important;
+  border-radius: 8px !important;
+  color: #e6edf3 !important;
+}
+[data-baseweb="select"] [class*="ValueContainer"] { color: #e6edf3 !important; }
+[data-baseweb="select"] svg { fill: #6e7681 !important; }
+[data-baseweb="popover"] [role="option"] { background: #1e222d !important; color: #e6edf3 !important; }
+[data-baseweb="popover"] [role="option"]:hover,
+[data-baseweb="popover"] [aria-selected="true"] { background: rgba(0,212,170,0.12) !important; color: #00d4aa !important; }
+[data-baseweb="menu"] { background: #1e222d !important; border: 1px solid #2a2e39 !important; border-radius: 8px !important; }
+
+/* Dark text inputs */
+[data-baseweb="input"] > div,
+[data-baseweb="input"] input,
+input[type="text"], input[type="password"], textarea {
+  background: #1a1e2a !important;
+  border-color: #2a2e39 !important;
+  color: #e6edf3 !important;
+  border-radius: 8px !important;
+}
+input::placeholder, textarea::placeholder { color: #4a5568 !important; }
+
+/* Segmented control (timeframe picker) */
+[data-testid="stSegmentedControl"] { background: #1a1e2a !important; border: 1px solid #2a2e39 !important; border-radius: 8px !important; }
+[data-testid="stSegmentedControl"] label { color: #8b949e !important; font-weight: 600 !important; font-size: 0.78rem !important; }
+[data-testid="stSegmentedControl"] [aria-checked="true"] label { color: #00d4aa !important; background: rgba(0,212,170,0.12) !important; border-radius: 6px !important; }
+
+/* Expander */
+[data-testid="stExpander"] { background: #1a1e2a !important; border: 1px solid #2a2e39 !important; border-radius: 10px !important; }
+[data-testid="stExpander"] summary { color: #c9d1d9 !important; font-weight: 600 !important; }
+
+/* Checkbox */
+[data-baseweb="checkbox"] label { color: #c9d1d9 !important; }
+[data-baseweb="checkbox"] [role="checkbox"] { border-color: #2a2e39 !important; background: #1a1e2a !important; }
+[data-baseweb="checkbox"] [role="checkbox"][aria-checked="true"] { background: #00d4aa !important; border-color: #00d4aa !important; }
+
+/* Labels */
+[data-testid="stWidgetLabel"] p, label { color: #8b949e !important; font-size: 0.78rem !important; font-weight: 600 !important; letter-spacing: 0.3px !important; text-transform: uppercase !important; }
+
+/* Scrollbar */
+::-webkit-scrollbar { width: 5px; height: 5px; }
+::-webkit-scrollbar-track { background: #131722; }
+::-webkit-scrollbar-thumb { background: #2a2e39; border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: #3a3e49; }
 
 /* Ticker */
 .ticker-wrapper { background: #1e222d; border: 1px solid #2a2e39; border-radius: 8px; overflow: hidden; white-space: nowrap; padding: 8px 0; margin-bottom: 18px; }
