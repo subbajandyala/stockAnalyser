@@ -604,24 +604,14 @@ with _kite_col:
             st.session_state.pop("_kite_auto_name", None)
             st.rerun()
     elif _has_secret:
-        st.link_button("🔑 Kite Login", url=_login_url, use_container_width=True)
-        # Patch link button target to _top so OAuth redirect stays in the same tab
-        _scomp.html("""<script>
-(function(){
-  function patch(){
-    var btns=window.parent.document.querySelectorAll('a[data-testid="stLinkButton"]');
-    btns.forEach(function(a){
-      if(a.href && a.href.indexOf('kite.zerodha.com')>-1){
-        a.setAttribute('target','_top');
-      }
-    });
-    if(!btns.length) setTimeout(patch,250);
-  }
-  patch();
-  setTimeout(patch,500);
-  setTimeout(patch,1500);
-})();
-</script>""", height=0)
+        st.markdown(
+            f'<a href="{_login_url}" target="_top" style="'
+            'display:block;text-align:center;padding:7px 10px;'
+            'background:rgba(56,126,209,0.15);border:1px solid rgba(56,126,209,0.4);'
+            'border-radius:8px;color:#79c0ff;font-size:0.82rem;font-weight:700;'
+            'text-decoration:none;white-space:nowrap;">🔑 Kite Login</a>',
+            unsafe_allow_html=True,
+        )
 
 
 # ── Scrolling ticker ──────────────────────────────────────────────────────────
