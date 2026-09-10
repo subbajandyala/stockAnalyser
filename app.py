@@ -588,6 +588,30 @@ _nav_links = "".join(
 )
 st.markdown(f'<nav class="mp-nav">{_nav_links}</nav>', unsafe_allow_html=True)
 
+# ── Kite login banner (shown when not connected) ──────────────────────────────
+if not _kite_ok and _has_secret:
+    # Form submit with target="_top" is the most reliable click-through
+    # technique inside Streamlit's component sandbox (allow-forms + allow-top-navigation)
+    _scomp.html(f"""
+<style>
+*{{box-sizing:border-box;margin:0;padding:0;}}
+body{{background:transparent;padding:0 0 4px;}}
+button{{
+  width:100%;padding:11px 14px;
+  background:linear-gradient(135deg,rgba(56,126,209,0.18),rgba(56,126,209,0.1));
+  border:1px solid rgba(56,126,209,0.45);border-radius:9px;
+  color:#79c0ff;font-size:0.9rem;font-weight:700;
+  cursor:pointer;font-family:Inter,-apple-system,sans-serif;
+  letter-spacing:0.2px;
+}}
+button:hover{{background:rgba(56,126,209,0.28);border-color:rgba(56,126,209,0.7);}}
+button:active{{background:rgba(56,126,209,0.4);}}
+</style>
+<form action="{_login_url}" method="GET" target="_top">
+<button type="submit">🔑 Login with Zerodha</button>
+</form>
+""", height=52)
+
 # ── Timeframe selector ────────────────────────────────────────────────────────
 _tf_col, _kite_col = st.columns([3, 1])
 with _tf_col:
@@ -603,19 +627,6 @@ with _kite_col:
             st.session_state.pop("kite_access_token", None)
             st.session_state.pop("_kite_auto_name", None)
             st.rerun()
-    elif _has_secret:
-        _scomp.html(f"""
-<style>
-body{{margin:0;padding:0;background:transparent;}}
-a{{display:block;text-align:center;padding:7px 10px;
-background:rgba(56,126,209,0.15);border:1px solid rgba(56,126,209,0.4);
-border-radius:8px;color:#79c0ff;font-size:0.82rem;font-weight:700;
-text-decoration:none;white-space:nowrap;font-family:Inter,sans-serif;
-cursor:pointer;}}
-a:hover{{background:rgba(56,126,209,0.28);}}
-</style>
-<a href="{_login_url}" target="_top">🔑 Kite Login</a>
-""", height=38)
 
 
 # ── Scrolling ticker ──────────────────────────────────────────────────────────
