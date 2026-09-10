@@ -590,8 +590,8 @@ st.markdown(f'<nav class="mp-nav">{_nav_links}</nav>', unsafe_allow_html=True)
 
 # ── Kite login banner (shown when not connected) ──────────────────────────────
 if not _kite_ok and _has_secret:
-    # Form submit with target="_top" is the most reliable click-through
-    # technique inside Streamlit's component sandbox (allow-forms + allow-top-navigation)
+    # GET form submission replaces the action's query string with form fields,
+    # so pass api_key and v as hidden inputs instead of baking them into action.
     _scomp.html(f"""
 <style>
 *{{box-sizing:border-box;margin:0;padding:0;}}
@@ -607,8 +607,10 @@ button{{
 button:hover{{background:rgba(56,126,209,0.28);border-color:rgba(56,126,209,0.7);}}
 button:active{{background:rgba(56,126,209,0.4);}}
 </style>
-<form action="{_login_url}" method="GET" target="_top">
-<button type="submit">🔑 Login with Zerodha</button>
+<form action="https://kite.zerodha.com/connect/login" method="GET" target="_top">
+  <input type="hidden" name="api_key" value="{_login_key}">
+  <input type="hidden" name="v" value="3">
+  <button type="submit">🔑 Login with Zerodha</button>
 </form>
 """, height=52)
 
