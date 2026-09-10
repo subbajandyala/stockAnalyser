@@ -78,20 +78,29 @@ st.set_page_config(page_title="MarketPulse", layout="wide", page_icon="🐂")
 st.markdown("""
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&display=swap');
-@import url('https://fonts.googleapis.com/icon?family=Material+Icons+Round');
 
-/* Apply Inter everywhere EXCEPT Material Icon spans */
-*:not(.material-icons):not(.material-icons-round):not(.material-icons-outlined):not([data-testid="stSidebarCollapsedControl"] span):not([data-testid="collapsedControl"] span) {
+/* Base font on body — cascades without !important so icon fonts survive */
+body, .stApp, .main, p, h1, h2, h3, h4, h5, h6,
+button, input, textarea, select, label, td, th, li, a,
+[data-testid], [class*="st-"] {
   font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif !important;
 }
-/* Restore icon font for Streamlit's sidebar toggle and any material icon element */
-.material-icons, .material-icons-round, .material-icons-outlined,
+
+/* Sidebar collapse toggle — hide broken ligature text, show ☰ via CSS */
 [data-testid="stSidebarCollapsedControl"] span,
 [data-testid="collapsedControl"] span {
-  font-family: 'Material Icons Round' !important;
-  font-size: 20px !important;
-  display: inline-flex !important;
-  align-items: center !important;
+  font-size: 0 !important;
+  width: 22px !important;
+  display: inline-block !important;
+}
+[data-testid="stSidebarCollapsedControl"] span::after,
+[data-testid="collapsedControl"] span::after {
+  content: '☰';
+  font-size: 18px !important;
+  font-family: sans-serif !important;
+  color: #c9d1d9 !important;
+  display: block !important;
+  line-height: 1 !important;
 }
 
 .stApp { background: #131722; }
