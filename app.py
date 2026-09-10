@@ -52,6 +52,15 @@ from screener.elder_ray import (
     run_elder_ray_signal, fetch_atm_option,
     INDEX_CONFIG as _ER_INDEX_CONFIG,
 )
+from screener.late_session import (
+    INDEX_CONFIG as _LS_CONFIG,
+    score_signal  as _ls_score,
+    raw_signal    as _ls_raw_signal,
+    apply_flip_guard as _ls_flip_guard,
+    fetch_data    as _ls_fetch,
+    session_window as _ls_window,
+    atm_strike    as _ls_atm,
+)
 from plotly.subplots import make_subplots
 
 try:
@@ -5818,6 +5827,429 @@ def page_rpci():
                     st.info("Momentum data not available.")
 
 
+# ── Late Session Blaster page ─────────────────────────────────────────────────
+
+def page_late_session():
+    _IST_LS = datetime.timezone(datetime.timedelta(hours=5, minutes=30))
+
+    st.markdown("""<style>
+/* Late Session Blaster */
+.lhb-header{display:flex;align-items:center;gap:10px;margin-bottom:4px;}
+.lhb-title{font-size:1.45rem;font-weight:800;color:#f0f6fc;}
+.lhb-badge-live{background:#0d2818;border:1px solid #2ea043;color:#2ea043;font-size:.68rem;font-weight:700;padding:3px 9px;border-radius:20px;letter-spacing:.8px;}
+.lhb-badge-cas{background:#1a1200;border:1px solid #ffa657;color:#ffa657;font-size:.68rem;font-weight:700;padding:3px 9px;border-radius:20px;letter-spacing:.8px;}
+.lhb-badge-wait{background:#161b22;border:1px solid #30363d;color:#6e7681;font-size:.68rem;font-weight:700;padding:3px 9px;border-radius:20px;}
+.lhb-cdown{display:flex;align-items:center;gap:8px;background:#12191f;border:1px solid #21262d;border-radius:8px;padding:7px 14px;margin-bottom:12px;}
+.lhb-cdown-lbl{font-size:.72rem;color:#6e7681;}
+.lhb-cdown-val{font-size:1.1rem;font-weight:700;color:#e6b800;font-variant-numeric:tabular-nums;}
+/* Signal card */
+.lhb-card{border-radius:12px;padding:20px 24px;margin:10px 0;position:relative;overflow:hidden;}
+.lhb-card-strong-ce{background:linear-gradient(135deg,#001a12,#003020);border:2px solid #00d4aa;box-shadow:0 0 20px rgba(0,212,170,.25);}
+.lhb-card-ce{background:linear-gradient(135deg,#0d1a16,#0a1f18);border:2px solid rgba(0,212,170,.5);}
+.lhb-card-strong-pe{background:linear-gradient(135deg,#1a0007,#2d000c);border:2px solid #f85149;box-shadow:0 0 20px rgba(248,81,73,.25);}
+.lhb-card-pe{background:linear-gradient(135deg,#1a0d0d,#200e0e);border:2px solid rgba(248,81,73,.5);}
+.lhb-card-watch{background:linear-gradient(135deg,#0d1117,#12191f);border:1px solid #e6b800;}
+.lhb-card-wait{background:#0d1117;border:1px solid #21262d;}
+.lhb-sig-lbl{font-size:.7rem;color:#6e7681;text-transform:uppercase;letter-spacing:1px;margin-bottom:4px;}
+.lhb-sig-strong-ce{font-size:1.9rem;font-weight:900;color:#00d4aa;letter-spacing:-1px;}
+.lhb-sig-ce{font-size:1.6rem;font-weight:800;color:#00d4aa;}
+.lhb-sig-strong-pe{font-size:1.9rem;font-weight:900;color:#f85149;letter-spacing:-1px;}
+.lhb-sig-pe{font-size:1.6rem;font-weight:800;color:#f85149;}
+.lhb-sig-watch{font-size:1.5rem;font-weight:700;color:#e6b800;}
+.lhb-sig-wait{font-size:1.5rem;font-weight:700;color:#6e7681;}
+.lhb-sig-sub{font-size:.84rem;color:#6e7681;margin-top:5px;}
+.lhb-score-box{position:absolute;top:16px;right:20px;text-align:right;}
+.lhb-score-lbl{font-size:.68rem;color:#6e7681;letter-spacing:.8px;text-transform:uppercase;}
+.lhb-score-ce{font-size:1.2rem;font-weight:800;color:#00d4aa;}
+.lhb-score-pe{font-size:1.2rem;font-weight:800;color:#f85149;}
+.lhb-score-nt{font-size:1.2rem;font-weight:700;color:#6e7681;}
+/* flip guard banner */
+.lhb-flip-warn{background:rgba(230,184,0,.08);border:1px solid rgba(230,184,0,.35);border-radius:8px;padding:8px 14px;margin:6px 0;font-size:.78rem;color:#e6b800;}
+/* Factor table */
+.lhb-factor-tbl{width:100%;border-collapse:collapse;font-size:.8rem;margin:10px 0;}
+.lhb-factor-tbl th{color:#6e7681;font-size:.65rem;font-weight:700;text-transform:uppercase;letter-spacing:.7px;border-bottom:1px solid #21262d;padding:5px 8px;text-align:left;}
+.lhb-factor-tbl td{padding:5px 8px;border-bottom:1px solid #161b22;vertical-align:middle;color:#c9d1d9;}
+.lhb-factor-tbl tr:last-child td{border-bottom:none;}
+.lhb-bias-ce{display:inline-block;background:#0d2818;color:#2ea043;border:1px solid #2ea043;font-size:.65rem;padding:1px 7px;border-radius:4px;font-weight:700;}
+.lhb-bias-pe{display:inline-block;background:#2a0d0d;color:#f85149;border:1px solid #f85149;font-size:.65rem;padding:1px 7px;border-radius:4px;font-weight:700;}
+.lhb-bias-neu{display:inline-block;background:#161b22;color:#6e7681;border:1px solid #30363d;font-size:.65rem;padding:1px 7px;border-radius:4px;}
+.lhb-pts-pos{color:#00d4aa;font-weight:700;}
+.lhb-pts-neg{color:#f85149;font-weight:700;}
+.lhb-pts-neu{color:#6e7681;}
+/* Stats row */
+.lhb-stat{background:#1e222d;border:1px solid #2a2e39;border-radius:8px;padding:10px 14px;text-align:center;}
+.lhb-stat-val{font-size:1.2rem;font-weight:800;color:#f0f6fc;}
+.lhb-stat-lbl{font-size:.62rem;color:#6e7681;text-transform:uppercase;letter-spacing:.7px;margin-top:2px;}
+/* ATM box */
+.lhb-atm-box{background:#1e222d;border:1px solid #2a2e39;border-radius:10px;padding:14px 18px;}
+.lhb-atm-title{font-size:.68rem;font-weight:700;color:#6e7681;text-transform:uppercase;letter-spacing:.8px;margin-bottom:8px;}
+.lhb-atm-row{display:flex;justify-content:space-between;align-items:center;padding:4px 0;border-bottom:1px solid #161b22;font-size:.82rem;}
+.lhb-atm-row:last-child{border-bottom:none;}
+.lhb-atm-sym{font-weight:700;color:#f0f6fc;}
+.lhb-atm-note{font-size:.68rem;color:#6e7681;}
+.lhb-ce-txt{color:#00d4aa;font-weight:700;}
+.lhb-pe-txt{color:#f85149;font-weight:700;}
+/* CAS box */
+.lhb-cas-box{background:rgba(255,166,87,.06);border:1px solid rgba(255,166,87,.35);border-radius:10px;padding:14px 18px;margin-top:12px;}
+.lhb-cas-title{font-size:.68rem;font-weight:700;color:#ffa657;text-transform:uppercase;letter-spacing:.8px;margin-bottom:6px;}
+</style>""", unsafe_allow_html=True)
+
+    # ── Header & countdown ────────────────────────────────────────────────────
+    _in_late, _in_cas, _mins_left = _ls_window()
+    _now_ls = datetime.datetime.now(_IST_LS)
+
+    _badge = (
+        '<span class="lhb-badge-live">ACTIVE</span>' if _in_late
+        else '<span class="lhb-badge-wait">OUTSIDE WINDOW</span>'
+    )
+    _cas_badge = '<span class="lhb-badge-cas">CAS LIVE</span>' if _in_cas else ''
+
+    st.markdown(
+        f'<div class="lhb-header">'
+        f'<span class="lhb-title">🌅 Late Session Blaster</span>'
+        f'{_badge}{_cas_badge}'
+        f'</div>'
+        f'<div style="color:#6e7681;font-size:.8rem;margin-bottom:10px;">'
+        f'Last 45 min NIFTY/BANKNIFTY/SENSEX CE & PE · CAS wild-move detection · Flip-guard prevents conflicting signals'
+        f'</div>',
+        unsafe_allow_html=True,
+    )
+
+    _hh = _mins_left // 60; _mm = _mins_left % 60
+    st.markdown(
+        f'<div class="lhb-cdown">'
+        f'<span class="lhb-cdown-lbl">NSE closes in</span>'
+        f'<span class="lhb-cdown-val">{_hh:02d}:{_mm:02d}</span>'
+        f'<span class="lhb-cdown-lbl" style="margin-left:12px;">Active window: 2:30–3:30 PM NSE  |  3:00–4:00 PM CAS (SENSEX)</span>'
+        f'</div>',
+        unsafe_allow_html=True,
+    )
+
+    # ── Auto-refresh (always on 30 s) ─────────────────────────────────────────
+    _ls_tick     = _st_autorefresh(interval=30_000, key="ls_autorefresh")
+    _ls_prev_tick = st.session_state.get("ls_prev_tick", -1)
+    _should_refresh = (_ls_tick != _ls_prev_tick)
+    st.session_state["ls_prev_tick"] = _ls_tick
+
+    # ── Index selector ─────────────────────────────────────────────────────────
+    _lc1, _lc2, _lc3 = st.columns([2, 1, 1])
+    with _lc1:
+        _ls_sym = st.radio("Index", list(_LS_CONFIG.keys()), horizontal=True,
+                           key="ls_sym", label_visibility="collapsed")
+    with _lc2:
+        _ls_refresh_btn = st.button("⟳ Refresh Now", use_container_width=True, key="ls_refresh_btn")
+    with _lc3:
+        _ls_clear_btn = st.button("✕ Clear Signal", use_container_width=True, key="ls_clear_btn")
+
+    _cfg = _LS_CONFIG[_ls_sym]
+    _step = _cfg["step"]
+    _color = _cfg["color"]
+    _is_cas = _cfg["cas"] and _in_cas
+
+    if _ls_clear_btn:
+        for _k in (f"ls_{_ls_sym}_signal", f"ls_{_ls_sym}_signal_time",
+                   f"ls_{_ls_sym}_pending_count", f"ls_{_ls_sym}_data"):
+            st.session_state.pop(_k, None)
+        st.rerun()
+
+    # ── Fetch + score ─────────────────────────────────────────────────────────
+    if _should_refresh or _ls_refresh_btn or f"ls_{_ls_sym}_data" not in st.session_state:
+        with st.spinner(f"Fetching {_ls_sym} intraday data…"):
+            _ls_data = _ls_fetch(_ls_sym)
+        if _ls_data.get("error"):
+            st.error(_ls_data["error"])
+            st.session_state.pop(f"ls_{_ls_sym}_data", None)
+        else:
+            st.session_state[f"ls_{_ls_sym}_data"]     = _ls_data
+            st.session_state[f"ls_{_ls_sym}_fetched"]  = _now_ls
+
+    _ls_data   = st.session_state.get(f"ls_{_ls_sym}_data")
+    _ls_fetched = st.session_state.get(f"ls_{_ls_sym}_fetched")
+
+    if _ls_data is None:
+        st.info("Click **⟳ Refresh Now** to load intraday data.")
+        return
+
+    _df5 = _ls_data["df_5m"]
+    _df1 = _ls_data.get("df_1m")
+
+    # Score
+    _sc_res = _ls_score(_df5, _df1, is_cas=_is_cas)
+    if _sc_res.get("error"):
+        st.warning(_sc_res["error"])
+        return
+
+    _new_raw = _ls_raw_signal(_sc_res["score"])
+
+    # Apply flip guard
+    _prev_sig   = st.session_state.get(f"ls_{_ls_sym}_signal",       "WATCH")
+    _prev_time  = st.session_state.get(f"ls_{_ls_sym}_signal_time",   None)
+    _pend_count = st.session_state.get(f"ls_{_ls_sym}_pending_count", 0)
+
+    _final_sig, _new_pcount, _flip_msg = _ls_flip_guard(
+        _new_raw, _prev_sig, _prev_time, _pend_count
+    )
+
+    # Only update stored signal if direction changed
+    if _final_sig != _prev_sig:
+        st.session_state[f"ls_{_ls_sym}_signal"]       = _final_sig
+        st.session_state[f"ls_{_ls_sym}_signal_time"]  = _now_ls
+        st.session_state[f"ls_{_ls_sym}_pending_count"] = _new_pcount
+    else:
+        st.session_state[f"ls_{_ls_sym}_pending_count"] = _new_pcount
+
+    _spot        = _sc_res["spot"]
+    _vwap        = _sc_res["vwap"]
+    _velocity    = _sc_res["velocity"]
+    _vol_ratio   = _sc_res["volume_ratio"]
+    _score       = _sc_res["score"]
+    _factors     = _sc_res["factors"]
+    _atm         = _ls_atm(_spot, _step) if not (isinstance(_spot, float) and _spot != _spot) else 0
+
+    # Signal age
+    _sig_age_str = ""
+    if _prev_time:
+        _elapsed_s = int((_now_ls - _prev_time).total_seconds())
+        _sig_age_str = f"{_elapsed_s // 60}m {_elapsed_s % 60}s"
+
+    # ── Signal card ───────────────────────────────────────────────────────────
+    def _card_cls(sig: str) -> tuple[str, str, str]:
+        """Returns (card_class, sig_class, sig_text)."""
+        if sig == "STRONG BUY CE":
+            return "lhb-card-strong-ce", "lhb-sig-strong-ce", "🟢 STRONG BUY CE"
+        if sig == "BUY CE":
+            return "lhb-card-ce",        "lhb-sig-ce",        "🟢 BUY CE"
+        if sig == "STRONG BUY PE":
+            return "lhb-card-strong-pe", "lhb-sig-strong-pe", "🔴 STRONG BUY PE"
+        if sig == "BUY PE":
+            return "lhb-card-pe",        "lhb-sig-pe",        "🔴 BUY PE"
+        if sig in ("WATCH CE", "WATCH PE"):
+            return "lhb-card-watch",     "lhb-sig-watch",     f"⚠️ {sig}"
+        return "lhb-card-wait",          "lhb-sig-wait",      "⏳ WATCH / WAIT"
+
+    _cc, _sc2, _st2 = _card_cls(_final_sig)
+    _score_cls = "lhb-score-ce" if _score > 0 else ("lhb-score-pe" if _score < 0 else "lhb-score-nt")
+
+    _atm_display = f"ATM: **{_atm} {('CE' if 'CE' in _final_sig else 'PE' if 'PE' in _final_sig else 'CE/PE')}**" if _atm else ""
+    _sub_txt = (
+        f"Strike: {_atm} · Vol {_vol_ratio:.1f}× avg"
+        + (f" · Signal held {_sig_age_str}" if _sig_age_str else "")
+        + (" · CAS auction active" if _is_cas else "")
+    )
+
+    st.markdown(
+        f'<div class="lhb-card {_cc}">'
+        f'<div class="lhb-sig-lbl">SIGNAL — {_ls_sym}</div>'
+        f'<div class="{_sc2}">{_st2}</div>'
+        f'<div class="lhb-sig-sub">{_sub_txt}</div>'
+        f'<div class="lhb-score-box">'
+        f'<div class="lhb-score-lbl">SCORE</div>'
+        f'<div class="{_score_cls}">{_score:+d}/10</div>'
+        f'</div></div>',
+        unsafe_allow_html=True,
+    )
+
+    # Flip guard warning
+    if _flip_msg:
+        st.markdown(f'<div class="lhb-flip-warn">⏳ {_flip_msg}</div>', unsafe_allow_html=True)
+
+    if _ls_fetched:
+        st.caption(f"Data as of {_ls_fetched.strftime('%H:%M:%S')} IST · auto-refresh 30s")
+
+    # ── Stat row ──────────────────────────────────────────────────────────────
+    _s1, _s2, _s3, _s4 = st.columns(4)
+    for _col, _val, _lbl in [
+        (_s1, f"₹{_spot:,.1f}",    f"{_ls_sym} SPOT"),
+        (_s2, f"₹{_vwap:,.1f}" if not (isinstance(_vwap, float) and _vwap != _vwap) else "N/A",
+              "VWAP"),
+        (_s3, f"{_velocity:+.1f}",  "VEL (pts/5m)"),
+        (_s4, f"{_vol_ratio:.1f}×", "VOLUME"),
+    ]:
+        with _col:
+            st.markdown(
+                f'<div class="lhb-stat">'
+                f'<div class="lhb-stat-val">{_val}</div>'
+                f'<div class="lhb-stat-lbl">{_lbl}</div>'
+                f'</div>',
+                unsafe_allow_html=True,
+            )
+
+    st.markdown("<br>", unsafe_allow_html=True)
+
+    # ── Factor table + ATM box ─────────────────────────────────────────────────
+    _fl, _fr = st.columns([3, 2])
+
+    with _fl:
+        _rows_html = ""
+        for _f in _factors:
+            _pts = _f["pts"]
+            _bias_cls = "lhb-bias-ce" if _f["bias"] == "CE" else (
+                "lhb-bias-pe" if _f["bias"] == "PE" else "lhb-bias-neu")
+            _pts_cls = "lhb-pts-pos" if _pts > 0 else ("lhb-pts-neg" if _pts < 0 else "lhb-pts-neu")
+            _rows_html += (
+                f'<tr>'
+                f'<td><b>{_f["name"]}</b></td>'
+                f'<td style="color:#8b949e;">{_f["value"]}</td>'
+                f'<td><span class="{_bias_cls}">{_f["bias"]}</span></td>'
+                f'<td class="{_pts_cls}" style="text-align:right;">{_pts:+d}</td>'
+                f'</tr>'
+            )
+        # Total row
+        _tot_cls = "lhb-pts-pos" if _score > 0 else ("lhb-pts-neg" if _score < 0 else "lhb-pts-neu")
+        _rows_html += (
+            f'<tr style="border-top:2px solid #2a2e39;">'
+            f'<td colspan="3" style="font-weight:700;color:#f0f6fc;">TOTAL SCORE</td>'
+            f'<td class="{_tot_cls}" style="text-align:right;font-weight:800;font-size:.95rem;">{_score:+d}</td>'
+            f'</tr>'
+        )
+        st.markdown(
+            f'<table class="lhb-factor-tbl"><thead><tr>'
+            f'<th>FACTOR</th><th>READING</th><th>BIAS</th><th style="text-align:right;">PTS</th>'
+            f'</tr></thead><tbody>{_rows_html}</tbody></table>',
+            unsafe_allow_html=True,
+        )
+
+    with _fr:
+        _ce_strike = _atm
+        _pe_strike = _atm
+        _itm_ce    = _atm - _step
+        _itm_pe    = _atm + _step
+
+        st.markdown(
+            f'<div class="lhb-atm-box">'
+            f'<div class="lhb-atm-title">⚡ Strikes to Watch</div>'
+            f'<div class="lhb-atm-row">'
+            f'<span class="lhb-atm-sym lhb-ce-txt">{_ce_strike} CE</span>'
+            f'<span class="lhb-atm-note">ATM · lot {_cfg["lot"]}</span>'
+            f'</div>'
+            f'<div class="lhb-atm-row">'
+            f'<span class="lhb-atm-sym lhb-pe-txt">{_pe_strike} PE</span>'
+            f'<span class="lhb-atm-note">ATM · lot {_cfg["lot"]}</span>'
+            f'</div>'
+            f'<div class="lhb-atm-row" style="opacity:.6;">'
+            f'<span class="lhb-atm-sym lhb-ce-txt">{_itm_ce} CE</span>'
+            f'<span class="lhb-atm-note">1-ITM CE</span>'
+            f'</div>'
+            f'<div class="lhb-atm-row" style="opacity:.6;">'
+            f'<span class="lhb-atm-sym lhb-pe-txt">{_itm_pe} PE</span>'
+            f'<span class="lhb-atm-note">1-ITM PE</span>'
+            f'</div>'
+            f'</div>',
+            unsafe_allow_html=True,
+        )
+
+        # CAS box — show when SENSEX is selected and CAS window is active
+        if _cfg.get("cas"):
+            _cas_status = "🟠 CAS ACTIVE NOW (3:00–4:00 PM)" if _in_cas else "CAS window: 3:00–4:00 PM IST"
+            _cas_note = (
+                "BSE Closing Auction Session running — institutional orders dominate. "
+                "Trend into CAS typically continues with amplified velocity."
+                if _in_cas else
+                "CAS not yet active. Watch for volume build-up from 2:30 PM onward."
+            )
+            st.markdown(
+                f'<div class="lhb-cas-box">'
+                f'<div class="lhb-cas-title">{_cas_status}</div>'
+                f'<div style="font-size:.77rem;color:#8b949e;">{_cas_note}</div>'
+                f'</div>',
+                unsafe_allow_html=True,
+            )
+
+    # ── 5-min price chart with VWAP + EMA9/21 ────────────────────────────────
+    st.markdown("<div style='margin-top:14px;'></div>", unsafe_allow_html=True)
+    with st.expander("5-min chart · VWAP · EMA 9/21", expanded=True):
+        try:
+            import plotly.graph_objects as _lgo
+            _d5  = _df5.copy()
+            if _d5.index.tz is None:
+                _d5.index = _d5.index.tz_localize("UTC").tz_convert(_IST_LS)
+            else:
+                _d5.index = _d5.index.tz_convert(_IST_LS)
+            # Today only
+            _today_mask = pd.Series(_d5.index.date, index=_d5.index) == datetime.date.today()
+            _d5 = _d5[_today_mask]
+
+            if not _d5.empty:
+                from screener.late_session import _ema as _ls_ema_fn
+                _c5  = _d5["Close"].dropna()
+                _e9  = _ls_ema_fn(_c5, 9)
+                _e21 = _ls_ema_fn(_c5, 21)
+
+                # VWAP from 1m if available, else 5m
+                _vwap_line = None
+                _src_df = _df1 if (_df1 is not None and not _df1.empty) else _d5
+                if not _src_df.empty:
+                    _s1m = _src_df.copy()
+                    if _s1m.index.tz is None:
+                        _s1m.index = _s1m.index.tz_localize("UTC").tz_convert(_IST_LS)
+                    else:
+                        _s1m.index = _s1m.index.tz_convert(_IST_LS)
+                    _s1m = _s1m[pd.Series(_s1m.index.date, index=_s1m.index) == datetime.date.today()]
+                    if not _s1m.empty and "Volume" in _s1m.columns:
+                        _tp = (_s1m["High"] + _s1m["Low"] + _s1m["Close"]) / 3
+                        _vp = (_tp * _s1m["Volume"].replace(0, float("nan"))).cumsum()
+                        _vs = _s1m["Volume"].replace(0, float("nan")).cumsum()
+                        _vwap_s = _vp / _vs
+                        # Resample to 5m for overlay
+                        _vwap_5m = _vwap_s.resample("5min").last().ffill()
+                        # Align with _d5 index
+                        _common = _d5.index.intersection(_vwap_5m.index)
+                        if len(_common) > 0:
+                            _vwap_line = _vwap_5m.loc[_common]
+
+                _fig_ls = _lgo.Figure()
+
+                # Candlestick
+                _fig_ls.add_trace(_lgo.Candlestick(
+                    x=_d5.index, open=_d5["Open"], high=_d5["High"],
+                    low=_d5["Low"], close=_d5["Close"],
+                    increasing_line_color="#00d4aa", decreasing_line_color="#f85149",
+                    name=_ls_sym, showlegend=False,
+                ))
+
+                # EMA 9
+                _fig_ls.add_trace(_lgo.Scatter(
+                    x=_c5.index, y=_e9.values,
+                    line=dict(color="#e6b800", width=1.5), name="EMA 9",
+                ))
+                # EMA 21
+                _fig_ls.add_trace(_lgo.Scatter(
+                    x=_c5.index, y=_e21.values,
+                    line=dict(color="#ffa657", width=1.5, dash="dot"), name="EMA 21",
+                ))
+                # VWAP
+                if _vwap_line is not None:
+                    _fig_ls.add_trace(_lgo.Scatter(
+                        x=_vwap_line.index, y=_vwap_line.values,
+                        line=dict(color="#79c0ff", width=1.5, dash="dashdot"), name="VWAP",
+                    ))
+
+                # Highlight late session (2:30 PM onward)
+                _late_start_dt = _d5.index[-1].normalize().replace(
+                    hour=14, minute=30, tzinfo=_IST_LS)
+                _fig_ls.add_vrect(
+                    x0=str(_late_start_dt), x1=str(_d5.index[-1]),
+                    fillcolor="rgba(0,212,170,0.05)", line_width=0,
+                    annotation_text="Late Session", annotation_position="top left",
+                    annotation_font=dict(size=10, color="#00d4aa"),
+                )
+
+                _fig_ls.update_layout(
+                    height=380,
+                    paper_bgcolor="#131722", plot_bgcolor="#131722",
+                    font=dict(color="#6e7681"),
+                    xaxis=dict(gridcolor="#1e222d", rangeslider=dict(visible=False),
+                               tickfont=dict(size=9), showgrid=True),
+                    yaxis=dict(gridcolor="#1e222d", tickfont=dict(size=10)),
+                    legend=dict(orientation="h", yanchor="bottom", y=1.02,
+                                font=dict(size=10)),
+                    margin=dict(l=0, r=0, t=10, b=0),
+                )
+                st.plotly_chart(_fig_ls, use_container_width=True)
+        except Exception as _e:
+            st.caption(f"Chart error: {_e}")
+
+
 # ── Elder Ray Index Options Trading page ──────────────────────────────────────
 
 def page_elder_ray():
@@ -6249,6 +6681,7 @@ pg = st.navigation({
         st.Page(page_smart_alerts,      title="Smart Alerts",        icon="💡", default=True),
         st.Page(page_smart_alerts_pro,  title="Smart Alerts Pro",    icon="⚡"),
         st.Page(page_gamma_blast,       title="Expiry Gamma Blast",  icon="💥"),
+        st.Page(page_late_session,      title="Late Session Blaster",icon="🌅"),
         st.Page(page_oi_pulse,          title="Intraday OI Pulse",   icon="📡"),
         st.Page(page_elder_ray,         title="Elder Ray Trader",    icon="🎯"),
     ],
