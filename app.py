@@ -545,7 +545,7 @@ border-radius:10px;padding:10px 14px;margin:8px 0;">
         if _has_secret:
             # Full one-tap flow: button opens Kite login; redirect comes back here
             st.markdown(f"""
-<a href="{_login_url}" target="_self" style="text-decoration:none;">
+<a href="{_login_url}" target="_top" style="text-decoration:none;">
   <div style="background:linear-gradient(135deg,#387ed1,#2d6db5);border-radius:10px;
     padding:13px 16px;text-align:center;cursor:pointer;margin:8px 0;
     box-shadow:0 3px 12px rgba(56,126,209,0.4);">
