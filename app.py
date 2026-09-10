@@ -604,14 +604,18 @@ with _kite_col:
             st.session_state.pop("_kite_auto_name", None)
             st.rerun()
     elif _has_secret:
-        st.markdown(
-            f'<a href="{_login_url}" target="_top" style="'
-            'display:block;text-align:center;padding:7px 10px;'
-            'background:rgba(56,126,209,0.15);border:1px solid rgba(56,126,209,0.4);'
-            'border-radius:8px;color:#79c0ff;font-size:0.82rem;font-weight:700;'
-            'text-decoration:none;white-space:nowrap;">🔑 Kite Login</a>',
-            unsafe_allow_html=True,
-        )
+        _scomp.html(f"""
+<style>
+body{{margin:0;padding:0;background:transparent;}}
+a{{display:block;text-align:center;padding:7px 10px;
+background:rgba(56,126,209,0.15);border:1px solid rgba(56,126,209,0.4);
+border-radius:8px;color:#79c0ff;font-size:0.82rem;font-weight:700;
+text-decoration:none;white-space:nowrap;font-family:Inter,sans-serif;
+cursor:pointer;}}
+a:hover{{background:rgba(56,126,209,0.28);}}
+</style>
+<a href="{_login_url}" target="_top">🔑 Kite Login</a>
+""", height=38)
 
 
 # ── Scrolling ticker ──────────────────────────────────────────────────────────
