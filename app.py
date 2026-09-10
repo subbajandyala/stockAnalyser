@@ -175,6 +175,78 @@ hr { border-color: #2a2e39 !important; margin: 10px 0 !important; }
 .bpe-i { height:9px; background:rgba(0,212,170,0.65); border-radius:0 2px 2px 0; }
 .cup { color:#00d4aa; font-weight:600; } .cdn { color:#f85149; font-weight:600; }
 .atm-lbl { display:block; font-size:0.55rem; color:#00d4aa; letter-spacing:1.5px; font-weight:800; text-transform:uppercase; text-align:center; margin-top:1px; }
+
+/* ── Mobile responsiveness ───────────────────────────────────────────────── */
+@media (max-width: 768px) {
+  /* Base layout */
+  .main .block-container { padding: 0.5rem 0.75rem 2rem !important; max-width: 100% !important; }
+  .stApp { overflow-x: hidden !important; }
+
+  /* Sidebar: collapsible on mobile (Streamlit default), make it wider when open */
+  [data-testid="stSidebar"] { width: 80vw !important; min-width: 0 !important; }
+  [data-testid="stSidebarNavLink"] { padding: 10px 14px !important; font-size: 1rem !important; }
+
+  /* Hero text */
+  .hero-h1 { font-size: 1.6rem !important; letter-spacing: -0.5px !important; }
+  .hero-sub { font-size: 0.8rem !important; }
+
+  /* Columns: stack on mobile */
+  [data-testid="stHorizontalBlock"] { flex-direction: column !important; }
+  [data-testid="stHorizontalBlock"] > div { width: 100% !important; min-width: 100% !important; flex: none !important; }
+
+  /* Tabs: scrollable on small screens */
+  [data-testid="stTabs"] [role="tablist"] { overflow-x: auto !important; flex-wrap: nowrap !important; -webkit-overflow-scrolling: touch; scrollbar-width: none; }
+  [data-testid="stTabs"] [role="tablist"]::-webkit-scrollbar { display: none; }
+  [data-testid="stTabs"] button[role="tab"] { font-size: 0.7rem !important; padding: 5px 10px !important; white-space: nowrap !important; flex-shrink: 0 !important; }
+
+  /* Metric cards: 2 across on mobile */
+  [data-testid="metric-container"] { padding: 8px 10px !important; }
+  [data-testid="stMetricValue"] { font-size: 1.1rem !important; }
+
+  /* Tables: horizontal scroll */
+  [data-testid="stDataFrame"] { overflow-x: auto !important; font-size: 0.72rem !important; }
+  .oc-wrap { overflow-x: auto !important; -webkit-overflow-scrolling: touch; }
+  .oc-tbl { font-size: 0.7rem !important; }
+  .oc-tbl td, .oc-tbl th { padding: 4px 6px !important; }
+
+  /* Ticker: smaller on mobile */
+  .ticker-item { font-size: 0.72rem !important; margin: 0 14px !important; }
+
+  /* Buttons: full width on mobile */
+  button[kind="primary"] { width: 100% !important; font-size: 0.9rem !important; }
+
+  /* Signal cards */
+  .lhb-signal-card { padding: 14px 12px !important; }
+  .lhb-title { font-size: 1.1rem !important; }
+  .lhb-score-ring { width: 64px !important; height: 64px !important; font-size: 1.4rem !important; }
+  .lhb-signal-label { font-size: 1rem !important; }
+
+  /* RPCI sector cards */
+  .rpci-sec-card { min-width: 130px !important; }
+
+  /* Elder Ray / signal factor tables */
+  .er-factor-name { min-width: 80px !important; font-size: 0.72rem !important; }
+
+  /* Plotly charts: don't overflow */
+  .js-plotly-plot, .plotly { max-width: 100% !important; }
+  .stPlotlyChart { overflow-x: auto !important; }
+
+  /* Dialog/modal: full width */
+  [data-testid="stDialog"] > div { max-width: 100vw !important; width: 100vw !important; margin: 0 !important; border-radius: 0 !important; }
+
+  /* Hide ticker on very small screens */
+  @media (max-width: 400px) {
+    .ticker-wrapper { display: none !important; }
+  }
+}
+
+/* Touch-friendly tap targets */
+@media (hover: none) and (pointer: coarse) {
+  button { min-height: 44px !important; }
+  [data-testid="stSidebarNavLink"] { min-height: 48px !important; display: flex !important; align-items: center !important; }
+  [data-testid="stTabs"] button[role="tab"] { min-height: 40px !important; }
+  [data-testid="stSelectbox"] select { min-height: 44px !important; }
+}
 </style>
 """, unsafe_allow_html=True)
 
@@ -6678,30 +6750,14 @@ def page_elder_ray():
 # ── Navigation ────────────────────────────────────────────────────────────────
 pg = st.navigation({
     "⚡ Live Signals": [
-        st.Page(page_smart_alerts,      title="Smart Alerts",        icon="💡", default=True),
-        st.Page(page_smart_alerts_pro,  title="Smart Alerts Pro",    icon="⚡"),
+        st.Page(page_smart_alerts_pro,  title="Smart Alerts Pro",    icon="⚡", default=True),
         st.Page(page_gamma_blast,       title="Expiry Gamma Blast",  icon="💥"),
-        st.Page(page_late_session,      title="Late Session Blaster",icon="🌅"),
-        st.Page(page_oi_pulse,          title="Intraday OI Pulse",   icon="📡"),
         st.Page(page_elder_ray,         title="Elder Ray Trader",    icon="🎯"),
-    ],
-    "📊 Index & Options": [
-        st.Page(page_option_chain,      title="Option Chain",        icon="🔗"),
-        st.Page(page_trending_oi,       title="Trending OI",         icon="📡"),
-        st.Page(page_sensex_expiry,     title="Sensex Expiry Moves", icon="🚀"),
-        st.Page(page_fo_scanner,        title="F&O Scanner",         icon="🎯"),
-    ],
-    "📈 Stock Screeners": [
-        st.Page(page_cpr_retracement,   title="CPR Retracement",     icon="🎯"),
-        st.Page(page_ma_retracement,    title="20 MA Retracement",   icon="🔁"),
-        st.Page(page_ema_crossover,     title="EMA Crossover",       icon="📈"),
-        st.Page(page_ma50_support,      title="50 MA Support",       icon="🛡️"),
+        st.Page(page_late_session,      title="Late Session Blaster",icon="🌅"),
     ],
     "🔍 Research": [
         st.Page(page_rpci,              title="RPCI Screener",       icon="📈"),
         st.Page(page_red_flag,          title="Red Flag Radar",      icon="🚨"),
-        st.Page(page_fundamentals,      title="Fundamentals",        icon="📊"),
-        st.Page(page_news_breakout,     title="News + Breakout",     icon="📰"),
     ],
 })
 pg.run()
