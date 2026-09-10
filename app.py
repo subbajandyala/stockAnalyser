@@ -248,76 +248,113 @@ hr { border-color: #2a2e39 !important; margin: 10px 0 !important; }
 .cup { color:#00d4aa; font-weight:600; } .cdn { color:#f85149; font-weight:600; }
 .atm-lbl { display:block; font-size:0.55rem; color:#00d4aa; letter-spacing:1.5px; font-weight:800; text-transform:uppercase; text-align:center; margin-top:1px; }
 
-/* ── Mobile responsiveness ───────────────────────────────────────────────── */
+/* ── Hide sidebar + collapsed control ──────────────────────────────────────── */
+[data-testid="stSidebar"],
+[data-testid="stSidebarCollapsedControl"],
+[data-testid="collapsedControl"] { display: none !important; }
+.main .block-container {
+  padding-top: 0 !important;
+  padding-left: 0.75rem !important;
+  padding-right: 0.75rem !important;
+  max-width: 100% !important;
+}
+
+/* ── Top app bar ─────────────────────────────────────────────────────────── */
+.mp-topbar {
+  background: #13161f;
+  border-bottom: 1px solid #1e2433;
+  padding: 10px 16px;
+  display: flex; align-items: center; justify-content: space-between; gap: 10px;
+  position: sticky; top: 0; z-index: 999;
+  margin: -0.5rem -0.75rem 0;
+}
+.mp-brand { font-size: 1.05rem; font-weight: 900; color: #fff; letter-spacing: -0.3px; display:flex; align-items:center; gap:6px; }
+.mp-brand-accent { color: #00d4aa; }
+.mp-topright { display: flex; align-items: center; gap: 8px; }
+.mp-live { display: flex; align-items: center; gap: 4px; font-size: 0.65rem; font-weight: 700; color: #00d4aa; letter-spacing: 0.5px; }
+.mp-kite-ok  { background: rgba(0,212,170,0.1); border: 1px solid rgba(0,212,170,0.3); color: #00d4aa; font-size: 0.68rem; font-weight: 700; padding: 3px 10px; border-radius: 20px; }
+.mp-kite-btn { background: rgba(56,126,209,0.15); border: 1px solid rgba(56,126,209,0.35); color: #79c0ff; font-size: 0.68rem; font-weight: 700; padding: 3px 10px; border-radius: 20px; text-decoration: none !important; white-space: nowrap; }
+.mp-kite-btn:hover { background: rgba(56,126,209,0.25) !important; }
+
+/* ── Page nav tabs ─────────────────────────────────────────────────────────── */
+.mp-nav {
+  background: #13161f;
+  border-bottom: 1px solid #1e2433;
+  display: flex; flex-direction: row; gap: 0; align-items: stretch;
+  overflow-x: auto; -webkit-overflow-scrolling: touch; scrollbar-width: none;
+  margin: 0 -0.75rem 1rem;
+  padding: 0 4px;
+}
+.mp-nav::-webkit-scrollbar { display: none; }
+.mp-nav a {
+  flex-shrink: 0; display: flex; align-items: center; gap: 5px;
+  padding: 12px 15px; font-size: 0.83rem; font-weight: 600;
+  color: #5c6470; text-decoration: none !important;
+  border-bottom: 2px solid transparent; margin-bottom: -1px;
+  white-space: nowrap; transition: color 0.15s, border-color 0.15s;
+  letter-spacing: 0.1px;
+}
+.mp-nav a:hover { color: #c9d1d9; }
+.mp-nav a.active { color: #00d4aa; border-bottom-color: #00d4aa; }
+
+/* ── Ticker strip in topbar ─────────────────────────────────────────────── */
+.mp-ticker { display: flex; gap: 16px; overflow: hidden; font-size: 0.7rem; font-weight: 600; }
+.mp-ticker-item { white-space: nowrap; color: #8b949e; }
+.mp-ticker-item .tu { color: #00d4aa; } .mp-ticker-item .td { color: #f85149; }
+
+/* ── Timeframe strip ─────────────────────────────────────────────────────── */
+[data-testid="stSegmentedControl"] {
+  background: #1a1e2a !important; border: 1px solid #2a2e39 !important;
+  border-radius: 8px !important; padding: 3px !important;
+}
+[data-testid="stSegmentedControl"] button {
+  font-size: 0.75rem !important; font-weight: 600 !important;
+  padding: 4px 10px !important; color: #6e7681 !important;
+  border-radius: 6px !important;
+}
+[data-testid="stSegmentedControl"] button[aria-checked="true"] {
+  background: rgba(0,212,170,0.14) !important; color: #00d4aa !important;
+}
+
+/* ── Mobile ──────────────────────────────────────────────────────────────── */
 @media (max-width: 768px) {
-  /* Base layout */
-  .main .block-container { padding: 0.5rem 0.75rem 2rem !important; max-width: 100% !important; }
+  .main .block-container { padding: 0 0.6rem 2rem !important; }
   .stApp { overflow-x: hidden !important; }
+  .mp-topbar { padding: 9px 12px; margin: -0.5rem -0.6rem 0; }
+  .mp-brand { font-size: 0.95rem; }
+  .mp-nav { margin: 0 -0.6rem 0.75rem; }
+  .mp-nav a { padding: 10px 12px; font-size: 0.78rem; }
 
-  /* Sidebar: collapsible on mobile (Streamlit default), make it wider when open */
-  [data-testid="stSidebar"] { width: 80vw !important; min-width: 0 !important; }
-  [data-testid="stSidebarNavLink"] { padding: 10px 14px !important; font-size: 1rem !important; }
-
-  /* Hero text */
-  .hero-h1 { font-size: 1.6rem !important; letter-spacing: -0.5px !important; }
-  .hero-sub { font-size: 0.8rem !important; }
-
-  /* Columns: stack on mobile */
   [data-testid="stHorizontalBlock"] { flex-direction: column !important; }
   [data-testid="stHorizontalBlock"] > div { width: 100% !important; min-width: 100% !important; flex: none !important; }
 
-  /* Tabs: scrollable on small screens */
   [data-testid="stTabs"] [role="tablist"] { overflow-x: auto !important; flex-wrap: nowrap !important; -webkit-overflow-scrolling: touch; scrollbar-width: none; }
   [data-testid="stTabs"] [role="tablist"]::-webkit-scrollbar { display: none; }
   [data-testid="stTabs"] button[role="tab"] { font-size: 0.7rem !important; padding: 5px 10px !important; white-space: nowrap !important; flex-shrink: 0 !important; }
 
-  /* Metric cards: 2 across on mobile */
   [data-testid="metric-container"] { padding: 8px 10px !important; }
-  [data-testid="stMetricValue"] { font-size: 1.1rem !important; }
+  [data-testid="stMetricValue"] { font-size: 1.05rem !important; }
 
-  /* Tables: horizontal scroll */
   [data-testid="stDataFrame"] { overflow-x: auto !important; font-size: 0.72rem !important; }
   .oc-wrap { overflow-x: auto !important; -webkit-overflow-scrolling: touch; }
   .oc-tbl { font-size: 0.7rem !important; }
   .oc-tbl td, .oc-tbl th { padding: 4px 6px !important; }
 
-  /* Ticker: smaller on mobile */
-  .ticker-item { font-size: 0.72rem !important; margin: 0 14px !important; }
-
-  /* Buttons: full width on mobile */
-  button[kind="primary"] { width: 100% !important; font-size: 0.9rem !important; }
-
-  /* Signal cards */
+  .ticker-wrapper { display: none !important; }
   .lhb-signal-card { padding: 14px 12px !important; }
-  .lhb-title { font-size: 1.1rem !important; }
   .lhb-score-ring { width: 64px !important; height: 64px !important; font-size: 1.4rem !important; }
-  .lhb-signal-label { font-size: 1rem !important; }
-
-  /* RPCI sector cards */
   .rpci-sec-card { min-width: 130px !important; }
-
-  /* Elder Ray / signal factor tables */
   .er-factor-name { min-width: 80px !important; font-size: 0.72rem !important; }
-
-  /* Plotly charts: don't overflow */
   .js-plotly-plot, .plotly { max-width: 100% !important; }
   .stPlotlyChart { overflow-x: auto !important; }
-
-  /* Dialog/modal: full width */
   [data-testid="stDialog"] > div { max-width: 100vw !important; width: 100vw !important; margin: 0 !important; border-radius: 0 !important; }
-
-  /* Hide ticker on very small screens */
-  @media (max-width: 400px) {
-    .ticker-wrapper { display: none !important; }
-  }
 }
 
 /* Touch-friendly tap targets */
 @media (hover: none) and (pointer: coarse) {
   button { min-height: 44px !important; }
-  [data-testid="stSidebarNavLink"] { min-height: 48px !important; display: flex !important; align-items: center !important; }
+  .mp-nav a { min-height: 44px !important; }
   [data-testid="stTabs"] button[role="tab"] { min-height: 40px !important; }
-  [data-testid="stSelectbox"] select { min-height: 44px !important; }
 }
 </style>
 """, unsafe_allow_html=True)
@@ -473,174 +510,101 @@ def _get_secret(key: str, default: str = "") -> str:
     except Exception:
         return default
 
-with st.sidebar:
-    st.markdown("""
-<div class="sb-brand">
-  <div class="sb-brand-name">🐂 MarketPulse</div>
-  <div class="sb-brand-sub">NSE India · NIFTY 500</div>
-</div>
-<div class="sb-live"><span class="sb-dot"></span>NSE feed LIVE</div>
-""", unsafe_allow_html=True)
+# ── One-tap OAuth: auto-exchange request_token → access_token ────────────────
+_qp = st.query_params
+_rt = _qp.get("request_token", "")
+if _rt and not st.session_state.get("kite_access_token", ""):
+    import hashlib, requests as _kreq
+    _ex_key    = st.session_state.get("kite_api_key", "") or _get_secret("KITE_API_KEY", "plz6ik09bgb62mey")
+    _ex_secret = _get_secret("KITE_API_SECRET", "")
+    if _ex_key and _ex_secret:
+        try:
+            _checksum = hashlib.sha256((_ex_key + _rt + _ex_secret).encode()).hexdigest()
+            _resp = _kreq.post(
+                "https://api.kite.trade/session/token",
+                data={"api_key": _ex_key, "request_token": _rt, "checksum": _checksum},
+                headers={"X-Kite-Version": "3"},
+                timeout=15,
+            )
+            if _resp.ok:
+                _tok_data = _resp.json().get("data", {})
+                _new_tok  = _tok_data.get("access_token", "")
+                if _new_tok:
+                    st.session_state["kite_access_token"] = _new_tok
+                    st.session_state["kite_api_key"] = _ex_key
+                    st.session_state["_kite_auto_name"] = _tok_data.get("user_name", "")
+                    st.query_params.clear()
+                    st.rerun()
+        except Exception:
+            pass
 
-    st.markdown(
-        '<p style="color:#6e7681;font-size:.75rem;font-weight:600;text-transform:uppercase;'
-        'letter-spacing:.5px;margin:12px 0 4px;">⏱ TIMEFRAME</p>',
-        unsafe_allow_html=True,
-    )
+# ── localStorage persist ──────────────────────────────────────────────────────
+_ses_key = st.session_state.get("kite_api_key", "")
+_ses_tok = st.session_state.get("kite_access_token", "")
+_scomp.html(f"""<script>
+(function(){{
+  const CK={repr(_ses_key)}, CT={repr(_ses_tok)};
+  if(CK) localStorage.setItem('mp_kite_api_key', CK);
+  if(CT) localStorage.setItem('mp_kite_access_token', CT);
+}})();
+</script>""", height=0)
+
+# ── Kite status ───────────────────────────────────────────────────────────────
+_kite_ok    = bool(st.session_state.get("kite_api_key","") and st.session_state.get("kite_access_token",""))
+_kite_name  = st.session_state.get("_kite_auto_name","")
+_login_key  = _get_secret("KITE_API_KEY","plz6ik09bgb62mey")
+_has_secret = bool(_get_secret("KITE_API_SECRET",""))
+_login_url  = f"https://kite.zerodha.com/connect/login?api_key={_login_key}&v=3"
+
+if _kite_ok:
+    _kn = f" {_kite_name}" if _kite_name else ""
+    _kite_badge = f'<span class="mp-kite-ok">✓{_kn}</span>'
+elif _has_secret:
+    _kite_badge = f'<a href="{_login_url}" target="_top" class="mp-kite-btn">🔑 Login</a>'
+else:
+    _kite_badge = '<span class="mp-kite-btn">⚙ Kite</span>'
+
+# ── Top bar ───────────────────────────────────────────────────────────────────
+st.markdown(f"""
+<div class="mp-topbar">
+  <div class="mp-brand">🐂 Market<span class="mp-brand-accent">Pulse</span></div>
+  <div class="mp-topright">
+    <div class="mp-live"><span class="sb-dot"></span>NSE LIVE</div>
+    {_kite_badge}
+  </div>
+</div>""", unsafe_allow_html=True)
+
+# ── Nav tabs (URL-driven) ─────────────────────────────────────────────────────
+_NAV = [
+    ("smart_alerts_pro", "⚡", "Alerts Pro"),
+    ("gamma_blast",      "💥", "Gamma Blast"),
+    ("elder_ray",        "🎯", "Elder Ray"),
+    ("late_session",     "🌅", "Late Session"),
+    ("rpci",             "📈", "RPCI"),
+    ("red_flag",         "🚨", "Red Flag"),
+]
+_cur_page = _qp.get("page", "smart_alerts_pro")
+_nav_links = "".join(
+    f'<a href="?page={k}" target="_top" class="{"active" if k == _cur_page else ""}">{ic} {lbl}</a>'
+    for k, ic, lbl in _NAV
+)
+st.markdown(f'<nav class="mp-nav">{_nav_links}</nav>', unsafe_allow_html=True)
+
+# ── Timeframe selector ────────────────────────────────────────────────────────
+_tf_col, _kite_col = st.columns([3, 1])
+with _tf_col:
     st.segmented_control(
         label="Timeframe", options=list(TF_CONFIG.keys()),
         format_func=lambda k: TF_CONFIG[k]["label"],
         default="1D", key="global_tf", label_visibility="collapsed",
     )
-    st.divider()
-
-    # ── One-tap OAuth: auto-exchange request_token → access_token ──────────────
-    # When Zerodha redirects back to this app after login, the URL carries
-    # ?request_token=xxx&action=login&status=success
-    # We detect it here, exchange it for an access_token via the Kite API,
-    # and store the result so the user never has to paste tokens manually.
-    _qp = st.query_params
-    _rt = _qp.get("request_token", "")
-    if _rt and not st.session_state.get("kite_access_token", ""):
-        import hashlib, requests as _kreq
-        _ex_key    = st.session_state.get("kite_api_key", "") or _get_secret("KITE_API_KEY", "plz6ik09bgb62mey")
-        _ex_secret = _get_secret("KITE_API_SECRET", "")
-        if _ex_key and _ex_secret:
-            try:
-                _checksum = hashlib.sha256((_ex_key + _rt + _ex_secret).encode()).hexdigest()
-                _resp = _kreq.post(
-                    "https://api.kite.trade/session/token",
-                    data={"api_key": _ex_key, "request_token": _rt, "checksum": _checksum},
-                    headers={"X-Kite-Version": "3"},
-                    timeout=15,
-                )
-                if _resp.ok:
-                    _tok_data = _resp.json().get("data", {})
-                    _new_tok  = _tok_data.get("access_token", "")
-                    if _new_tok:
-                        st.session_state["kite_access_token"] = _new_tok
-                        st.session_state["kite_api_key"] = _ex_key
-                        st.session_state["_kite_auto_name"] = _tok_data.get("user_name", "")
-                        st.query_params.clear()   # clean URL
-                        st.rerun()
-            except Exception:
-                pass
-
-    # ── localStorage sync (save + restore across browser sessions) ─────────────
-    _ses_key = st.session_state.get("kite_api_key", "")
-    _ses_tok = st.session_state.get("kite_access_token", "")
-    _scomp.html(f"""<script>
-(function(){{
-  const CK={repr(_ses_key)}, CT={repr(_ses_tok)};
-  if(CK) localStorage.setItem('mp_kite_api_key', CK);
-  if(CT) localStorage.setItem('mp_kite_access_token', CT);
-  if(CK&&CT) return;
-  const lsK=localStorage.getItem('mp_kite_api_key')||'';
-  const lsT=localStorage.getItem('mp_kite_access_token')||'';
-  if(!lsK&&!lsT) return;
-  function fill(){{
-    try{{
-      const doc=window.parent.document;
-      doc.querySelectorAll('input[type="password"]').forEach(inp=>{{
-        let el=inp;
-        for(let i=0;i<12;i++){{
-          el=el.parentElement; if(!el) break;
-          const lbl=el.querySelector(':scope>label,:scope>div>label');
-          if(!lbl) continue;
-          const t=lbl.textContent.trim().toLowerCase();
-          const v=t.includes('api key')?lsK:t.includes('access token')?lsT:'';
-          if(v&&!inp.value){{
-            Object.getOwnPropertyDescriptor(Object.getPrototypeOf(inp),'value').set.call(inp,v);
-            inp.dispatchEvent(new Event('input',{{bubbles:true}}));
-            inp.dispatchEvent(new Event('change',{{bubbles:true}}));
-          }}
-          break;
-        }}
-      }});
-    }}catch(e){{}}
-  }}
-  [600,1800,4000].forEach(t=>setTimeout(fill,t));
-}})();
-</script>""", height=0)
-
-    # ── Kite Connect panel ──────────────────────────────────────────────────────
-    _kite_ok = bool(
-        st.session_state.get("kite_api_key", "")
-        and st.session_state.get("kite_access_token", "")
-    )
-    _auto_name = st.session_state.get("_kite_auto_name", "")
-
+with _kite_col:
     if _kite_ok:
-        # Connected state — show status + logout
-        _disp_name = f" · {_auto_name}" if _auto_name else ""
-        st.markdown(f"""
-<div style="background:rgba(0,212,170,0.08);border:1px solid rgba(0,212,170,0.3);
-border-radius:10px;padding:10px 14px;margin:8px 0;">
-  <div style="color:#00d4aa;font-weight:700;font-size:0.85rem;">✅ Kite Connected{_disp_name}</div>
-  <div style="color:#6e7681;font-size:0.72rem;margin-top:2px;">Live OI data active</div>
-</div>""", unsafe_allow_html=True)
-        col1, col2 = st.columns(2)
-        with col1:
-            if st.button("🔬 Test", key="kite_test", use_container_width=True):
-                import requests as _tr2
-                _hdr2 = {"X-Kite-Version": "3",
-                         "Authorization": f"token {st.session_state['kite_api_key']}:{st.session_state['kite_access_token']}"}
-                try:
-                    _p2 = _tr2.get("https://api.kite.trade/user/profile", headers=_hdr2, timeout=10)
-                    if _p2.ok:
-                        _n2 = _p2.json().get("data", {}).get("user_name", "?")
-                        st.success(f"✅ {_n2}")
-                    else:
-                        st.error(f"❌ {_p2.status_code}")
-                except Exception as _te2:
-                    st.error(str(_te2))
-        with col2:
-            if st.button("🚪 Logout", key="kite_logout", use_container_width=True):
-                st.session_state.pop("kite_api_key", None)
-                st.session_state.pop("kite_access_token", None)
-                st.session_state.pop("_kite_auto_name", None)
-                st.rerun()
-
-        with st.expander("⚙️ Manual token entry", expanded=False):
-            st.text_input("API Key", type="password", key="kite_api_key",
-                          value=st.session_state.get("kite_api_key",""),
-                          placeholder="From kite.zerodha.com/apps")
-            st.text_input("Access Token", type="password", key="kite_access_token",
-                          value=st.session_state.get("kite_access_token",""),
-                          placeholder="Paste access token")
-    else:
-        # Not connected — show one-tap login button
-        _login_key = _get_secret("KITE_API_KEY", "plz6ik09bgb62mey")
-        _has_secret = bool(_get_secret("KITE_API_SECRET", ""))
-        _login_url  = f"https://kite.zerodha.com/connect/login?api_key={_login_key}&v=3"
-
-        if _has_secret:
-            # Full one-tap flow: button opens Kite login; redirect comes back here
-            st.markdown(f"""
-<a href="{_login_url}" target="_top" style="text-decoration:none;">
-  <div style="background:linear-gradient(135deg,#387ed1,#2d6db5);border-radius:10px;
-    padding:13px 16px;text-align:center;cursor:pointer;margin:8px 0;
-    box-shadow:0 3px 12px rgba(56,126,209,0.4);">
-    <div style="color:#fff;font-weight:800;font-size:1rem;letter-spacing:0.2px;">
-      🔑 Login with Zerodha
-    </div>
-    <div style="color:rgba(255,255,255,0.75);font-size:0.72rem;margin-top:3px;">
-      One tap · token auto-generated
-    </div>
-  </div>
-</a>""", unsafe_allow_html=True)
-            st.caption("Tap the button → Zerodha login → auto-redirects back here with token ready.")
-        else:
-            # Secret not configured — show link + manual entry
-            st.info("Add `KITE_API_SECRET` to Streamlit secrets for one-tap login.")
-            st.markdown(f"[🔑 Generate token manually]({_login_url})", unsafe_allow_html=False)
-            with st.expander("⚙️ Paste token manually", expanded=True):
-                st.text_input("API Key", type="password", key="kite_api_key",
-                              value=_get_secret("KITE_API_KEY", ""),
-                              placeholder="From kite.zerodha.com/apps")
-                st.text_input("Access Token", type="password", key="kite_access_token",
-                              value=_get_secret("KITE_ACCESS_TOKEN", ""),
-                              placeholder="Daily token")
+        if st.button("🚪 Disconnect", key="kite_logout_top", use_container_width=True):
+            st.session_state.pop("kite_api_key", None)
+            st.session_state.pop("kite_access_token", None)
+            st.session_state.pop("_kite_auto_name", None)
+            st.rerun()
 
 
 # ── Scrolling ticker ──────────────────────────────────────────────────────────
@@ -6877,17 +6841,12 @@ def page_elder_ray():
         st.markdown(_hist_html, unsafe_allow_html=True)
 
 
-# ── Navigation ────────────────────────────────────────────────────────────────
-pg = st.navigation({
-    "⚡ Live Signals": [
-        st.Page(page_smart_alerts_pro,  title="Smart Alerts Pro",    icon="⚡", default=True),
-        st.Page(page_gamma_blast,       title="Expiry Gamma Blast",  icon="💥"),
-        st.Page(page_elder_ray,         title="Elder Ray Trader",    icon="🎯"),
-        st.Page(page_late_session,      title="Late Session Blaster",icon="🌅"),
-    ],
-    "🔍 Research": [
-        st.Page(page_rpci,              title="RPCI Screener",       icon="📈"),
-        st.Page(page_red_flag,          title="Red Flag Radar",      icon="🚨"),
-    ],
-})
-pg.run()
+# ── Page routing (URL-driven via ?page=) ──────────────────────────────────────
+{
+    "smart_alerts_pro": page_smart_alerts_pro,
+    "gamma_blast":      page_gamma_blast,
+    "elder_ray":        page_elder_ray,
+    "late_session":     page_late_session,
+    "rpci":             page_rpci,
+    "red_flag":         page_red_flag,
+}.get(_cur_page, page_smart_alerts_pro)()
