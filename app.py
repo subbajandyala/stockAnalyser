@@ -558,11 +558,9 @@ _login_url  = f"https://kite.zerodha.com/connect/login?api_key={_login_key}&v=3"
 
 if _kite_ok:
     _kn = f" {_kite_name}" if _kite_name else ""
-    _kite_badge = f'<span class="mp-kite-ok">✓{_kn}</span>'
-elif _has_secret:
-    _kite_badge = f'<a href="{_login_url}" target="_top" class="mp-kite-btn">🔑 Login</a>'
+    _kite_topbar_badge = f'<span class="mp-kite-ok">✓{_kn}</span>'
 else:
-    _kite_badge = '<span class="mp-kite-btn">⚙ Kite</span>'
+    _kite_topbar_badge = ""
 
 # ── Top bar ───────────────────────────────────────────────────────────────────
 st.markdown(f"""
@@ -570,7 +568,7 @@ st.markdown(f"""
   <div class="mp-brand">🐂 Market<span class="mp-brand-accent">Pulse</span></div>
   <div class="mp-topright">
     <div class="mp-live"><span class="sb-dot"></span>NSE LIVE</div>
-    {_kite_badge}
+    {_kite_topbar_badge}
   </div>
 </div>""", unsafe_allow_html=True)
 
@@ -605,6 +603,25 @@ with _kite_col:
             st.session_state.pop("kite_access_token", None)
             st.session_state.pop("_kite_auto_name", None)
             st.rerun()
+    elif _has_secret:
+        st.link_button("🔑 Kite Login", url=_login_url, use_container_width=True)
+        # Patch link button target to _top so OAuth redirect stays in the same tab
+        _scomp.html("""<script>
+(function(){
+  function patch(){
+    var btns=window.parent.document.querySelectorAll('a[data-testid="stLinkButton"]');
+    btns.forEach(function(a){
+      if(a.href && a.href.indexOf('kite.zerodha.com')>-1){
+        a.setAttribute('target','_top');
+      }
+    });
+    if(!btns.length) setTimeout(patch,250);
+  }
+  patch();
+  setTimeout(patch,500);
+  setTimeout(patch,1500);
+})();
+</script>""", height=0)
 
 
 # ── Scrolling ticker ──────────────────────────────────────────────────────────
