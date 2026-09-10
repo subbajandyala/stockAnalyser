@@ -422,11 +422,39 @@ with st.sidebar:
     )
     st.divider()
 
-    # ── localStorage sync (save + restore across browser tabs) ─────────────────
-    # Runs in a hidden iframe on every page load.
-    # • If credentials are in session: saves them to localStorage.
-    # • If session is empty: tries to fill the password inputs from localStorage
-    #   by dispatching React-compatible input events (same-origin iframe access).
+    # ── One-tap OAuth: auto-exchange request_token → access_token ──────────────
+    # When Zerodha redirects back to this app after login, the URL carries
+    # ?request_token=xxx&action=login&status=success
+    # We detect it here, exchange it for an access_token via the Kite API,
+    # and store the result so the user never has to paste tokens manually.
+    _qp = st.query_params
+    _rt = _qp.get("request_token", "")
+    if _rt and not st.session_state.get("kite_access_token", ""):
+        import hashlib, requests as _kreq
+        _ex_key    = st.session_state.get("kite_api_key", "") or _get_secret("KITE_API_KEY", "plz6ik09bgb62mey")
+        _ex_secret = _get_secret("KITE_API_SECRET", "")
+        if _ex_key and _ex_secret:
+            try:
+                _checksum = hashlib.sha256((_ex_key + _rt + _ex_secret).encode()).hexdigest()
+                _resp = _kreq.post(
+                    "https://api.kite.trade/session/token",
+                    data={"api_key": _ex_key, "request_token": _rt, "checksum": _checksum},
+                    headers={"X-Kite-Version": "3"},
+                    timeout=15,
+                )
+                if _resp.ok:
+                    _tok_data = _resp.json().get("data", {})
+                    _new_tok  = _tok_data.get("access_token", "")
+                    if _new_tok:
+                        st.session_state["kite_access_token"] = _new_tok
+                        st.session_state["kite_api_key"] = _ex_key
+                        st.session_state["_kite_auto_name"] = _tok_data.get("user_name", "")
+                        st.query_params.clear()   # clean URL
+                        st.rerun()
+            except Exception:
+                pass
+
+    # ── localStorage sync (save + restore across browser sessions) ─────────────
     _ses_key = st.session_state.get("kite_api_key", "")
     _ses_tok = st.session_state.get("kite_access_token", "")
     _scomp.html(f"""<script>
@@ -434,7 +462,7 @@ with st.sidebar:
   const CK={repr(_ses_key)}, CT={repr(_ses_tok)};
   if(CK) localStorage.setItem('mp_kite_api_key', CK);
   if(CT) localStorage.setItem('mp_kite_access_token', CT);
-  if(CK||CT) return;                        // already have creds — nothing to restore
+  if(CK&&CT) return;
   const lsK=localStorage.getItem('mp_kite_api_key')||'';
   const lsT=localStorage.getItem('mp_kite_access_token')||'';
   if(!lsK&&!lsT) return;
@@ -463,54 +491,84 @@ with st.sidebar:
 }})();
 </script>""", height=0)
 
-    with st.expander("⚡ Zerodha Kite Connect", expanded=False):
-        _sidebar_api_key = st.text_input(
-            "API Key", type="password", key="kite_api_key",
-            value=_get_secret("KITE_API_KEY", ""),
-            placeholder="From kite.zerodha.com/apps",
-        )
-        st.text_input(
-            "Access Token", type="password", key="kite_access_token",
-            value=_get_secret("KITE_ACCESS_TOKEN", ""),
-            placeholder="Daily token — refresh each morning",
-        )
-        _kite_ok = bool(
-            st.session_state.get("kite_api_key", "")
-            and st.session_state.get("kite_access_token", "")
-        )
-        if _kite_ok:
-            st.success("✅ Kite connected — live OI data active")
-            if st.button("🔬 Test Connection", key="kite_test", use_container_width=True):
-                import requests as _tr
-                _hdr = {"X-Kite-Version": "3",
-                        "Authorization": f"token {st.session_state['kite_api_key']}:{st.session_state['kite_access_token']}"}
-                try:
-                    _p = _tr.get("https://api.kite.trade/user/profile", headers=_hdr, timeout=10)
-                    if _p.ok:
-                        _name = _p.json().get("data", {}).get("user_name", "?")
-                        st.success(f"✅ Token valid — logged in as {_name}")
-                    else:
-                        st.error(f"❌ Token rejected: {_p.status_code} — generate a new token")
-                except Exception as _te:
-                    st.error(f"Network error: {_te}")
+    # ── Kite Connect panel ──────────────────────────────────────────────────────
+    _kite_ok = bool(
+        st.session_state.get("kite_api_key", "")
+        and st.session_state.get("kite_access_token", "")
+    )
+    _auto_name = st.session_state.get("_kite_auto_name", "")
 
+    if _kite_ok:
+        # Connected state — show status + logout
+        _disp_name = f" · {_auto_name}" if _auto_name else ""
+        st.markdown(f"""
+<div style="background:rgba(0,212,170,0.08);border:1px solid rgba(0,212,170,0.3);
+border-radius:10px;padding:10px 14px;margin:8px 0;">
+  <div style="color:#00d4aa;font-weight:700;font-size:0.85rem;">✅ Kite Connected{_disp_name}</div>
+  <div style="color:#6e7681;font-size:0.72rem;margin-top:2px;">Live OI data active</div>
+</div>""", unsafe_allow_html=True)
+        col1, col2 = st.columns(2)
+        with col1:
+            if st.button("🔬 Test", key="kite_test", use_container_width=True):
+                import requests as _tr2
+                _hdr2 = {"X-Kite-Version": "3",
+                         "Authorization": f"token {st.session_state['kite_api_key']}:{st.session_state['kite_access_token']}"}
                 try:
-                    _i = _tr.get("https://api.kite.trade/instruments/NFO", headers=_hdr, timeout=30)
-                    if _i.ok and "instrument_token" in _i.text[:200]:
-                        _rows = len(_i.text.strip().splitlines()) - 1
-                        st.info(f"📋 NFO instruments: {_rows:,} rows downloaded")
+                    _p2 = _tr2.get("https://api.kite.trade/user/profile", headers=_hdr2, timeout=10)
+                    if _p2.ok:
+                        _n2 = _p2.json().get("data", {}).get("user_name", "?")
+                        st.success(f"✅ {_n2}")
                     else:
-                        st.error(f"❌ NFO instruments failed: status {_i.status_code} — first 200 chars: {_i.text[:200]}")
-                except Exception as _ie:
-                    st.error(f"Instruments error: {_ie}")
+                        st.error(f"❌ {_p2.status_code}")
+                except Exception as _te2:
+                    st.error(str(_te2))
+        with col2:
+            if st.button("🚪 Logout", key="kite_logout", use_container_width=True):
+                st.session_state.pop("kite_api_key", None)
+                st.session_state.pop("kite_access_token", None)
+                st.session_state.pop("_kite_auto_name", None)
+                st.rerun()
+
+        with st.expander("⚙️ Manual token entry", expanded=False):
+            st.text_input("API Key", type="password", key="kite_api_key",
+                          value=st.session_state.get("kite_api_key",""),
+                          placeholder="From kite.zerodha.com/apps")
+            st.text_input("Access Token", type="password", key="kite_access_token",
+                          value=st.session_state.get("kite_access_token",""),
+                          placeholder="Paste access token")
+    else:
+        # Not connected — show one-tap login button
+        _login_key = _get_secret("KITE_API_KEY", "plz6ik09bgb62mey")
+        _has_secret = bool(_get_secret("KITE_API_SECRET", ""))
+        _login_url  = f"https://kite.zerodha.com/connect/login?api_key={_login_key}&v=3"
+
+        if _has_secret:
+            # Full one-tap flow: button opens Kite login; redirect comes back here
+            st.markdown(f"""
+<a href="{_login_url}" target="_self" style="text-decoration:none;">
+  <div style="background:linear-gradient(135deg,#387ed1,#2d6db5);border-radius:10px;
+    padding:13px 16px;text-align:center;cursor:pointer;margin:8px 0;
+    box-shadow:0 3px 12px rgba(56,126,209,0.4);">
+    <div style="color:#fff;font-weight:800;font-size:1rem;letter-spacing:0.2px;">
+      🔑 Login with Zerodha
+    </div>
+    <div style="color:rgba(255,255,255,0.75);font-size:0.72rem;margin-top:3px;">
+      One tap · token auto-generated
+    </div>
+  </div>
+</a>""", unsafe_allow_html=True)
+            st.caption("Tap the button → Zerodha login → auto-redirects back here with token ready.")
         else:
-            _sidebar_key_for_link = st.session_state.get("kite_api_key", "") or _get_secret("KITE_API_KEY", "plz6ik09bgb62mey")
-            st.info("Enter API Key + Access Token to enable real-time OI")
-            if _sidebar_key_for_link:
-                st.caption(
-                    f"🔑 [Generate today's token](https://kite.zerodha.com/connect/login?api_key={_sidebar_key_for_link}&v=3) "
-                    "→ login → copy `request_token` from URL → run exchange script"
-                )
+            # Secret not configured — show link + manual entry
+            st.info("Add `KITE_API_SECRET` to Streamlit secrets for one-tap login.")
+            st.markdown(f"[🔑 Generate token manually]({_login_url})", unsafe_allow_html=False)
+            with st.expander("⚙️ Paste token manually", expanded=True):
+                st.text_input("API Key", type="password", key="kite_api_key",
+                              value=_get_secret("KITE_API_KEY", ""),
+                              placeholder="From kite.zerodha.com/apps")
+                st.text_input("Access Token", type="password", key="kite_access_token",
+                              value=_get_secret("KITE_ACCESS_TOKEN", ""),
+                              placeholder="Daily token")
 
 
 # ── Scrolling ticker ──────────────────────────────────────────────────────────
