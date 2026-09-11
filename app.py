@@ -61,6 +61,7 @@ from screener.late_session import (
     session_window as _ls_window,
     atm_strike    as _ls_atm,
 )
+from screener.open_low import run_open_low_scan as _run_open_low
 from plotly.subplots import make_subplots
 
 try:
@@ -580,6 +581,7 @@ _NAV = [
     ("late_session",     "🌅", "Late Session"),
     ("rpci",             "📈", "RPCI"),
     ("red_flag",         "🚨", "Red Flag"),
+    ("open_low",         "🚀", "Open=Low"),
 ]
 _cur_page = _qp.get("page", "smart_alerts_pro")
 _nav_links = "".join(
@@ -6865,6 +6867,120 @@ def page_elder_ray():
         st.markdown(_hist_html, unsafe_allow_html=True)
 
 
+# ── Open = Low page ───────────────────────────────────────────────────────────
+def page_open_low():
+    st.markdown("""
+<div style="margin-bottom:6px;">
+  <div style="font-size:1.25rem;font-weight:900;color:#fff;letter-spacing:-0.5px;">🚀 Open = Low</div>
+  <div style="font-size:0.78rem;color:#6e7681;margin-top:2px;">NIFTY 100 · Intraday momentum setup</div>
+</div>""", unsafe_allow_html=True)
+
+    # Strategy card
+    st.markdown("""
+<div style="background:#1a1e2a;border:1px solid #2a2e39;border-radius:10px;padding:14px 16px;margin-bottom:14px;">
+  <div style="display:flex;flex-wrap:wrap;gap:18px;">
+    <div>
+      <div style="font-size:0.62rem;font-weight:700;color:#8b949e;letter-spacing:1px;text-transform:uppercase;">Setup</div>
+      <div style="font-size:0.88rem;color:#e6edf3;margin-top:3px;">Today's <b style="color:#00d4aa;">Low = Open</b> — buyers held from the first tick</div>
+    </div>
+    <div>
+      <div style="font-size:0.62rem;font-weight:700;color:#f85149;letter-spacing:1px;text-transform:uppercase;">Stop Loss</div>
+      <div style="font-size:0.88rem;color:#f85149;margin-top:3px;font-weight:700;">Today's Low (= Open price) — strict, no exceptions</div>
+    </div>
+    <div>
+      <div style="font-size:0.62rem;font-weight:700;color:#8b949e;letter-spacing:1px;text-transform:uppercase;">Trade type</div>
+      <div style="font-size:0.88rem;color:#e6edf3;margin-top:3px;">Intraday only — square off before 3:15 PM</div>
+    </div>
+  </div>
+</div>""", unsafe_allow_html=True)
+
+    col_btn, col_info = st.columns([1, 3])
+    with col_btn:
+        run_btn = st.button("🔍 Scan Now", key="ol_scan_btn",
+                            use_container_width=True, type="primary")
+    with col_info:
+        if st.session_state.get("ol_last_scan"):
+            st.caption(f"Last scan: {st.session_state['ol_last_scan']}")
+
+    if run_btn:
+        with st.spinner("Scanning NIFTY 100 for Open=Low stocks…"):
+            _df, _err = _run_open_low()
+        st.session_state["ol_df"]        = _df
+        st.session_state["ol_err"]       = _err
+        st.session_state["ol_last_scan"] = datetime.datetime.now(
+            datetime.timezone(datetime.timedelta(hours=5, minutes=30))
+        ).strftime("%I:%M:%S %p IST")
+
+    _df  = st.session_state.get("ol_df",  None)
+    _err = st.session_state.get("ol_err", "")
+
+    if _err:
+        st.info(_err)
+        return
+    if _df is None:
+        st.markdown(
+            '<div style="color:#6e7681;font-size:0.85rem;margin-top:8px;">'
+            'Press <b>Scan Now</b> to find NIFTY 100 stocks where Low = Open today.</div>',
+            unsafe_allow_html=True,
+        )
+        return
+    if _df.empty:
+        st.info("No Open=Low stocks found. Market may be closed or no qualifying stocks right now.")
+        return
+
+    # Summary chips
+    _pos = int((_df["Chg %"] > 0).sum())
+    _tot = len(_df)
+    st.markdown(
+        f'<div style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:10px;">'
+        f'<span style="background:rgba(0,212,170,0.1);border:1px solid rgba(0,212,170,0.25);'
+        f'color:#00d4aa;font-size:0.72rem;font-weight:700;padding:3px 10px;border-radius:20px;">'
+        f'✓ {_tot} qualified</span>'
+        f'<span style="background:rgba(0,212,170,0.08);border:1px solid rgba(0,212,170,0.2);'
+        f'color:#00d4aa;font-size:0.72rem;font-weight:700;padding:3px 10px;border-radius:20px;">'
+        f'↑ {_pos} gaining</span>'
+        f'</div>',
+        unsafe_allow_html=True,
+    )
+
+    # Results table (clickable rows → chart)
+    _disp = _df[["Symbol", "Company", "Open / SL", "LTP", "Day High",
+                  "Chg %", "High Gain %"]].copy()
+    _disp["Chg %"]      = _disp["Chg %"].map(lambda x: f"+{x:.2f}%" if x >= 0 else f"{x:.2f}%")
+    _disp["High Gain %"] = _disp["High Gain %"].map(lambda x: f"+{x:.2f}%")
+    _disp["Open / SL"]  = _disp["Open / SL"].map(lambda x: f"₹{x:,.2f}")
+    _disp["LTP"]        = _disp["LTP"].map(lambda x: f"₹{x:,.2f}")
+    _disp["Day High"]   = _disp["Day High"].map(lambda x: f"₹{x:,.2f}")
+
+    _sel = st.dataframe(
+        _disp, use_container_width=True, hide_index=True,
+        on_select="rerun", selection_mode="single-row",
+        column_config={
+            "Symbol":      st.column_config.TextColumn("Symbol",   width="small"),
+            "Company":     st.column_config.TextColumn("Company",  width="medium"),
+            "Open / SL":   st.column_config.TextColumn("Open / SL ⚠", width="small"),
+            "LTP":         st.column_config.TextColumn("LTP",      width="small"),
+            "Day High":    st.column_config.TextColumn("Day High", width="small"),
+            "Chg %":       st.column_config.TextColumn("Chg %",   width="small"),
+            "High Gain %": st.column_config.TextColumn("↑ High",  width="small"),
+        },
+    )
+
+    _rows = _sel.selection.get("rows", []) if _sel and _sel.selection else []
+    if _rows:
+        _r = _df.iloc[_rows[0]]
+        chart_modal(_r["NSE_Symbol"], _r["Symbol"])
+
+    # Stop loss reminder
+    st.markdown(
+        '<div style="margin-top:12px;padding:10px 14px;background:rgba(248,81,73,0.07);'
+        'border:1px solid rgba(248,81,73,0.2);border-radius:8px;font-size:0.8rem;color:#f85149;">'
+        '<b>⚠ Stop Loss Rule:</b> Exit immediately if price falls below today\'s Open. '
+        'The Open price IS the stop loss — no second chances.</div>',
+        unsafe_allow_html=True,
+    )
+
+
 # ── Page routing (URL-driven via ?page=) ──────────────────────────────────────
 {
     "smart_alerts_pro": page_smart_alerts_pro,
@@ -6873,4 +6989,5 @@ def page_elder_ray():
     "late_session":     page_late_session,
     "rpci":             page_rpci,
     "red_flag":         page_red_flag,
+    "open_low":         page_open_low,
 }.get(_cur_page, page_smart_alerts_pro)()
