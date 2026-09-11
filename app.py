@@ -561,7 +561,7 @@ st.markdown(f"""
   </div>
 </div>""", unsafe_allow_html=True)
 
-# ── Page navigation ───────────────────────────────────────────────────────────
+# ── Page navigation (pure session_state — zero browser navigation) ────────────
 _NAV = [
     ("smart_alerts_pro", "⚡ Alerts Pro"),
     ("gamma_blast",      "💥 Gamma Blast"),
@@ -573,27 +573,20 @@ _NAV = [
 ]
 _NAV_KEYS   = [k for k, _ in _NAV]
 _NAV_LABELS = {k: lbl for k, lbl in _NAV}
-_cur_page   = _qp.get("page", "smart_alerts_pro")
-if _cur_page not in _NAV_KEYS:
-    _cur_page = "smart_alerts_pro"
 
-# Sync selectbox with URL on every rerun
-if st.session_state.get("_nav_sel") != _cur_page:
-    st.session_state["_nav_sel"] = _cur_page
+if "current_page" not in st.session_state:
+    st.session_state["current_page"] = "smart_alerts_pro"
+_cur_page = st.session_state["current_page"]
 
-with st.container():
-    st.markdown('<div class="nav-select">', unsafe_allow_html=True)
-    _sel_page = st.selectbox(
-        "Screen",
-        options=_NAV_KEYS,
-        format_func=lambda k: _NAV_LABELS[k],
-        key="_nav_sel",
-        label_visibility="collapsed",
-    )
-    st.markdown('</div>', unsafe_allow_html=True)
-
+_sel_page = st.selectbox(
+    "Screen",
+    options=_NAV_KEYS,
+    format_func=lambda k: _NAV_LABELS[k],
+    index=_NAV_KEYS.index(_cur_page),
+    label_visibility="collapsed",
+)
 if _sel_page != _cur_page:
-    st.query_params["page"] = _sel_page
+    st.session_state["current_page"] = _sel_page
     st.rerun()
 
 # ── Kite login banner (shown when not connected) ──────────────────────────────
