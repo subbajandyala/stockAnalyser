@@ -277,34 +277,16 @@ hr { border-color: #2a2e39 !important; margin: 10px 0 !important; }
 .mp-kite-btn { background: rgba(56,126,209,0.15); border: 1px solid rgba(56,126,209,0.35); color: #79c0ff; font-size: 0.68rem; font-weight: 700; padding: 3px 10px; border-radius: 20px; text-decoration: none !important; white-space: nowrap; }
 .mp-kite-btn:hover { background: rgba(56,126,209,0.25) !important; }
 
-/* ── Page nav (st.radio styled as tab bar) ─────────────────────────────────── */
-[data-testid="stRadio"] {
-  background: #13161f;
-  border-bottom: 1px solid #1e2433;
-  margin: 0 -0.75rem 1rem;
-  padding: 0 4px;
+/* ── Page nav selectbox ─────────────────────────────────────────────────────── */
+/* Style the nav selectbox to stand out as the page switcher */
+.nav-select [data-baseweb="select"] > div:first-child {
+  background: #1e2433 !important;
+  border: 1px solid #00d4aa !important;
+  border-radius: 8px !important;
+  font-size: 0.88rem !important;
+  font-weight: 700 !important;
+  color: #00d4aa !important;
 }
-[data-testid="stRadio"] > label { display: none !important; }
-[data-testid="stRadio"] [role="radiogroup"] {
-  display: flex !important; flex-direction: row !important; flex-wrap: nowrap;
-  gap: 0; overflow-x: auto; -webkit-overflow-scrolling: touch; scrollbar-width: none;
-}
-[data-testid="stRadio"] [role="radiogroup"]::-webkit-scrollbar { display: none; }
-[data-testid="stRadio"] label {
-  flex-shrink: 0; display: flex !important; align-items: center;
-  padding: 11px 14px; font-size: 0.83rem !important; font-weight: 600 !important;
-  color: #5c6470 !important; white-space: nowrap;
-  border-bottom: 2px solid transparent; margin-bottom: -1px;
-  cursor: pointer; transition: color 0.15s, border-color 0.15s;
-}
-[data-testid="stRadio"] label:hover { color: #c9d1d9 !important; }
-[data-testid="stRadio"] label:has(input:checked) {
-  color: #00d4aa !important; border-bottom-color: #00d4aa !important;
-}
-/* Hide the radio dot itself */
-[data-testid="stRadio"] [data-testid="stMarkdownContainer"] { display: none !important; }
-[data-testid="stRadio"] input[type="radio"] { display: none !important; }
-[data-testid="stRadio"] div[data-testid] { display: none !important; }
 
 /* ── Ticker strip in topbar ─────────────────────────────────────────────── */
 .mp-ticker { display: flex; gap: 16px; overflow: hidden; font-size: 0.7rem; font-weight: 600; }
@@ -331,8 +313,6 @@ hr { border-color: #2a2e39 !important; margin: 10px 0 !important; }
   .stApp { overflow-x: hidden !important; }
   .mp-topbar { padding: 9px 12px; margin: -0.5rem -0.6rem 0; }
   .mp-brand { font-size: 0.95rem; }
-  [data-testid="stRadio"] { margin: 0 -0.6rem 0.75rem; }
-  [data-testid="stRadio"] label { padding: 10px 11px; font-size: 0.76rem !important; }
 
   [data-testid="stHorizontalBlock"] { flex-direction: column !important; }
   [data-testid="stHorizontalBlock"] > div { width: 100% !important; min-width: 100% !important; flex: none !important; }
@@ -581,10 +561,7 @@ st.markdown(f"""
   </div>
 </div>""", unsafe_allow_html=True)
 
-# ── Page navigation (native Streamlit widgets — no new-tab issues) ────────────
-# HTML <a> links in st.markdown() are force-opened in new tabs by Streamlit's
-# frontend JS. Solution: use st.radio + st.query_params so navigation happens
-# over the existing WebSocket connection (same session, no browser reload).
+# ── Page navigation ───────────────────────────────────────────────────────────
 _NAV = [
     ("smart_alerts_pro", "⚡ Alerts Pro"),
     ("gamma_blast",      "💥 Gamma Blast"),
@@ -600,18 +577,21 @@ _cur_page   = _qp.get("page", "smart_alerts_pro")
 if _cur_page not in _NAV_KEYS:
     _cur_page = "smart_alerts_pro"
 
-# Sync radio with URL (set session_state before rendering so radio shows correct page)
-if st.session_state.get("_nav_radio") != _cur_page:
-    st.session_state["_nav_radio"] = _cur_page
+# Sync selectbox with URL on every rerun
+if st.session_state.get("_nav_sel") != _cur_page:
+    st.session_state["_nav_sel"] = _cur_page
 
-_sel_page = st.radio(
-    "Navigate",
-    options=_NAV_KEYS,
-    format_func=lambda k: _NAV_LABELS[k],
-    key="_nav_radio",
-    horizontal=True,
-    label_visibility="collapsed",
-)
+with st.container():
+    st.markdown('<div class="nav-select">', unsafe_allow_html=True)
+    _sel_page = st.selectbox(
+        "Screen",
+        options=_NAV_KEYS,
+        format_func=lambda k: _NAV_LABELS[k],
+        key="_nav_sel",
+        label_visibility="collapsed",
+    )
+    st.markdown('</div>', unsafe_allow_html=True)
+
 if _sel_page != _cur_page:
     st.query_params["page"] = _sel_page
     st.rerun()
