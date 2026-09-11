@@ -589,11 +589,7 @@ if _sel_page != _cur_page:
     st.session_state["current_page"] = _sel_page
     st.rerun()
 
-# ── Kite login banner (shown when not connected) ──────────────────────────────
-if not _kite_ok and _has_secret:
-    st.link_button("🔑 Login with Zerodha", _login_url, use_container_width=True)
-
-# ── Timeframe selector ────────────────────────────────────────────────────────
+# ── Timeframe + Kite button row ───────────────────────────────────────────────
 _tf_col, _kite_col = st.columns([3, 1])
 with _tf_col:
     st.segmented_control(
@@ -608,6 +604,8 @@ with _kite_col:
             st.session_state.pop("kite_access_token", None)
             st.session_state.pop("_kite_auto_name", None)
             st.rerun()
+    elif _has_secret:
+        st.link_button("🔑 Login", _login_url, use_container_width=True)
 
 
 # ── Scrolling ticker ──────────────────────────────────────────────────────────
