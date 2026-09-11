@@ -585,7 +585,7 @@ _NAV = [
 ]
 _cur_page = _qp.get("page", "smart_alerts_pro")
 _nav_links = "".join(
-    f'<a href="?page={k}" target="_top" class="{"active" if k == _cur_page else ""}">{ic} {lbl}</a>'
+    f'<a href="?page={k}" class="{"active" if k == _cur_page else ""}">{ic} {lbl}</a>'
     for k, ic, lbl in _NAV
 )
 st.markdown(f'<nav class="mp-nav">{_nav_links}</nav>', unsafe_allow_html=True)
