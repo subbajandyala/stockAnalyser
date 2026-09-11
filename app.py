@@ -591,29 +591,7 @@ if _sel_page != _cur_page:
 
 # ── Kite login banner (shown when not connected) ──────────────────────────────
 if not _kite_ok and _has_secret:
-    # GET form submission replaces the action's query string with form fields,
-    # so pass api_key and v as hidden inputs instead of baking them into action.
-    _scomp.html(f"""
-<style>
-*{{box-sizing:border-box;margin:0;padding:0;}}
-body{{background:transparent;padding:0 0 4px;}}
-button{{
-  width:100%;padding:11px 14px;
-  background:linear-gradient(135deg,rgba(56,126,209,0.18),rgba(56,126,209,0.1));
-  border:1px solid rgba(56,126,209,0.45);border-radius:9px;
-  color:#79c0ff;font-size:0.9rem;font-weight:700;
-  cursor:pointer;font-family:Inter,-apple-system,sans-serif;
-  letter-spacing:0.2px;
-}}
-button:hover{{background:rgba(56,126,209,0.28);border-color:rgba(56,126,209,0.7);}}
-button:active{{background:rgba(56,126,209,0.4);}}
-</style>
-<form action="https://kite.zerodha.com/connect/login" method="GET" target="_top">
-  <input type="hidden" name="api_key" value="{_login_key}">
-  <input type="hidden" name="v" value="3">
-  <button type="submit">🔑 Login with Zerodha</button>
-</form>
-""", height=52)
+    st.link_button("🔑 Login with Zerodha", _login_url, use_container_width=True)
 
 # ── Timeframe selector ────────────────────────────────────────────────────────
 _tf_col, _kite_col = st.columns([3, 1])
