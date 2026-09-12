@@ -62,6 +62,7 @@ from screener.late_session import (
     atm_strike    as _ls_atm,
 )
 from screener.open_low import run_open_low_scan as _run_open_low
+from screener.agent_flow import run_agent_analysis as _run_agent, INSTRUMENTS as _AF_INSTRUMENTS
 from plotly.subplots import make_subplots
 
 try:
@@ -570,6 +571,7 @@ _NAV = [
     ("rpci",             "📈 RPCI"),
     ("red_flag",         "🚨 Red Flag"),
     ("open_low",         "🚀 Open=Low"),
+    ("agent_flow",       "🤖 Agent Flow"),
 ]
 _NAV_KEYS   = [k for k, _ in _NAV]
 _NAV_LABELS = {k: lbl for k, lbl in _NAV}
@@ -6992,6 +6994,362 @@ def page_open_low():
     )
 
 
+def page_agent_flow():
+    _af_key = st.session_state.get("kite_api_key",   _get_secret("KITE_API_KEY", ""))
+    _af_tok = st.session_state.get("kite_access_token", "")
+    _af_ok  = bool(_af_key and _af_tok)
+
+    st.markdown("""
+<div style="margin-bottom:6px;">
+  <div style="font-size:1.25rem;font-weight:900;color:#fff;letter-spacing:-0.5px;">🤖 Agent Flow</div>
+  <div style="font-size:0.78rem;color:#6e7681;margin-top:2px;">Institutional Option Buying AI · Live Kite data</div>
+</div>""", unsafe_allow_html=True)
+
+    if not _af_ok:
+        st.warning("⚡ Connect Zerodha Kite to enable Agent Flow. This screen requires live option chain data via Kite Connect.")
+        return
+
+    # ── Controls ──────────────────────────────────────────────────────────────
+    _c1, _c2 = st.columns([2, 1])
+    with _c1:
+        _af_sym = st.selectbox("Instrument", _AF_INSTRUMENTS,
+                               index=0, key="af_symbol", label_visibility="collapsed")
+    with _c2:
+        _af_run = st.button("▶ Analyze", key="af_run_btn",
+                            use_container_width=True, type="primary")
+
+    if _af_run:
+        with st.spinner(f"Fetching live data for {_af_sym}…"):
+            _af_res = _run_agent(_af_sym, _af_key, _af_tok)
+        st.session_state["af_result"] = _af_res
+        st.session_state["af_ts"] = datetime.datetime.now(
+            datetime.timezone(datetime.timedelta(hours=5, minutes=30))
+        ).strftime("%I:%M:%S %p IST")
+
+    _res = st.session_state.get("af_result")
+    _ts  = st.session_state.get("af_ts", "")
+
+    if _res is None:
+        st.markdown(
+            '<div style="color:#6e7681;font-size:0.85rem;margin-top:8px;">'
+            'Select an instrument and press <b>▶ Analyze</b> to run the institutional analysis.</div>',
+            unsafe_allow_html=True)
+        return
+
+    if _ts:
+        st.caption(f"Analysis at {_ts}")
+
+    _err = _res.get("error", "")
+    if _err:
+        st.error(_err)
+
+    # ── Helper renderers ──────────────────────────────────────────────────────
+    bias   = _res.get("bias", "Neutral")
+    conf   = _res.get("confidence", 0)
+    spot   = _res.get("spot", 0)
+    vwap_v = _res.get("vwap", 0)
+    ema20  = _res.get("ema20", 0)
+    ema50  = _res.get("ema50", 0)
+    vix    = _res.get("vix", 0)
+    trend  = _res.get("trend", "—")
+    expiry = _res.get("expiry", "—")
+
+    _bias_color = {
+        "Strong Bullish":     "#00d4aa",
+        "Moderately Bullish": "#3fb950",
+        "Neutral":            "#8b949e",
+        "Moderately Bearish": "#f0883e",
+        "Strong Bearish":     "#f85149",
+    }.get(bias, "#8b949e")
+
+    _trend_icon = {"UPTREND": "↑", "DOWNTREND": "↓", "SIDEWAYS": "→"}.get(trend, "→")
+    _trend_col  = {"UPTREND": "#00d4aa", "DOWNTREND": "#f85149", "SIDEWAYS": "#8b949e"}.get(trend, "#8b949e")
+
+    # ── Market card ───────────────────────────────────────────────────────────
+    st.markdown(f"""
+<div style="background:#1a1e2a;border:1px solid #2a2e39;border-radius:12px;
+            padding:16px 18px;margin-bottom:14px;">
+  <div style="display:flex;align-items:center;justify-content:space-between;
+              flex-wrap:wrap;gap:10px;margin-bottom:12px;">
+    <div>
+      <div style="font-size:0.62rem;font-weight:700;color:#8b949e;
+                  letter-spacing:1.2px;text-transform:uppercase;">Market Bias</div>
+      <div style="font-size:1.35rem;font-weight:900;color:{_bias_color};
+                  margin-top:2px;">{bias}</div>
+    </div>
+    <div style="text-align:right;">
+      <div style="font-size:0.62rem;font-weight:700;color:#8b949e;
+                  letter-spacing:1.2px;text-transform:uppercase;">Confidence</div>
+      <div style="font-size:1.35rem;font-weight:900;color:{_bias_color};
+                  margin-top:2px;">{conf}%</div>
+    </div>
+  </div>
+  <div style="display:flex;flex-wrap:wrap;gap:14px;">
+    <div>
+      <div style="font-size:0.6rem;color:#6e7681;text-transform:uppercase;
+                  font-weight:700;letter-spacing:1px;">Spot</div>
+      <div style="font-size:0.95rem;font-weight:700;color:#e6edf3;">
+        ₹{spot:,.2f}</div>
+    </div>
+    <div>
+      <div style="font-size:0.6rem;color:#6e7681;text-transform:uppercase;
+                  font-weight:700;letter-spacing:1px;">VWAP</div>
+      <div style="font-size:0.95rem;font-weight:700;
+                  color:{"#00d4aa" if spot >= vwap_v else "#f85149"};">
+        ₹{vwap_v:,.2f}</div>
+    </div>
+    <div>
+      <div style="font-size:0.6rem;color:#6e7681;text-transform:uppercase;
+                  font-weight:700;letter-spacing:1px;">EMA 20</div>
+      <div style="font-size:0.95rem;font-weight:700;color:#e6edf3;">
+        ₹{ema20:,.2f}</div>
+    </div>
+    <div>
+      <div style="font-size:0.6rem;color:#6e7681;text-transform:uppercase;
+                  font-weight:700;letter-spacing:1px;">EMA 50</div>
+      <div style="font-size:0.95rem;font-weight:700;color:#e6edf3;">
+        ₹{ema50:,.2f}</div>
+    </div>
+    <div>
+      <div style="font-size:0.6rem;color:#6e7681;text-transform:uppercase;
+                  font-weight:700;letter-spacing:1px;">India VIX</div>
+      <div style="font-size:0.95rem;font-weight:700;
+                  color:{"#f85149" if vix > 18 else "#8b949e"};">{vix}</div>
+    </div>
+    <div>
+      <div style="font-size:0.6rem;color:#6e7681;text-transform:uppercase;
+                  font-weight:700;letter-spacing:1px;">Trend</div>
+      <div style="font-size:0.95rem;font-weight:700;color:{_trend_col};">
+        {_trend_icon} {trend}</div>
+    </div>
+    <div>
+      <div style="font-size:0.6rem;color:#6e7681;text-transform:uppercase;
+                  font-weight:700;letter-spacing:1px;">Expiry</div>
+      <div style="font-size:0.85rem;font-weight:600;color:#e6edf3;">{expiry}</div>
+    </div>
+  </div>
+</div>""", unsafe_allow_html=True)
+
+    # ── No-trade block ────────────────────────────────────────────────────────
+    if _res.get("no_trade"):
+        st.markdown("""
+<div style="background:rgba(248,81,73,0.07);border:1px solid rgba(248,81,73,0.25);
+            border-radius:12px;padding:18px 20px;text-align:center;">
+  <div style="font-size:1.6rem;font-weight:900;color:#f85149;letter-spacing:1px;">
+    ⛔ NO TRADE TODAY</div>
+  <div style="font-size:0.82rem;color:#8b949e;margin-top:6px;">
+    Market conditions do not meet all mandatory criteria for a high-probability trade.</div>
+</div>""", unsafe_allow_html=True)
+
+        # Show checklist if available
+        _checks = _res.get("checklist", {})
+        if _checks:
+            _check_html = "".join(
+                f'<div style="display:flex;align-items:center;gap:8px;padding:4px 0;">'
+                f'<span style="color:{"#00d4aa" if v else "#f85149"};font-size:0.9rem;">'
+                f'{"✅" if v else "❌"}</span>'
+                f'<span style="font-size:0.82rem;color:{"#e6edf3" if v else "#f85149"};">{k}</span></div>'
+                for k, v in _checks.items()
+            )
+            st.markdown(f"""
+<div style="background:#1a1e2a;border:1px solid #2a2e39;border-radius:10px;
+            padding:14px 16px;margin-top:14px;">
+  <div style="font-size:0.65rem;font-weight:700;color:#8b949e;letter-spacing:1.2px;
+              text-transform:uppercase;margin-bottom:8px;">Trade Checklist</div>
+  {_check_html}
+</div>""", unsafe_allow_html=True)
+
+    else:
+        # ── Trade card ────────────────────────────────────────────────────────
+        direction = _res.get("direction", "CALL")
+        strike    = _res.get("strike", 0)
+        ltp       = _res.get("ltp", 0)
+        vol       = _res.get("vol", 0)
+        iv        = _res.get("iv", 0)
+        tgt       = _res.get("targets", {})
+        rating    = _res.get("rating", 3)
+        prob      = _res.get("probability", 0)
+        sym_full  = _res.get("symbol", "NIFTY")
+        _d_color  = "#00d4aa" if direction == "CALL" else "#f85149"
+        _stars    = "⭐" * rating + "☆" * (5 - rating)
+
+        st.markdown(f"""
+<div style="background:#1a1e2a;border:2px solid {_d_color}44;border-radius:12px;
+            padding:16px 18px;margin-bottom:14px;">
+  <div style="display:flex;align-items:center;justify-content:space-between;
+              flex-wrap:wrap;gap:10px;margin-bottom:14px;">
+    <div>
+      <div style="font-size:0.62rem;font-weight:700;color:#8b949e;
+                  letter-spacing:1.2px;text-transform:uppercase;">Recommended Trade</div>
+      <div style="margin-top:4px;">
+        <span style="background:{_d_color}22;border:1px solid {_d_color}55;color:{_d_color};
+                     font-size:0.75rem;font-weight:800;padding:3px 10px;border-radius:20px;
+                     letter-spacing:0.5px;">BUY {direction}</span>
+        <span style="font-size:1.1rem;font-weight:900;color:#e6edf3;margin-left:10px;">
+          {sym_full} {int(strike)} {direction[:2]}</span>
+      </div>
+    </div>
+    <div style="text-align:right;">
+      <div style="font-size:1.1rem;color:#f0c040;letter-spacing:2px;">{_stars}</div>
+      <div style="font-size:0.72rem;color:#8b949e;margin-top:2px;">Trade Rating</div>
+    </div>
+  </div>
+
+  <div style="display:flex;flex-wrap:wrap;gap:14px;margin-bottom:14px;">
+    <div>
+      <div style="font-size:0.6rem;color:#6e7681;text-transform:uppercase;
+                  font-weight:700;letter-spacing:1px;">Current Premium</div>
+      <div style="font-size:1.05rem;font-weight:800;color:{_d_color};">₹{ltp:.1f}</div>
+    </div>
+    <div>
+      <div style="font-size:0.6rem;color:#6e7681;text-transform:uppercase;
+                  font-weight:700;letter-spacing:1px;">Entry Range</div>
+      <div style="font-size:0.88rem;font-weight:700;color:#e6edf3;">
+        ₹{tgt.get("entry_min", ltp):.1f} – ₹{tgt.get("entry_max", ltp):.1f}</div>
+    </div>
+    <div>
+      <div style="font-size:0.6rem;color:#f85149;text-transform:uppercase;
+                  font-weight:700;letter-spacing:1px;">Stop Loss</div>
+      <div style="font-size:0.88rem;font-weight:700;color:#f85149;">
+        ₹{tgt.get("sl", 0):.1f}</div>
+    </div>
+    <div>
+      <div style="font-size:0.6rem;color:#6e7681;text-transform:uppercase;
+                  font-weight:700;letter-spacing:1px;">Risk/Reward</div>
+      <div style="font-size:0.88rem;font-weight:700;color:#e6edf3;">
+        1 : {tgt.get("rr", 0):.1f}</div>
+    </div>
+    <div>
+      <div style="font-size:0.6rem;color:#6e7681;text-transform:uppercase;
+                  font-weight:700;letter-spacing:1px;">Probability</div>
+      <div style="font-size:0.88rem;font-weight:700;color:#e6edf3;">{prob}%</div>
+    </div>
+    {f'<div><div style="font-size:0.6rem;color:#6e7681;text-transform:uppercase;font-weight:700;letter-spacing:1px;">IV</div><div style="font-size:0.88rem;font-weight:700;color:#8b949e;">{iv:.1f}%</div></div>' if iv else ""}
+  </div>
+
+  <div style="border-top:1px solid #2a2e39;padding-top:12px;
+              display:flex;flex-wrap:wrap;gap:14px;">
+    <div>
+      <div style="font-size:0.6rem;color:#6e7681;text-transform:uppercase;
+                  font-weight:700;letter-spacing:1px;">Target 1</div>
+      <div style="font-size:0.88rem;font-weight:700;color:#00d4aa;">
+        ₹{tgt.get("t1", 0):.1f}</div>
+    </div>
+    <div>
+      <div style="font-size:0.6rem;color:#6e7681;text-transform:uppercase;
+                  font-weight:700;letter-spacing:1px;">Target 2</div>
+      <div style="font-size:0.88rem;font-weight:700;color:#00d4aa;">
+        ₹{tgt.get("t2", 0):.1f}</div>
+    </div>
+    <div>
+      <div style="font-size:0.6rem;color:#6e7681;text-transform:uppercase;
+                  font-weight:700;letter-spacing:1px;">Target 3</div>
+      <div style="font-size:0.88rem;font-weight:700;color:#00d4aa;">
+        ₹{tgt.get("t3", 0):.1f}</div>
+    </div>
+  </div>
+</div>""", unsafe_allow_html=True)
+
+        # Signals / reasons
+        _sigs = _res.get("signals", [])
+        if _sigs:
+            _sig_chips = " ".join(
+                f'<span style="background:rgba(0,212,170,0.08);border:1px solid rgba(0,212,170,0.2);'
+                f'color:#00d4aa;font-size:0.68rem;font-weight:700;padding:3px 9px;'
+                f'border-radius:20px;white-space:nowrap;">{s}</span>'
+                for s in _sigs
+            )
+            st.markdown(f"""
+<div style="background:#1a1e2a;border:1px solid #2a2e39;border-radius:10px;
+            padding:12px 14px;margin-bottom:14px;">
+  <div style="font-size:0.62rem;font-weight:700;color:#8b949e;letter-spacing:1.2px;
+              text-transform:uppercase;margin-bottom:8px;">Institutional Signals</div>
+  <div style="display:flex;flex-wrap:wrap;gap:6px;">{_sig_chips}</div>
+</div>""", unsafe_allow_html=True)
+
+        # Checklist
+        _checks = _res.get("checklist", {})
+        if _checks:
+            _check_html = "".join(
+                f'<div style="display:flex;align-items:center;gap:8px;padding:3px 0;">'
+                f'<span style="font-size:0.82rem;">{"✅" if v else "❌"}</span>'
+                f'<span style="font-size:0.78rem;color:{"#e6edf3" if v else "#f85149"};">{k}</span></div>'
+                for k, v in _checks.items()
+            )
+            st.markdown(f"""
+<div style="background:#1a1e2a;border:1px solid #2a2e39;border-radius:10px;
+            padding:12px 14px;margin-bottom:14px;">
+  <div style="font-size:0.62rem;font-weight:700;color:#8b949e;letter-spacing:1.2px;
+              text-transform:uppercase;margin-bottom:6px;">Mandatory Checklist</div>
+  {_check_html}
+</div>""", unsafe_allow_html=True)
+
+    # ── Support / Resistance ──────────────────────────────────────────────────
+    _supp = _res.get("support", 0)
+    _res2 = _res.get("resistance", 0)
+    _oi_d = _res.get("oi", {})
+    _pcr  = _oi_d.get("pcr", 0)
+    _mp   = _oi_d.get("max_pain", 0)
+
+    st.markdown(f"""
+<div style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:14px;">
+  <div style="flex:1;min-width:120px;background:#1a1e2a;border:1px solid #2a2e39;
+              border-radius:10px;padding:12px 14px;text-align:center;">
+    <div style="font-size:0.6rem;color:#6e7681;text-transform:uppercase;
+                font-weight:700;letter-spacing:1px;">Support (PE Wall)</div>
+    <div style="font-size:1.05rem;font-weight:800;color:#00d4aa;margin-top:4px;">
+      ₹{_supp:,.0f}</div>
+  </div>
+  <div style="flex:1;min-width:120px;background:#1a1e2a;border:1px solid #2a2e39;
+              border-radius:10px;padding:12px 14px;text-align:center;">
+    <div style="font-size:0.6rem;color:#6e7681;text-transform:uppercase;
+                font-weight:700;letter-spacing:1px;">Resistance (CE Wall)</div>
+    <div style="font-size:1.05rem;font-weight:800;color:#f85149;margin-top:4px;">
+      ₹{_res2:,.0f}</div>
+  </div>
+  <div style="flex:1;min-width:120px;background:#1a1e2a;border:1px solid #2a2e39;
+              border-radius:10px;padding:12px 14px;text-align:center;">
+    <div style="font-size:0.6rem;color:#6e7681;text-transform:uppercase;
+                font-weight:700;letter-spacing:1px;">Max Pain</div>
+    <div style="font-size:1.05rem;font-weight:800;color:#e6edf3;margin-top:4px;">
+      ₹{_mp:,.0f}</div>
+  </div>
+  <div style="flex:1;min-width:100px;background:#1a1e2a;border:1px solid #2a2e39;
+              border-radius:10px;padding:12px 14px;text-align:center;">
+    <div style="font-size:0.6rem;color:#6e7681;text-transform:uppercase;
+                font-weight:700;letter-spacing:1px;">PCR</div>
+    <div style="font-size:1.05rem;font-weight:800;
+                color:{"#00d4aa" if _pcr > 1.1 else "#f85149" if _pcr < 0.9 else "#e6edf3"};
+                margin-top:4px;">{_pcr:.2f}</div>
+  </div>
+</div>""", unsafe_allow_html=True)
+
+    # ── OI tables ─────────────────────────────────────────────────────────────
+    _top_ce = _oi_d.get("top_ce")
+    _top_pe = _oi_d.get("top_pe")
+    if _top_ce is not None and not _top_ce.empty:
+        with st.expander("📊 Top OI Strikes", expanded=False):
+            _ce_col, _pe_col = st.columns(2)
+            with _ce_col:
+                st.caption("Top 5 CE OI (Resistance)")
+                st.dataframe(_top_ce.rename(columns={
+                    "Strike": "Strike", "CE OI": "OI", "CE Chng OI": "Chg OI", "CE Vol": "Vol"
+                }), hide_index=True, use_container_width=True)
+            with _pe_col:
+                st.caption("Top 5 PE OI (Support)")
+                st.dataframe(_top_pe.rename(columns={
+                    "Strike": "Strike", "PE OI": "OI", "PE Chng OI": "Chg OI", "PE Vol": "Vol"
+                }), hide_index=True, use_container_width=True)
+
+    # Risk disclaimer
+    st.markdown(
+        '<div style="margin-top:10px;font-size:0.7rem;color:#484f58;padding:8px 10px;'
+        'border:1px solid #2a2e39;border-radius:6px;">'
+        '⚠️ For educational purposes only. Not investment advice. '
+        'Always use stop losses. Options trading involves significant risk of loss.</div>',
+        unsafe_allow_html=True)
+
+
 # ── Page routing (URL-driven via ?page=) ──────────────────────────────────────
 {
     "smart_alerts_pro": page_smart_alerts_pro,
@@ -7001,4 +7359,5 @@ def page_open_low():
     "rpci":             page_rpci,
     "red_flag":         page_red_flag,
     "open_low":         page_open_low,
+    "agent_flow":       page_agent_flow,
 }.get(_cur_page, page_smart_alerts_pro)()
