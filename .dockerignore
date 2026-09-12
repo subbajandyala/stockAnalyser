@@ -1,0 +1,12 @@
+.git
+__pycache__
+*.pyc
+*.pyo
+.env
+.env.*
+*.egg-info
+.streamlit/secrets.toml
+test
+README.md
+CLAUDE.md
+SMART_ALERTS_V2.md

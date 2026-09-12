@@ -268,7 +268,8 @@ def _rating(confidence: int, n_pass: int) -> int:
 
 # ── Public entry point ────────────────────────────────────────────────────────
 
-def run_agent_analysis(symbol: str, api_key: str, access_token: str) -> dict:
+def run_agent_analysis(symbol: str, api_key: str, access_token: str,
+                       save_to_db: bool = True) -> dict:
     """
     Full pipeline. Returns dict with all fields for the Agent Flow UI card.
     Keys always present: symbol, error, no_trade, bias, confidence.
@@ -353,15 +354,24 @@ def run_agent_analysis(symbol: str, api_key: str, access_token: str) -> dict:
     prob   = min(conf - 4, 91)
     rating = _rating(conf, n_pass)
 
-    return {**common,
-            "no_trade":   False,
-            "direction":  direction,
-            "strike":     sk["strike"],
-            "ltp":        ltp,
-            "iv":         sk["iv"],
-            "vol":        sk["vol"],
-            "targets":    tgt,
-            "checklist":  checks,
-            "rating":     rating,
-            "probability": prob,
-            "signals":    oi["signals"]}
+    result = {**common,
+              "no_trade":   False,
+              "direction":  direction,
+              "strike":     sk["strike"],
+              "ltp":        ltp,
+              "iv":         sk["iv"],
+              "vol":        sk["vol"],
+              "targets":    tgt,
+              "checklist":  checks,
+              "rating":     rating,
+              "probability": prob,
+              "signals":    oi["signals"]}
+
+    if save_to_db:
+        try:
+            from screener.db import try_save_trade
+            try_save_trade(result)
+        except Exception:
+            pass
+
+    return result
