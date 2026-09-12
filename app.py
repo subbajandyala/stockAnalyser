@@ -572,6 +572,7 @@ _NAV = [
     ("red_flag",         "🚨 Red Flag"),
     ("open_low",         "🚀 Open=Low"),
     ("agent_flow",       "🤖 Agent Flow"),
+    ("trade_log",        "📋 Trade Log"),
 ]
 _NAV_KEYS   = [k for k, _ in _NAV]
 _NAV_LABELS = {k: lbl for k, lbl in _NAV}
@@ -7350,6 +7351,102 @@ def page_agent_flow():
         unsafe_allow_html=True)
 
 
+# ── Trade Log page ───────────────────────────────────────────────────────────
+
+def page_trade_log():
+    st.markdown("## 📋 Trade Log")
+    st.markdown("All Agent Flow recommendations saved to Google Sheets.")
+
+    try:
+        from screener.sheets_db import get_trade_log, get_watchlist, add_to_watchlist, remove_from_watchlist
+        _sheets_ok = True
+    except Exception:
+        _sheets_ok = False
+
+    if not _sheets_ok:
+        st.error("gspread not installed. Run: pip install gspread google-auth")
+        return
+
+    _has_creds = bool(st.secrets.get("GOOGLE_SHEET_ID", "")) if hasattr(st, "secrets") else False
+    if not _has_creds:
+        st.warning("Add **GOOGLE_SHEET_ID** and **GOOGLE_CREDS_JSON** to Streamlit secrets to enable logging.")
+        with st.expander("Setup instructions"):
+            st.markdown("""
+**Step 1** — Create a Google Service Account
+- Go to [console.cloud.google.com](https://console.cloud.google.com) → APIs & Services → Credentials
+- Create Service Account → download JSON key
+
+**Step 2** — Share your Google Sheet
+- Create a new Google Sheet
+- Share it with the service account email (Editor access)
+- Copy the Sheet ID from the URL: `docs.google.com/spreadsheets/d/**SHEET_ID**/edit`
+
+**Step 3** — Add to Streamlit secrets
+```toml
+GOOGLE_SHEET_ID = "your-sheet-id"
+GOOGLE_CREDS_JSON = '''{ paste service account JSON here }'''
+```
+""")
+        return
+
+    _tab1, _tab2, _tab3 = st.tabs(["📈 Trade Recommendations", "🔍 Scan History", "👁 Watchlist"])
+
+    with _tab1:
+        if st.button("🔄 Refresh", key="tl_refresh"):
+            st.cache_data.clear()
+        try:
+            _trades = get_trade_log(limit=50)
+            if not _trades:
+                st.info("No trades logged yet. Run Agent Flow analysis to start saving.")
+            else:
+                import pandas as pd
+                _df = pd.DataFrame(_trades)
+                st.dataframe(_df, hide_index=True, use_container_width=True)
+                st.caption(f"{len(_trades)} records")
+        except Exception as e:
+            st.error(f"Could not load trade log: {e}")
+
+    with _tab2:
+        try:
+            from screener.sheets_db import get_scan_history
+            _scans = get_scan_history(limit=30)
+            if not _scans:
+                st.info("No scan history yet.")
+            else:
+                import pandas as pd
+                st.dataframe(pd.DataFrame(_scans), hide_index=True, use_container_width=True)
+        except Exception as e:
+            st.error(f"Could not load scan history: {e}")
+
+    with _tab3:
+        _wl_col1, _wl_col2 = st.columns([3, 1])
+        with _wl_col1:
+            _new_sym = st.text_input("Add symbol", placeholder="e.g. RELIANCE", key="wl_add_sym").upper().strip()
+        with _wl_col2:
+            _note = st.text_input("Note", placeholder="optional", key="wl_note")
+        if st.button("➕ Add to Watchlist", key="wl_add_btn") and _new_sym:
+            try:
+                add_to_watchlist(_new_sym, _note)
+                st.success(f"Added {_new_sym}")
+                st.rerun()
+            except Exception as e:
+                st.error(str(e))
+        try:
+            _wl = get_watchlist()
+            if not _wl:
+                st.info("Watchlist is empty.")
+            else:
+                for _item in _wl:
+                    _c1, _c2, _c3 = st.columns([2, 4, 1])
+                    _c1.write(f"**{_item.get('Symbol','')}**")
+                    _c2.write(_item.get("Note", ""))
+                    if _c3.button("✕", key=f"wl_rm_{_item.get('Symbol','')}"):
+                        remove_from_watchlist(_item["Symbol"])
+                        st.rerun()
+        except Exception as e:
+            st.error(f"Could not load watchlist: {e}")
+
+
 # ── Page routing (URL-driven via ?page=) ──────────────────────────────────────
 {
     "smart_alerts_pro": page_smart_alerts_pro,
@@ -7360,4 +7457,5 @@ def page_agent_flow():
     "red_flag":         page_red_flag,
     "open_low":         page_open_low,
     "agent_flow":       page_agent_flow,
+    "trade_log":        page_trade_log,
 }.get(_cur_page, page_smart_alerts_pro)()

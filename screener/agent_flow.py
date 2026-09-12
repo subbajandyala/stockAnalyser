@@ -369,7 +369,7 @@ def run_agent_analysis(symbol: str, api_key: str, access_token: str,
 
     if save_to_db:
         try:
-            from screener.db import try_save_trade
+            from screener.sheets_db import try_save_trade
             try_save_trade(result)
         except Exception:
             pass
