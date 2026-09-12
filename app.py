@@ -52,6 +52,17 @@ from screener.elder_ray import (
     run_elder_ray_signal, fetch_atm_option,
     INDEX_CONFIG as _ER_INDEX_CONFIG,
 )
+from screener.late_session import (
+    INDEX_CONFIG as _LS_CONFIG,
+    score_signal  as _ls_score,
+    raw_signal    as _ls_raw_signal,
+    apply_flip_guard as _ls_flip_guard,
+    fetch_data    as _ls_fetch,
+    session_window as _ls_window,
+    atm_strike    as _ls_atm,
+)
+from screener.open_low import run_open_low_scan as _run_open_low
+from screener.agent_flow import run_agent_analysis as _run_agent, INSTRUMENTS as _AF_INSTRUMENTS
 from plotly.subplots import make_subplots
 
 try:
@@ -69,10 +80,82 @@ st.set_page_config(page_title="MarketPulse", layout="wide", page_icon="🐂")
 st.markdown("""
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&display=swap');
-* { font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif !important; }
+
+/* Base font on body — cascades without !important so icon fonts survive */
+body, .stApp, .main, p, h1, h2, h3, h4, h5, h6,
+button, input, textarea, select, label, td, th, li, a,
+[data-testid], [class*="st-"] {
+  font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif !important;
+}
+
+/* Sidebar collapse toggle — hide broken ligature text, show ☰ via CSS */
+[data-testid="stSidebarCollapsedControl"] span,
+[data-testid="collapsedControl"] span {
+  font-size: 0 !important;
+  width: 22px !important;
+  display: inline-block !important;
+}
+[data-testid="stSidebarCollapsedControl"] span::after,
+[data-testid="collapsedControl"] span::after {
+  content: '☰';
+  font-size: 18px !important;
+  font-family: sans-serif !important;
+  color: #c9d1d9 !important;
+  display: block !important;
+  line-height: 1 !important;
+}
+
 .stApp { background: #131722; }
 .main .block-container { padding-top: 1rem; }
 [data-testid="stSidebar"] { background: #1e222d !important; border-right: 1px solid #2a2e39 !important; }
+
+/* ── Dark select / input widgets (TradingView-style) ─────────────────────── */
+[data-baseweb="select"] > div:first-child {
+  background: #1a1e2a !important;
+  border: 1px solid #2a2e39 !important;
+  border-radius: 8px !important;
+  color: #e6edf3 !important;
+}
+[data-baseweb="select"] [class*="ValueContainer"] { color: #e6edf3 !important; }
+[data-baseweb="select"] svg { fill: #6e7681 !important; }
+[data-baseweb="popover"] [role="option"] { background: #1e222d !important; color: #e6edf3 !important; }
+[data-baseweb="popover"] [role="option"]:hover,
+[data-baseweb="popover"] [aria-selected="true"] { background: rgba(0,212,170,0.12) !important; color: #00d4aa !important; }
+[data-baseweb="menu"] { background: #1e222d !important; border: 1px solid #2a2e39 !important; border-radius: 8px !important; }
+
+/* Dark text inputs */
+[data-baseweb="input"] > div,
+[data-baseweb="input"] input,
+input[type="text"], input[type="password"], textarea {
+  background: #1a1e2a !important;
+  border-color: #2a2e39 !important;
+  color: #e6edf3 !important;
+  border-radius: 8px !important;
+}
+input::placeholder, textarea::placeholder { color: #4a5568 !important; }
+
+/* Segmented control (timeframe picker) */
+[data-testid="stSegmentedControl"] { background: #1a1e2a !important; border: 1px solid #2a2e39 !important; border-radius: 8px !important; }
+[data-testid="stSegmentedControl"] label { color: #8b949e !important; font-weight: 600 !important; font-size: 0.78rem !important; }
+[data-testid="stSegmentedControl"] [aria-checked="true"] label { color: #00d4aa !important; background: rgba(0,212,170,0.12) !important; border-radius: 6px !important; }
+
+/* Expander */
+[data-testid="stExpander"] { background: #1a1e2a !important; border: 1px solid #2a2e39 !important; border-radius: 10px !important; }
+[data-testid="stExpander"] summary { color: #c9d1d9 !important; font-weight: 600 !important; }
+
+/* Checkbox */
+[data-baseweb="checkbox"] label { color: #c9d1d9 !important; }
+[data-baseweb="checkbox"] [role="checkbox"] { border-color: #2a2e39 !important; background: #1a1e2a !important; }
+[data-baseweb="checkbox"] [role="checkbox"][aria-checked="true"] { background: #00d4aa !important; border-color: #00d4aa !important; }
+
+/* Labels */
+[data-testid="stWidgetLabel"] p, label { color: #8b949e !important; font-size: 0.78rem !important; font-weight: 600 !important; letter-spacing: 0.3px !important; text-transform: uppercase !important; }
+
+/* Scrollbar */
+::-webkit-scrollbar { width: 5px; height: 5px; }
+::-webkit-scrollbar-track { background: #131722; }
+::-webkit-scrollbar-thumb { background: #2a2e39; border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: #3a3e49; }
 
 /* Ticker */
 .ticker-wrapper { background: #1e222d; border: 1px solid #2a2e39; border-radius: 8px; overflow: hidden; white-space: nowrap; padding: 8px 0; margin-bottom: 18px; }
@@ -166,6 +249,103 @@ hr { border-color: #2a2e39 !important; margin: 10px 0 !important; }
 .bpe-i { height:9px; background:rgba(0,212,170,0.65); border-radius:0 2px 2px 0; }
 .cup { color:#00d4aa; font-weight:600; } .cdn { color:#f85149; font-weight:600; }
 .atm-lbl { display:block; font-size:0.55rem; color:#00d4aa; letter-spacing:1.5px; font-weight:800; text-transform:uppercase; text-align:center; margin-top:1px; }
+
+/* ── Hide sidebar + collapsed control ──────────────────────────────────────── */
+[data-testid="stSidebar"],
+[data-testid="stSidebarCollapsedControl"],
+[data-testid="collapsedControl"] { display: none !important; }
+.main .block-container {
+  padding-top: 0 !important;
+  padding-left: 0.75rem !important;
+  padding-right: 0.75rem !important;
+  max-width: 100% !important;
+}
+
+/* ── Top app bar ─────────────────────────────────────────────────────────── */
+.mp-topbar {
+  background: #13161f;
+  border-bottom: 1px solid #1e2433;
+  padding: 10px 16px;
+  display: flex; align-items: center; justify-content: space-between; gap: 10px;
+  position: sticky; top: 0; z-index: 999;
+  margin: -0.5rem -0.75rem 0;
+}
+.mp-brand { font-size: 1.05rem; font-weight: 900; color: #fff; letter-spacing: -0.3px; display:flex; align-items:center; gap:6px; }
+.mp-brand-accent { color: #00d4aa; }
+.mp-topright { display: flex; align-items: center; gap: 8px; }
+.mp-live { display: flex; align-items: center; gap: 4px; font-size: 0.65rem; font-weight: 700; color: #00d4aa; letter-spacing: 0.5px; }
+.mp-kite-ok  { background: rgba(0,212,170,0.1); border: 1px solid rgba(0,212,170,0.3); color: #00d4aa; font-size: 0.68rem; font-weight: 700; padding: 3px 10px; border-radius: 20px; }
+.mp-kite-btn { background: rgba(56,126,209,0.15); border: 1px solid rgba(56,126,209,0.35); color: #79c0ff; font-size: 0.68rem; font-weight: 700; padding: 3px 10px; border-radius: 20px; text-decoration: none !important; white-space: nowrap; }
+.mp-kite-btn:hover { background: rgba(56,126,209,0.25) !important; }
+
+/* ── Page nav selectbox ─────────────────────────────────────────────────────── */
+/* Style the nav selectbox to stand out as the page switcher */
+.nav-select [data-baseweb="select"] > div:first-child {
+  background: #1e2433 !important;
+  border: 1px solid #00d4aa !important;
+  border-radius: 8px !important;
+  font-size: 0.88rem !important;
+  font-weight: 700 !important;
+  color: #00d4aa !important;
+}
+
+/* ── Ticker strip in topbar ─────────────────────────────────────────────── */
+.mp-ticker { display: flex; gap: 16px; overflow: hidden; font-size: 0.7rem; font-weight: 600; }
+.mp-ticker-item { white-space: nowrap; color: #8b949e; }
+.mp-ticker-item .tu { color: #00d4aa; } .mp-ticker-item .td { color: #f85149; }
+
+/* ── Timeframe strip ─────────────────────────────────────────────────────── */
+[data-testid="stSegmentedControl"] {
+  background: #1a1e2a !important; border: 1px solid #2a2e39 !important;
+  border-radius: 8px !important; padding: 3px !important;
+}
+[data-testid="stSegmentedControl"] button {
+  font-size: 0.75rem !important; font-weight: 600 !important;
+  padding: 4px 10px !important; color: #6e7681 !important;
+  border-radius: 6px !important;
+}
+[data-testid="stSegmentedControl"] button[aria-checked="true"] {
+  background: rgba(0,212,170,0.14) !important; color: #00d4aa !important;
+}
+
+/* ── Mobile ──────────────────────────────────────────────────────────────── */
+@media (max-width: 768px) {
+  .main .block-container { padding: 0 0.6rem 2rem !important; }
+  .stApp { overflow-x: hidden !important; }
+  .mp-topbar { padding: 9px 12px; margin: -0.5rem -0.6rem 0; }
+  .mp-brand { font-size: 0.95rem; }
+
+  [data-testid="stHorizontalBlock"] { flex-direction: column !important; }
+  [data-testid="stHorizontalBlock"] > div { width: 100% !important; min-width: 100% !important; flex: none !important; }
+
+  [data-testid="stTabs"] [role="tablist"] { overflow-x: auto !important; flex-wrap: nowrap !important; -webkit-overflow-scrolling: touch; scrollbar-width: none; }
+  [data-testid="stTabs"] [role="tablist"]::-webkit-scrollbar { display: none; }
+  [data-testid="stTabs"] button[role="tab"] { font-size: 0.7rem !important; padding: 5px 10px !important; white-space: nowrap !important; flex-shrink: 0 !important; }
+
+  [data-testid="metric-container"] { padding: 8px 10px !important; }
+  [data-testid="stMetricValue"] { font-size: 1.05rem !important; }
+
+  [data-testid="stDataFrame"] { overflow-x: auto !important; font-size: 0.72rem !important; }
+  .oc-wrap { overflow-x: auto !important; -webkit-overflow-scrolling: touch; }
+  .oc-tbl { font-size: 0.7rem !important; }
+  .oc-tbl td, .oc-tbl th { padding: 4px 6px !important; }
+
+  .ticker-wrapper { display: none !important; }
+  .lhb-signal-card { padding: 14px 12px !important; }
+  .lhb-score-ring { width: 64px !important; height: 64px !important; font-size: 1.4rem !important; }
+  .rpci-sec-card { min-width: 130px !important; }
+  .er-factor-name { min-width: 80px !important; font-size: 0.72rem !important; }
+  .js-plotly-plot, .plotly { max-width: 100% !important; }
+  .stPlotlyChart { overflow-x: auto !important; }
+  [data-testid="stDialog"] > div { max-width: 100vw !important; width: 100vw !important; margin: 0 !important; border-radius: 0 !important; }
+}
+
+/* Touch-friendly tap targets */
+@media (hover: none) and (pointer: coarse) {
+  button { min-height: 44px !important; }
+  .mp-nav a { min-height: 44px !important; }
+  [data-testid="stTabs"] button[role="tab"] { min-height: 40px !important; }
+}
 </style>
 """, unsafe_allow_html=True)
 
@@ -320,116 +500,150 @@ def _get_secret(key: str, default: str = "") -> str:
     except Exception:
         return default
 
-with st.sidebar:
-    st.markdown("""
-<div class="sb-brand">
-  <div class="sb-brand-name">🐂 MarketPulse</div>
-  <div class="sb-brand-sub">NSE India · NIFTY 500</div>
-</div>
-<div class="sb-live"><span class="sb-dot"></span>NSE feed LIVE</div>
-""", unsafe_allow_html=True)
+# ── One-tap OAuth: auto-exchange request_token → access_token ────────────────
+_qp = st.query_params
+_rt = _qp.get("request_token", "")
+if _rt and not st.session_state.get("kite_access_token", ""):
+    import hashlib, requests as _kreq
+    _ex_key    = st.session_state.get("kite_api_key", "") or _get_secret("KITE_API_KEY", "plz6ik09bgb62mey")
+    _ex_secret = _get_secret("KITE_API_SECRET", "")
+    if _ex_key and _ex_secret:
+        try:
+            _checksum = hashlib.sha256((_ex_key + _rt + _ex_secret).encode()).hexdigest()
+            _resp = _kreq.post(
+                "https://api.kite.trade/session/token",
+                data={"api_key": _ex_key, "request_token": _rt, "checksum": _checksum},
+                headers={"X-Kite-Version": "3"},
+                timeout=15,
+            )
+            if _resp.ok:
+                _tok_data = _resp.json().get("data", {})
+                _new_tok  = _tok_data.get("access_token", "")
+                if _new_tok:
+                    st.session_state["kite_access_token"] = _new_tok
+                    st.session_state["kite_api_key"] = _ex_key
+                    st.session_state["_kite_auto_name"] = _tok_data.get("user_name", "")
+                    st.query_params.clear()
+                    st.rerun()
+        except Exception:
+            pass
 
-    st.markdown(
-        '<p style="color:#6e7681;font-size:.75rem;font-weight:600;text-transform:uppercase;'
-        'letter-spacing:.5px;margin:12px 0 4px;">⏱ TIMEFRAME</p>',
-        unsafe_allow_html=True,
-    )
+# ── localStorage persist ──────────────────────────────────────────────────────
+_ses_key = st.session_state.get("kite_api_key", "")
+_ses_tok = st.session_state.get("kite_access_token", "")
+_scomp.html(f"""<script>
+(function(){{
+  const CK={repr(_ses_key)}, CT={repr(_ses_tok)};
+  if(CK) localStorage.setItem('mp_kite_api_key', CK);
+  if(CT) localStorage.setItem('mp_kite_access_token', CT);
+}})();
+</script>""", height=0)
+
+# ── Kite status ───────────────────────────────────────────────────────────────
+_kite_ok    = bool(st.session_state.get("kite_api_key","") and st.session_state.get("kite_access_token",""))
+_kite_name  = st.session_state.get("_kite_auto_name","")
+_login_key  = _get_secret("KITE_API_KEY","plz6ik09bgb62mey")
+_has_secret = bool(_get_secret("KITE_API_SECRET",""))
+_login_url  = f"https://kite.zerodha.com/connect/login?api_key={_login_key}&v=3"
+
+if _kite_ok:
+    _kn = f" {_kite_name}" if _kite_name else ""
+    _kite_topbar_badge = f'<span class="mp-kite-ok">✓{_kn}</span>'
+else:
+    _kite_topbar_badge = ""
+
+# ── Top bar ───────────────────────────────────────────────────────────────────
+st.markdown(f"""
+<div class="mp-topbar">
+  <div class="mp-brand">🐂 Market<span class="mp-brand-accent">Pulse</span></div>
+  <div class="mp-topright">
+    <div class="mp-live"><span class="sb-dot"></span>NSE LIVE</div>
+    {_kite_topbar_badge}
+  </div>
+</div>""", unsafe_allow_html=True)
+
+# ── Page navigation (pure session_state — zero browser navigation) ────────────
+_NAV = [
+    ("smart_alerts_pro", "⚡ Alerts Pro"),
+    ("gamma_blast",      "💥 Gamma Blast"),
+    ("elder_ray",        "🎯 Elder Ray"),
+    ("late_session",     "🌅 Late Session"),
+    ("rpci",             "📈 RPCI"),
+    ("red_flag",         "🚨 Red Flag"),
+    ("open_low",         "🚀 Open=Low"),
+    ("agent_flow",       "🤖 Agent Flow"),
+]
+_NAV_KEYS   = [k for k, _ in _NAV]
+_NAV_LABELS = {k: lbl for k, lbl in _NAV}
+
+if "current_page" not in st.session_state:
+    st.session_state["current_page"] = "smart_alerts_pro"
+_cur_page = st.session_state["current_page"]
+
+_sel_page = st.selectbox(
+    "Screen",
+    options=_NAV_KEYS,
+    format_func=lambda k: _NAV_LABELS[k],
+    index=_NAV_KEYS.index(_cur_page),
+    label_visibility="collapsed",
+)
+if _sel_page != _cur_page:
+    st.session_state["current_page"] = _sel_page
+    st.rerun()
+
+# ── Timeframe + Kite button row ───────────────────────────────────────────────
+_tf_col, _kite_col = st.columns([3, 1])
+with _tf_col:
     st.segmented_control(
         label="Timeframe", options=list(TF_CONFIG.keys()),
         format_func=lambda k: TF_CONFIG[k]["label"],
         default="1D", key="global_tf", label_visibility="collapsed",
     )
-    st.divider()
-
-    # ── localStorage sync (save + restore across browser tabs) ─────────────────
-    # Runs in a hidden iframe on every page load.
-    # • If credentials are in session: saves them to localStorage.
-    # • If session is empty: tries to fill the password inputs from localStorage
-    #   by dispatching React-compatible input events (same-origin iframe access).
-    _ses_key = st.session_state.get("kite_api_key", "")
-    _ses_tok = st.session_state.get("kite_access_token", "")
-    _scomp.html(f"""<script>
-(function(){{
-  const CK={repr(_ses_key)}, CT={repr(_ses_tok)};
-  if(CK) localStorage.setItem('mp_kite_api_key', CK);
-  if(CT) localStorage.setItem('mp_kite_access_token', CT);
-  if(CK||CT) return;                        // already have creds — nothing to restore
-  const lsK=localStorage.getItem('mp_kite_api_key')||'';
-  const lsT=localStorage.getItem('mp_kite_access_token')||'';
-  if(!lsK&&!lsT) return;
-  function fill(){{
-    try{{
-      const doc=window.parent.document;
-      doc.querySelectorAll('input[type="password"]').forEach(inp=>{{
-        let el=inp;
-        for(let i=0;i<12;i++){{
-          el=el.parentElement; if(!el) break;
-          const lbl=el.querySelector(':scope>label,:scope>div>label');
-          if(!lbl) continue;
-          const t=lbl.textContent.trim().toLowerCase();
-          const v=t.includes('api key')?lsK:t.includes('access token')?lsT:'';
-          if(v&&!inp.value){{
-            Object.getOwnPropertyDescriptor(Object.getPrototypeOf(inp),'value').set.call(inp,v);
-            inp.dispatchEvent(new Event('input',{{bubbles:true}}));
-            inp.dispatchEvent(new Event('change',{{bubbles:true}}));
-          }}
-          break;
-        }}
-      }});
-    }}catch(e){{}}
+with _kite_col:
+    if _kite_ok:
+        if st.button("🚪 Disconnect", key="kite_logout_top", use_container_width=True):
+            st.session_state.pop("kite_api_key", None)
+            st.session_state.pop("kite_access_token", None)
+            st.session_state.pop("_kite_auto_name", None)
+            st.rerun()
+    elif _has_secret:
+        # Inject an anchor into the PARENT frame (allow-same-origin lets us
+        # access window.parent.document). The user click inside the iframe
+        # propagates as user-activation to the parent, so the anchor.click()
+        # navigates the top-level window directly — same-tab, no popup blocker.
+        _scomp.html(f"""
+<style>
+*{{box-sizing:border-box;margin:0;padding:0;}}
+html,body{{height:100%;background:transparent;overflow:hidden;}}
+button{{
+  width:100%;height:52px;
+  background:linear-gradient(135deg,rgba(56,126,209,0.18),rgba(56,126,209,0.1));
+  border:1px solid rgba(56,126,209,0.45);border-radius:9px;
+  color:#79c0ff;font-size:0.82rem;font-weight:700;cursor:pointer;
+  font-family:Inter,-apple-system,sans-serif;letter-spacing:0.2px;
+}}
+button:hover{{background:rgba(56,126,209,0.28);border-color:rgba(56,126,209,0.7);}}
+button:active{{background:rgba(56,126,209,0.4);transform:scale(0.98);}}
+</style>
+<button onclick="go()">🔑 Login</button>
+<script>
+function go(){{
+  var url={repr(_login_url)};
+  try{{
+    // Same-origin parent access: inject & click anchor in the top frame
+    var a=window.parent.document.createElement('a');
+    a.href=url;
+    a.style.display='none';
+    window.parent.document.body.appendChild(a);
+    a.click();
+    window.parent.document.body.removeChild(a);
+  }}catch(e){{
+    // Fallback: direct top-frame navigation
+    window.top.location.href=url;
   }}
-  [600,1800,4000].forEach(t=>setTimeout(fill,t));
-}})();
-</script>""", height=0)
-
-    with st.expander("⚡ Zerodha Kite Connect", expanded=False):
-        _sidebar_api_key = st.text_input(
-            "API Key", type="password", key="kite_api_key",
-            value=_get_secret("KITE_API_KEY", ""),
-            placeholder="From kite.zerodha.com/apps",
-        )
-        st.text_input(
-            "Access Token", type="password", key="kite_access_token",
-            value=_get_secret("KITE_ACCESS_TOKEN", ""),
-            placeholder="Daily token — refresh each morning",
-        )
-        _kite_ok = bool(
-            st.session_state.get("kite_api_key", "")
-            and st.session_state.get("kite_access_token", "")
-        )
-        if _kite_ok:
-            st.success("✅ Kite connected — live OI data active")
-            if st.button("🔬 Test Connection", key="kite_test", use_container_width=True):
-                import requests as _tr
-                _hdr = {"X-Kite-Version": "3",
-                        "Authorization": f"token {st.session_state['kite_api_key']}:{st.session_state['kite_access_token']}"}
-                try:
-                    _p = _tr.get("https://api.kite.trade/user/profile", headers=_hdr, timeout=10)
-                    if _p.ok:
-                        _name = _p.json().get("data", {}).get("user_name", "?")
-                        st.success(f"✅ Token valid — logged in as {_name}")
-                    else:
-                        st.error(f"❌ Token rejected: {_p.status_code} — generate a new token")
-                except Exception as _te:
-                    st.error(f"Network error: {_te}")
-
-                try:
-                    _i = _tr.get("https://api.kite.trade/instruments/NFO", headers=_hdr, timeout=30)
-                    if _i.ok and "instrument_token" in _i.text[:200]:
-                        _rows = len(_i.text.strip().splitlines()) - 1
-                        st.info(f"📋 NFO instruments: {_rows:,} rows downloaded")
-                    else:
-                        st.error(f"❌ NFO instruments failed: status {_i.status_code} — first 200 chars: {_i.text[:200]}")
-                except Exception as _ie:
-                    st.error(f"Instruments error: {_ie}")
-        else:
-            _sidebar_key_for_link = st.session_state.get("kite_api_key", "") or _get_secret("KITE_API_KEY", "plz6ik09bgb62mey")
-            st.info("Enter API Key + Access Token to enable real-time OI")
-            if _sidebar_key_for_link:
-                st.caption(
-                    f"🔑 [Generate today's token](https://kite.zerodha.com/connect/login?api_key={_sidebar_key_for_link}&v=3) "
-                    "→ login → copy `request_token` from URL → run exchange script"
-                )
+}}
+</script>
+""", height=60)
 
 
 # ── Scrolling ticker ──────────────────────────────────────────────────────────
@@ -5818,6 +6032,429 @@ def page_rpci():
                     st.info("Momentum data not available.")
 
 
+# ── Late Session Blaster page ─────────────────────────────────────────────────
+
+def page_late_session():
+    _IST_LS = datetime.timezone(datetime.timedelta(hours=5, minutes=30))
+
+    st.markdown("""<style>
+/* Late Session Blaster */
+.lhb-header{display:flex;align-items:center;gap:10px;margin-bottom:4px;}
+.lhb-title{font-size:1.45rem;font-weight:800;color:#f0f6fc;}
+.lhb-badge-live{background:#0d2818;border:1px solid #2ea043;color:#2ea043;font-size:.68rem;font-weight:700;padding:3px 9px;border-radius:20px;letter-spacing:.8px;}
+.lhb-badge-cas{background:#1a1200;border:1px solid #ffa657;color:#ffa657;font-size:.68rem;font-weight:700;padding:3px 9px;border-radius:20px;letter-spacing:.8px;}
+.lhb-badge-wait{background:#161b22;border:1px solid #30363d;color:#6e7681;font-size:.68rem;font-weight:700;padding:3px 9px;border-radius:20px;}
+.lhb-cdown{display:flex;align-items:center;gap:8px;background:#12191f;border:1px solid #21262d;border-radius:8px;padding:7px 14px;margin-bottom:12px;}
+.lhb-cdown-lbl{font-size:.72rem;color:#6e7681;}
+.lhb-cdown-val{font-size:1.1rem;font-weight:700;color:#e6b800;font-variant-numeric:tabular-nums;}
+/* Signal card */
+.lhb-card{border-radius:12px;padding:20px 24px;margin:10px 0;position:relative;overflow:hidden;}
+.lhb-card-strong-ce{background:linear-gradient(135deg,#001a12,#003020);border:2px solid #00d4aa;box-shadow:0 0 20px rgba(0,212,170,.25);}
+.lhb-card-ce{background:linear-gradient(135deg,#0d1a16,#0a1f18);border:2px solid rgba(0,212,170,.5);}
+.lhb-card-strong-pe{background:linear-gradient(135deg,#1a0007,#2d000c);border:2px solid #f85149;box-shadow:0 0 20px rgba(248,81,73,.25);}
+.lhb-card-pe{background:linear-gradient(135deg,#1a0d0d,#200e0e);border:2px solid rgba(248,81,73,.5);}
+.lhb-card-watch{background:linear-gradient(135deg,#0d1117,#12191f);border:1px solid #e6b800;}
+.lhb-card-wait{background:#0d1117;border:1px solid #21262d;}
+.lhb-sig-lbl{font-size:.7rem;color:#6e7681;text-transform:uppercase;letter-spacing:1px;margin-bottom:4px;}
+.lhb-sig-strong-ce{font-size:1.9rem;font-weight:900;color:#00d4aa;letter-spacing:-1px;}
+.lhb-sig-ce{font-size:1.6rem;font-weight:800;color:#00d4aa;}
+.lhb-sig-strong-pe{font-size:1.9rem;font-weight:900;color:#f85149;letter-spacing:-1px;}
+.lhb-sig-pe{font-size:1.6rem;font-weight:800;color:#f85149;}
+.lhb-sig-watch{font-size:1.5rem;font-weight:700;color:#e6b800;}
+.lhb-sig-wait{font-size:1.5rem;font-weight:700;color:#6e7681;}
+.lhb-sig-sub{font-size:.84rem;color:#6e7681;margin-top:5px;}
+.lhb-score-box{position:absolute;top:16px;right:20px;text-align:right;}
+.lhb-score-lbl{font-size:.68rem;color:#6e7681;letter-spacing:.8px;text-transform:uppercase;}
+.lhb-score-ce{font-size:1.2rem;font-weight:800;color:#00d4aa;}
+.lhb-score-pe{font-size:1.2rem;font-weight:800;color:#f85149;}
+.lhb-score-nt{font-size:1.2rem;font-weight:700;color:#6e7681;}
+/* flip guard banner */
+.lhb-flip-warn{background:rgba(230,184,0,.08);border:1px solid rgba(230,184,0,.35);border-radius:8px;padding:8px 14px;margin:6px 0;font-size:.78rem;color:#e6b800;}
+/* Factor table */
+.lhb-factor-tbl{width:100%;border-collapse:collapse;font-size:.8rem;margin:10px 0;}
+.lhb-factor-tbl th{color:#6e7681;font-size:.65rem;font-weight:700;text-transform:uppercase;letter-spacing:.7px;border-bottom:1px solid #21262d;padding:5px 8px;text-align:left;}
+.lhb-factor-tbl td{padding:5px 8px;border-bottom:1px solid #161b22;vertical-align:middle;color:#c9d1d9;}
+.lhb-factor-tbl tr:last-child td{border-bottom:none;}
+.lhb-bias-ce{display:inline-block;background:#0d2818;color:#2ea043;border:1px solid #2ea043;font-size:.65rem;padding:1px 7px;border-radius:4px;font-weight:700;}
+.lhb-bias-pe{display:inline-block;background:#2a0d0d;color:#f85149;border:1px solid #f85149;font-size:.65rem;padding:1px 7px;border-radius:4px;font-weight:700;}
+.lhb-bias-neu{display:inline-block;background:#161b22;color:#6e7681;border:1px solid #30363d;font-size:.65rem;padding:1px 7px;border-radius:4px;}
+.lhb-pts-pos{color:#00d4aa;font-weight:700;}
+.lhb-pts-neg{color:#f85149;font-weight:700;}
+.lhb-pts-neu{color:#6e7681;}
+/* Stats row */
+.lhb-stat{background:#1e222d;border:1px solid #2a2e39;border-radius:8px;padding:10px 14px;text-align:center;}
+.lhb-stat-val{font-size:1.2rem;font-weight:800;color:#f0f6fc;}
+.lhb-stat-lbl{font-size:.62rem;color:#6e7681;text-transform:uppercase;letter-spacing:.7px;margin-top:2px;}
+/* ATM box */
+.lhb-atm-box{background:#1e222d;border:1px solid #2a2e39;border-radius:10px;padding:14px 18px;}
+.lhb-atm-title{font-size:.68rem;font-weight:700;color:#6e7681;text-transform:uppercase;letter-spacing:.8px;margin-bottom:8px;}
+.lhb-atm-row{display:flex;justify-content:space-between;align-items:center;padding:4px 0;border-bottom:1px solid #161b22;font-size:.82rem;}
+.lhb-atm-row:last-child{border-bottom:none;}
+.lhb-atm-sym{font-weight:700;color:#f0f6fc;}
+.lhb-atm-note{font-size:.68rem;color:#6e7681;}
+.lhb-ce-txt{color:#00d4aa;font-weight:700;}
+.lhb-pe-txt{color:#f85149;font-weight:700;}
+/* CAS box */
+.lhb-cas-box{background:rgba(255,166,87,.06);border:1px solid rgba(255,166,87,.35);border-radius:10px;padding:14px 18px;margin-top:12px;}
+.lhb-cas-title{font-size:.68rem;font-weight:700;color:#ffa657;text-transform:uppercase;letter-spacing:.8px;margin-bottom:6px;}
+</style>""", unsafe_allow_html=True)
+
+    # ── Header & countdown ────────────────────────────────────────────────────
+    _in_late, _in_cas, _mins_left = _ls_window()
+    _now_ls = datetime.datetime.now(_IST_LS)
+
+    _badge = (
+        '<span class="lhb-badge-live">ACTIVE</span>' if _in_late
+        else '<span class="lhb-badge-wait">OUTSIDE WINDOW</span>'
+    )
+    _cas_badge = '<span class="lhb-badge-cas">CAS LIVE</span>' if _in_cas else ''
+
+    st.markdown(
+        f'<div class="lhb-header">'
+        f'<span class="lhb-title">🌅 Late Session Blaster</span>'
+        f'{_badge}{_cas_badge}'
+        f'</div>'
+        f'<div style="color:#6e7681;font-size:.8rem;margin-bottom:10px;">'
+        f'Last 45 min NIFTY/BANKNIFTY/SENSEX CE & PE · CAS wild-move detection · Flip-guard prevents conflicting signals'
+        f'</div>',
+        unsafe_allow_html=True,
+    )
+
+    _hh = _mins_left // 60; _mm = _mins_left % 60
+    st.markdown(
+        f'<div class="lhb-cdown">'
+        f'<span class="lhb-cdown-lbl">NSE closes in</span>'
+        f'<span class="lhb-cdown-val">{_hh:02d}:{_mm:02d}</span>'
+        f'<span class="lhb-cdown-lbl" style="margin-left:12px;">Active window: 2:30–3:30 PM NSE  |  3:00–4:00 PM CAS (SENSEX)</span>'
+        f'</div>',
+        unsafe_allow_html=True,
+    )
+
+    # ── Auto-refresh (always on 30 s) ─────────────────────────────────────────
+    _ls_tick     = _st_autorefresh(interval=30_000, key="ls_autorefresh")
+    _ls_prev_tick = st.session_state.get("ls_prev_tick", -1)
+    _should_refresh = (_ls_tick != _ls_prev_tick)
+    st.session_state["ls_prev_tick"] = _ls_tick
+
+    # ── Index selector ─────────────────────────────────────────────────────────
+    _lc1, _lc2, _lc3 = st.columns([2, 1, 1])
+    with _lc1:
+        _ls_sym = st.radio("Index", list(_LS_CONFIG.keys()), horizontal=True,
+                           key="ls_sym", label_visibility="collapsed")
+    with _lc2:
+        _ls_refresh_btn = st.button("⟳ Refresh Now", use_container_width=True, key="ls_refresh_btn")
+    with _lc3:
+        _ls_clear_btn = st.button("✕ Clear Signal", use_container_width=True, key="ls_clear_btn")
+
+    _cfg = _LS_CONFIG[_ls_sym]
+    _step = _cfg["step"]
+    _color = _cfg["color"]
+    _is_cas = _cfg["cas"] and _in_cas
+
+    if _ls_clear_btn:
+        for _k in (f"ls_{_ls_sym}_signal", f"ls_{_ls_sym}_signal_time",
+                   f"ls_{_ls_sym}_pending_count", f"ls_{_ls_sym}_data"):
+            st.session_state.pop(_k, None)
+        st.rerun()
+
+    # ── Fetch + score ─────────────────────────────────────────────────────────
+    if _should_refresh or _ls_refresh_btn or f"ls_{_ls_sym}_data" not in st.session_state:
+        with st.spinner(f"Fetching {_ls_sym} intraday data…"):
+            _ls_data = _ls_fetch(_ls_sym)
+        if _ls_data.get("error"):
+            st.error(_ls_data["error"])
+            st.session_state.pop(f"ls_{_ls_sym}_data", None)
+        else:
+            st.session_state[f"ls_{_ls_sym}_data"]     = _ls_data
+            st.session_state[f"ls_{_ls_sym}_fetched"]  = _now_ls
+
+    _ls_data   = st.session_state.get(f"ls_{_ls_sym}_data")
+    _ls_fetched = st.session_state.get(f"ls_{_ls_sym}_fetched")
+
+    if _ls_data is None:
+        st.info("Click **⟳ Refresh Now** to load intraday data.")
+        return
+
+    _df5 = _ls_data["df_5m"]
+    _df1 = _ls_data.get("df_1m")
+
+    # Score
+    _sc_res = _ls_score(_df5, _df1, is_cas=_is_cas)
+    if _sc_res.get("error"):
+        st.warning(_sc_res["error"])
+        return
+
+    _new_raw = _ls_raw_signal(_sc_res["score"])
+
+    # Apply flip guard
+    _prev_sig   = st.session_state.get(f"ls_{_ls_sym}_signal",       "WATCH")
+    _prev_time  = st.session_state.get(f"ls_{_ls_sym}_signal_time",   None)
+    _pend_count = st.session_state.get(f"ls_{_ls_sym}_pending_count", 0)
+
+    _final_sig, _new_pcount, _flip_msg = _ls_flip_guard(
+        _new_raw, _prev_sig, _prev_time, _pend_count
+    )
+
+    # Only update stored signal if direction changed
+    if _final_sig != _prev_sig:
+        st.session_state[f"ls_{_ls_sym}_signal"]       = _final_sig
+        st.session_state[f"ls_{_ls_sym}_signal_time"]  = _now_ls
+        st.session_state[f"ls_{_ls_sym}_pending_count"] = _new_pcount
+    else:
+        st.session_state[f"ls_{_ls_sym}_pending_count"] = _new_pcount
+
+    _spot        = _sc_res["spot"]
+    _vwap        = _sc_res["vwap"]
+    _velocity    = _sc_res["velocity"]
+    _vol_ratio   = _sc_res["volume_ratio"]
+    _score       = _sc_res["score"]
+    _factors     = _sc_res["factors"]
+    _atm         = _ls_atm(_spot, _step) if not (isinstance(_spot, float) and _spot != _spot) else 0
+
+    # Signal age
+    _sig_age_str = ""
+    if _prev_time:
+        _elapsed_s = int((_now_ls - _prev_time).total_seconds())
+        _sig_age_str = f"{_elapsed_s // 60}m {_elapsed_s % 60}s"
+
+    # ── Signal card ───────────────────────────────────────────────────────────
+    def _card_cls(sig: str) -> tuple[str, str, str]:
+        """Returns (card_class, sig_class, sig_text)."""
+        if sig == "STRONG BUY CE":
+            return "lhb-card-strong-ce", "lhb-sig-strong-ce", "🟢 STRONG BUY CE"
+        if sig == "BUY CE":
+            return "lhb-card-ce",        "lhb-sig-ce",        "🟢 BUY CE"
+        if sig == "STRONG BUY PE":
+            return "lhb-card-strong-pe", "lhb-sig-strong-pe", "🔴 STRONG BUY PE"
+        if sig == "BUY PE":
+            return "lhb-card-pe",        "lhb-sig-pe",        "🔴 BUY PE"
+        if sig in ("WATCH CE", "WATCH PE"):
+            return "lhb-card-watch",     "lhb-sig-watch",     f"⚠️ {sig}"
+        return "lhb-card-wait",          "lhb-sig-wait",      "⏳ WATCH / WAIT"
+
+    _cc, _sc2, _st2 = _card_cls(_final_sig)
+    _score_cls = "lhb-score-ce" if _score > 0 else ("lhb-score-pe" if _score < 0 else "lhb-score-nt")
+
+    _atm_display = f"ATM: **{_atm} {('CE' if 'CE' in _final_sig else 'PE' if 'PE' in _final_sig else 'CE/PE')}**" if _atm else ""
+    _sub_txt = (
+        f"Strike: {_atm} · Vol {_vol_ratio:.1f}× avg"
+        + (f" · Signal held {_sig_age_str}" if _sig_age_str else "")
+        + (" · CAS auction active" if _is_cas else "")
+    )
+
+    st.markdown(
+        f'<div class="lhb-card {_cc}">'
+        f'<div class="lhb-sig-lbl">SIGNAL — {_ls_sym}</div>'
+        f'<div class="{_sc2}">{_st2}</div>'
+        f'<div class="lhb-sig-sub">{_sub_txt}</div>'
+        f'<div class="lhb-score-box">'
+        f'<div class="lhb-score-lbl">SCORE</div>'
+        f'<div class="{_score_cls}">{_score:+d}/10</div>'
+        f'</div></div>',
+        unsafe_allow_html=True,
+    )
+
+    # Flip guard warning
+    if _flip_msg:
+        st.markdown(f'<div class="lhb-flip-warn">⏳ {_flip_msg}</div>', unsafe_allow_html=True)
+
+    if _ls_fetched:
+        st.caption(f"Data as of {_ls_fetched.strftime('%H:%M:%S')} IST · auto-refresh 30s")
+
+    # ── Stat row ──────────────────────────────────────────────────────────────
+    _s1, _s2, _s3, _s4 = st.columns(4)
+    for _col, _val, _lbl in [
+        (_s1, f"₹{_spot:,.1f}",    f"{_ls_sym} SPOT"),
+        (_s2, f"₹{_vwap:,.1f}" if not (isinstance(_vwap, float) and _vwap != _vwap) else "N/A",
+              "VWAP"),
+        (_s3, f"{_velocity:+.1f}",  "VEL (pts/5m)"),
+        (_s4, f"{_vol_ratio:.1f}×", "VOLUME"),
+    ]:
+        with _col:
+            st.markdown(
+                f'<div class="lhb-stat">'
+                f'<div class="lhb-stat-val">{_val}</div>'
+                f'<div class="lhb-stat-lbl">{_lbl}</div>'
+                f'</div>',
+                unsafe_allow_html=True,
+            )
+
+    st.markdown("<br>", unsafe_allow_html=True)
+
+    # ── Factor table + ATM box ─────────────────────────────────────────────────
+    _fl, _fr = st.columns([3, 2])
+
+    with _fl:
+        _rows_html = ""
+        for _f in _factors:
+            _pts = _f["pts"]
+            _bias_cls = "lhb-bias-ce" if _f["bias"] == "CE" else (
+                "lhb-bias-pe" if _f["bias"] == "PE" else "lhb-bias-neu")
+            _pts_cls = "lhb-pts-pos" if _pts > 0 else ("lhb-pts-neg" if _pts < 0 else "lhb-pts-neu")
+            _rows_html += (
+                f'<tr>'
+                f'<td><b>{_f["name"]}</b></td>'
+                f'<td style="color:#8b949e;">{_f["value"]}</td>'
+                f'<td><span class="{_bias_cls}">{_f["bias"]}</span></td>'
+                f'<td class="{_pts_cls}" style="text-align:right;">{_pts:+d}</td>'
+                f'</tr>'
+            )
+        # Total row
+        _tot_cls = "lhb-pts-pos" if _score > 0 else ("lhb-pts-neg" if _score < 0 else "lhb-pts-neu")
+        _rows_html += (
+            f'<tr style="border-top:2px solid #2a2e39;">'
+            f'<td colspan="3" style="font-weight:700;color:#f0f6fc;">TOTAL SCORE</td>'
+            f'<td class="{_tot_cls}" style="text-align:right;font-weight:800;font-size:.95rem;">{_score:+d}</td>'
+            f'</tr>'
+        )
+        st.markdown(
+            f'<table class="lhb-factor-tbl"><thead><tr>'
+            f'<th>FACTOR</th><th>READING</th><th>BIAS</th><th style="text-align:right;">PTS</th>'
+            f'</tr></thead><tbody>{_rows_html}</tbody></table>',
+            unsafe_allow_html=True,
+        )
+
+    with _fr:
+        _ce_strike = _atm
+        _pe_strike = _atm
+        _itm_ce    = _atm - _step
+        _itm_pe    = _atm + _step
+
+        st.markdown(
+            f'<div class="lhb-atm-box">'
+            f'<div class="lhb-atm-title">⚡ Strikes to Watch</div>'
+            f'<div class="lhb-atm-row">'
+            f'<span class="lhb-atm-sym lhb-ce-txt">{_ce_strike} CE</span>'
+            f'<span class="lhb-atm-note">ATM · lot {_cfg["lot"]}</span>'
+            f'</div>'
+            f'<div class="lhb-atm-row">'
+            f'<span class="lhb-atm-sym lhb-pe-txt">{_pe_strike} PE</span>'
+            f'<span class="lhb-atm-note">ATM · lot {_cfg["lot"]}</span>'
+            f'</div>'
+            f'<div class="lhb-atm-row" style="opacity:.6;">'
+            f'<span class="lhb-atm-sym lhb-ce-txt">{_itm_ce} CE</span>'
+            f'<span class="lhb-atm-note">1-ITM CE</span>'
+            f'</div>'
+            f'<div class="lhb-atm-row" style="opacity:.6;">'
+            f'<span class="lhb-atm-sym lhb-pe-txt">{_itm_pe} PE</span>'
+            f'<span class="lhb-atm-note">1-ITM PE</span>'
+            f'</div>'
+            f'</div>',
+            unsafe_allow_html=True,
+        )
+
+        # CAS box — show when SENSEX is selected and CAS window is active
+        if _cfg.get("cas"):
+            _cas_status = "🟠 CAS ACTIVE NOW (3:00–4:00 PM)" if _in_cas else "CAS window: 3:00–4:00 PM IST"
+            _cas_note = (
+                "BSE Closing Auction Session running — institutional orders dominate. "
+                "Trend into CAS typically continues with amplified velocity."
+                if _in_cas else
+                "CAS not yet active. Watch for volume build-up from 2:30 PM onward."
+            )
+            st.markdown(
+                f'<div class="lhb-cas-box">'
+                f'<div class="lhb-cas-title">{_cas_status}</div>'
+                f'<div style="font-size:.77rem;color:#8b949e;">{_cas_note}</div>'
+                f'</div>',
+                unsafe_allow_html=True,
+            )
+
+    # ── 5-min price chart with VWAP + EMA9/21 ────────────────────────────────
+    st.markdown("<div style='margin-top:14px;'></div>", unsafe_allow_html=True)
+    with st.expander("5-min chart · VWAP · EMA 9/21", expanded=True):
+        try:
+            import plotly.graph_objects as _lgo
+            _d5  = _df5.copy()
+            if _d5.index.tz is None:
+                _d5.index = _d5.index.tz_localize("UTC").tz_convert(_IST_LS)
+            else:
+                _d5.index = _d5.index.tz_convert(_IST_LS)
+            # Today only
+            _today_mask = pd.Series(_d5.index.date, index=_d5.index) == datetime.date.today()
+            _d5 = _d5[_today_mask]
+
+            if not _d5.empty:
+                from screener.late_session import _ema as _ls_ema_fn
+                _c5  = _d5["Close"].dropna()
+                _e9  = _ls_ema_fn(_c5, 9)
+                _e21 = _ls_ema_fn(_c5, 21)
+
+                # VWAP from 1m if available, else 5m
+                _vwap_line = None
+                _src_df = _df1 if (_df1 is not None and not _df1.empty) else _d5
+                if not _src_df.empty:
+                    _s1m = _src_df.copy()
+                    if _s1m.index.tz is None:
+                        _s1m.index = _s1m.index.tz_localize("UTC").tz_convert(_IST_LS)
+                    else:
+                        _s1m.index = _s1m.index.tz_convert(_IST_LS)
+                    _s1m = _s1m[pd.Series(_s1m.index.date, index=_s1m.index) == datetime.date.today()]
+                    if not _s1m.empty and "Volume" in _s1m.columns:
+                        _tp = (_s1m["High"] + _s1m["Low"] + _s1m["Close"]) / 3
+                        _vp = (_tp * _s1m["Volume"].replace(0, float("nan"))).cumsum()
+                        _vs = _s1m["Volume"].replace(0, float("nan")).cumsum()
+                        _vwap_s = _vp / _vs
+                        # Resample to 5m for overlay
+                        _vwap_5m = _vwap_s.resample("5min").last().ffill()
+                        # Align with _d5 index
+                        _common = _d5.index.intersection(_vwap_5m.index)
+                        if len(_common) > 0:
+                            _vwap_line = _vwap_5m.loc[_common]
+
+                _fig_ls = _lgo.Figure()
+
+                # Candlestick
+                _fig_ls.add_trace(_lgo.Candlestick(
+                    x=_d5.index, open=_d5["Open"], high=_d5["High"],
+                    low=_d5["Low"], close=_d5["Close"],
+                    increasing_line_color="#00d4aa", decreasing_line_color="#f85149",
+                    name=_ls_sym, showlegend=False,
+                ))
+
+                # EMA 9
+                _fig_ls.add_trace(_lgo.Scatter(
+                    x=_c5.index, y=_e9.values,
+                    line=dict(color="#e6b800", width=1.5), name="EMA 9",
+                ))
+                # EMA 21
+                _fig_ls.add_trace(_lgo.Scatter(
+                    x=_c5.index, y=_e21.values,
+                    line=dict(color="#ffa657", width=1.5, dash="dot"), name="EMA 21",
+                ))
+                # VWAP
+                if _vwap_line is not None:
+                    _fig_ls.add_trace(_lgo.Scatter(
+                        x=_vwap_line.index, y=_vwap_line.values,
+                        line=dict(color="#79c0ff", width=1.5, dash="dashdot"), name="VWAP",
+                    ))
+
+                # Highlight late session (2:30 PM onward)
+                _late_start_dt = _d5.index[-1].normalize().replace(
+                    hour=14, minute=30, tzinfo=_IST_LS)
+                _fig_ls.add_vrect(
+                    x0=str(_late_start_dt), x1=str(_d5.index[-1]),
+                    fillcolor="rgba(0,212,170,0.05)", line_width=0,
+                    annotation_text="Late Session", annotation_position="top left",
+                    annotation_font=dict(size=10, color="#00d4aa"),
+                )
+
+                _fig_ls.update_layout(
+                    height=380,
+                    paper_bgcolor="#131722", plot_bgcolor="#131722",
+                    font=dict(color="#6e7681"),
+                    xaxis=dict(gridcolor="#1e222d", rangeslider=dict(visible=False),
+                               tickfont=dict(size=9), showgrid=True),
+                    yaxis=dict(gridcolor="#1e222d", tickfont=dict(size=10)),
+                    legend=dict(orientation="h", yanchor="bottom", y=1.02,
+                                font=dict(size=10)),
+                    margin=dict(l=0, r=0, t=10, b=0),
+                )
+                st.plotly_chart(_fig_ls, use_container_width=True)
+        except Exception as _e:
+            st.caption(f"Chart error: {_e}")
+
+
 # ── Elder Ray Index Options Trading page ──────────────────────────────────────
 
 def page_elder_ray():
@@ -6243,32 +6880,484 @@ def page_elder_ray():
         st.markdown(_hist_html, unsafe_allow_html=True)
 
 
-# ── Navigation ────────────────────────────────────────────────────────────────
-pg = st.navigation({
-    "⚡ Live Signals": [
-        st.Page(page_smart_alerts,      title="Smart Alerts",        icon="💡", default=True),
-        st.Page(page_smart_alerts_pro,  title="Smart Alerts Pro",    icon="⚡"),
-        st.Page(page_gamma_blast,       title="Expiry Gamma Blast",  icon="💥"),
-        st.Page(page_oi_pulse,          title="Intraday OI Pulse",   icon="📡"),
-        st.Page(page_elder_ray,         title="Elder Ray Trader",    icon="🎯"),
-    ],
-    "📊 Index & Options": [
-        st.Page(page_option_chain,      title="Option Chain",        icon="🔗"),
-        st.Page(page_trending_oi,       title="Trending OI",         icon="📡"),
-        st.Page(page_sensex_expiry,     title="Sensex Expiry Moves", icon="🚀"),
-        st.Page(page_fo_scanner,        title="F&O Scanner",         icon="🎯"),
-    ],
-    "📈 Stock Screeners": [
-        st.Page(page_cpr_retracement,   title="CPR Retracement",     icon="🎯"),
-        st.Page(page_ma_retracement,    title="20 MA Retracement",   icon="🔁"),
-        st.Page(page_ema_crossover,     title="EMA Crossover",       icon="📈"),
-        st.Page(page_ma50_support,      title="50 MA Support",       icon="🛡️"),
-    ],
-    "🔍 Research": [
-        st.Page(page_rpci,              title="RPCI Screener",       icon="📈"),
-        st.Page(page_red_flag,          title="Red Flag Radar",      icon="🚨"),
-        st.Page(page_fundamentals,      title="Fundamentals",        icon="📊"),
-        st.Page(page_news_breakout,     title="News + Breakout",     icon="📰"),
-    ],
-})
-pg.run()
+# ── Open = Low page ───────────────────────────────────────────────────────────
+def page_open_low():
+    st.markdown("""
+<div style="margin-bottom:6px;">
+  <div style="font-size:1.25rem;font-weight:900;color:#fff;letter-spacing:-0.5px;">🚀 Open = Low</div>
+  <div style="font-size:0.78rem;color:#6e7681;margin-top:2px;">NIFTY 100 · Intraday momentum setup</div>
+</div>""", unsafe_allow_html=True)
+
+    # Strategy card
+    st.markdown("""
+<div style="background:#1a1e2a;border:1px solid #2a2e39;border-radius:10px;padding:14px 16px;margin-bottom:14px;">
+  <div style="display:flex;flex-wrap:wrap;gap:18px;">
+    <div>
+      <div style="font-size:0.62rem;font-weight:700;color:#8b949e;letter-spacing:1px;text-transform:uppercase;">Setup</div>
+      <div style="font-size:0.88rem;color:#e6edf3;margin-top:3px;">Today's <b style="color:#00d4aa;">Low = Open</b> — buyers held from the first tick</div>
+    </div>
+    <div>
+      <div style="font-size:0.62rem;font-weight:700;color:#f85149;letter-spacing:1px;text-transform:uppercase;">Stop Loss</div>
+      <div style="font-size:0.88rem;color:#f85149;margin-top:3px;font-weight:700;">Today's Low (= Open price) — strict, no exceptions</div>
+    </div>
+    <div>
+      <div style="font-size:0.62rem;font-weight:700;color:#8b949e;letter-spacing:1px;text-transform:uppercase;">Trade type</div>
+      <div style="font-size:0.88rem;color:#e6edf3;margin-top:3px;">Intraday only — square off before 3:15 PM</div>
+    </div>
+  </div>
+</div>""", unsafe_allow_html=True)
+
+    col_btn, col_info = st.columns([1, 3])
+    with col_btn:
+        run_btn = st.button("🔍 Scan Now", key="ol_scan_btn",
+                            use_container_width=True, type="primary")
+    with col_info:
+        if st.session_state.get("ol_last_scan"):
+            st.caption(f"Last scan: {st.session_state['ol_last_scan']}")
+
+    if run_btn:
+        with st.spinner("Scanning NIFTY 100 for Open=Low stocks…"):
+            _df, _err = _run_open_low()
+        st.session_state["ol_df"]        = _df
+        st.session_state["ol_err"]       = _err
+        st.session_state["ol_last_scan"] = datetime.datetime.now(
+            datetime.timezone(datetime.timedelta(hours=5, minutes=30))
+        ).strftime("%I:%M:%S %p IST")
+
+    _df  = st.session_state.get("ol_df",  None)
+    _err = st.session_state.get("ol_err", "")
+
+    if _err:
+        st.info(_err)
+        return
+    if _df is None:
+        st.markdown(
+            '<div style="color:#6e7681;font-size:0.85rem;margin-top:8px;">'
+            'Press <b>Scan Now</b> to find NIFTY 100 stocks where Low = Open today.</div>',
+            unsafe_allow_html=True,
+        )
+        return
+    if _df.empty:
+        st.info("No Open=Low stocks found. Market may be closed or no qualifying stocks right now.")
+        return
+
+    # Summary chips
+    _pos = int((_df["Chg %"] > 0).sum())
+    _tot = len(_df)
+    st.markdown(
+        f'<div style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:10px;">'
+        f'<span style="background:rgba(0,212,170,0.1);border:1px solid rgba(0,212,170,0.25);'
+        f'color:#00d4aa;font-size:0.72rem;font-weight:700;padding:3px 10px;border-radius:20px;">'
+        f'✓ {_tot} qualified</span>'
+        f'<span style="background:rgba(0,212,170,0.08);border:1px solid rgba(0,212,170,0.2);'
+        f'color:#00d4aa;font-size:0.72rem;font-weight:700;padding:3px 10px;border-radius:20px;">'
+        f'↑ {_pos} gaining</span>'
+        f'</div>',
+        unsafe_allow_html=True,
+    )
+
+    # Results table (clickable rows → chart)
+    _disp = _df[["Symbol", "Company", "Open / SL", "LTP", "Day High",
+                  "Chg %", "High Gain %"]].copy()
+    _disp["Chg %"]      = _disp["Chg %"].map(lambda x: f"+{x:.2f}%" if x >= 0 else f"{x:.2f}%")
+    _disp["High Gain %"] = _disp["High Gain %"].map(lambda x: f"+{x:.2f}%")
+    _disp["Open / SL"]  = _disp["Open / SL"].map(lambda x: f"₹{x:,.2f}")
+    _disp["LTP"]        = _disp["LTP"].map(lambda x: f"₹{x:,.2f}")
+    _disp["Day High"]   = _disp["Day High"].map(lambda x: f"₹{x:,.2f}")
+
+    _sel = st.dataframe(
+        _disp, use_container_width=True, hide_index=True,
+        on_select="rerun", selection_mode="single-row",
+        column_config={
+            "Symbol":      st.column_config.TextColumn("Symbol",   width="small"),
+            "Company":     st.column_config.TextColumn("Company",  width="medium"),
+            "Open / SL":   st.column_config.TextColumn("Open / SL ⚠", width="small"),
+            "LTP":         st.column_config.TextColumn("LTP",      width="small"),
+            "Day High":    st.column_config.TextColumn("Day High", width="small"),
+            "Chg %":       st.column_config.TextColumn("Chg %",   width="small"),
+            "High Gain %": st.column_config.TextColumn("↑ High",  width="small"),
+        },
+    )
+
+    _rows = _sel.selection.get("rows", []) if _sel and _sel.selection else []
+    if _rows:
+        _r = _df.iloc[_rows[0]]
+        chart_modal(_r["NSE_Symbol"], _r["Symbol"])
+
+    # Stop loss reminder
+    st.markdown(
+        '<div style="margin-top:12px;padding:10px 14px;background:rgba(248,81,73,0.07);'
+        'border:1px solid rgba(248,81,73,0.2);border-radius:8px;font-size:0.8rem;color:#f85149;">'
+        '<b>⚠ Stop Loss Rule:</b> Exit immediately if price falls below today\'s Open. '
+        'The Open price IS the stop loss — no second chances.</div>',
+        unsafe_allow_html=True,
+    )
+
+
+def page_agent_flow():
+    _af_key = st.session_state.get("kite_api_key",   _get_secret("KITE_API_KEY", ""))
+    _af_tok = st.session_state.get("kite_access_token", "")
+    _af_ok  = bool(_af_key and _af_tok)
+
+    st.markdown("""
+<div style="margin-bottom:6px;">
+  <div style="font-size:1.25rem;font-weight:900;color:#fff;letter-spacing:-0.5px;">🤖 Agent Flow</div>
+  <div style="font-size:0.78rem;color:#6e7681;margin-top:2px;">Institutional Option Buying AI · Live Kite data</div>
+</div>""", unsafe_allow_html=True)
+
+    if not _af_ok:
+        st.warning("⚡ Connect Zerodha Kite to enable Agent Flow. This screen requires live option chain data via Kite Connect.")
+        return
+
+    # ── Controls ──────────────────────────────────────────────────────────────
+    _c1, _c2 = st.columns([2, 1])
+    with _c1:
+        _af_sym = st.selectbox("Instrument", _AF_INSTRUMENTS,
+                               index=0, key="af_symbol", label_visibility="collapsed")
+    with _c2:
+        _af_run = st.button("▶ Analyze", key="af_run_btn",
+                            use_container_width=True, type="primary")
+
+    if _af_run:
+        with st.spinner(f"Fetching live data for {_af_sym}…"):
+            _af_res = _run_agent(_af_sym, _af_key, _af_tok)
+        st.session_state["af_result"] = _af_res
+        st.session_state["af_ts"] = datetime.datetime.now(
+            datetime.timezone(datetime.timedelta(hours=5, minutes=30))
+        ).strftime("%I:%M:%S %p IST")
+
+    _res = st.session_state.get("af_result")
+    _ts  = st.session_state.get("af_ts", "")
+
+    if _res is None:
+        st.markdown(
+            '<div style="color:#6e7681;font-size:0.85rem;margin-top:8px;">'
+            'Select an instrument and press <b>▶ Analyze</b> to run the institutional analysis.</div>',
+            unsafe_allow_html=True)
+        return
+
+    if _ts:
+        st.caption(f"Analysis at {_ts}")
+
+    _err = _res.get("error", "")
+    if _err:
+        st.error(_err)
+
+    # ── Helper renderers ──────────────────────────────────────────────────────
+    bias   = _res.get("bias", "Neutral")
+    conf   = _res.get("confidence", 0)
+    spot   = _res.get("spot", 0)
+    vwap_v = _res.get("vwap", 0)
+    ema20  = _res.get("ema20", 0)
+    ema50  = _res.get("ema50", 0)
+    vix    = _res.get("vix", 0)
+    trend  = _res.get("trend", "—")
+    expiry = _res.get("expiry", "—")
+
+    _bias_color = {
+        "Strong Bullish":     "#00d4aa",
+        "Moderately Bullish": "#3fb950",
+        "Neutral":            "#8b949e",
+        "Moderately Bearish": "#f0883e",
+        "Strong Bearish":     "#f85149",
+    }.get(bias, "#8b949e")
+
+    _trend_icon = {"UPTREND": "↑", "DOWNTREND": "↓", "SIDEWAYS": "→"}.get(trend, "→")
+    _trend_col  = {"UPTREND": "#00d4aa", "DOWNTREND": "#f85149", "SIDEWAYS": "#8b949e"}.get(trend, "#8b949e")
+
+    # ── Market card ───────────────────────────────────────────────────────────
+    st.markdown(f"""
+<div style="background:#1a1e2a;border:1px solid #2a2e39;border-radius:12px;
+            padding:16px 18px;margin-bottom:14px;">
+  <div style="display:flex;align-items:center;justify-content:space-between;
+              flex-wrap:wrap;gap:10px;margin-bottom:12px;">
+    <div>
+      <div style="font-size:0.62rem;font-weight:700;color:#8b949e;
+                  letter-spacing:1.2px;text-transform:uppercase;">Market Bias</div>
+      <div style="font-size:1.35rem;font-weight:900;color:{_bias_color};
+                  margin-top:2px;">{bias}</div>
+    </div>
+    <div style="text-align:right;">
+      <div style="font-size:0.62rem;font-weight:700;color:#8b949e;
+                  letter-spacing:1.2px;text-transform:uppercase;">Confidence</div>
+      <div style="font-size:1.35rem;font-weight:900;color:{_bias_color};
+                  margin-top:2px;">{conf}%</div>
+    </div>
+  </div>
+  <div style="display:flex;flex-wrap:wrap;gap:14px;">
+    <div>
+      <div style="font-size:0.6rem;color:#6e7681;text-transform:uppercase;
+                  font-weight:700;letter-spacing:1px;">Spot</div>
+      <div style="font-size:0.95rem;font-weight:700;color:#e6edf3;">
+        ₹{spot:,.2f}</div>
+    </div>
+    <div>
+      <div style="font-size:0.6rem;color:#6e7681;text-transform:uppercase;
+                  font-weight:700;letter-spacing:1px;">VWAP</div>
+      <div style="font-size:0.95rem;font-weight:700;
+                  color:{"#00d4aa" if spot >= vwap_v else "#f85149"};">
+        ₹{vwap_v:,.2f}</div>
+    </div>
+    <div>
+      <div style="font-size:0.6rem;color:#6e7681;text-transform:uppercase;
+                  font-weight:700;letter-spacing:1px;">EMA 20</div>
+      <div style="font-size:0.95rem;font-weight:700;color:#e6edf3;">
+        ₹{ema20:,.2f}</div>
+    </div>
+    <div>
+      <div style="font-size:0.6rem;color:#6e7681;text-transform:uppercase;
+                  font-weight:700;letter-spacing:1px;">EMA 50</div>
+      <div style="font-size:0.95rem;font-weight:700;color:#e6edf3;">
+        ₹{ema50:,.2f}</div>
+    </div>
+    <div>
+      <div style="font-size:0.6rem;color:#6e7681;text-transform:uppercase;
+                  font-weight:700;letter-spacing:1px;">India VIX</div>
+      <div style="font-size:0.95rem;font-weight:700;
+                  color:{"#f85149" if vix > 18 else "#8b949e"};">{vix}</div>
+    </div>
+    <div>
+      <div style="font-size:0.6rem;color:#6e7681;text-transform:uppercase;
+                  font-weight:700;letter-spacing:1px;">Trend</div>
+      <div style="font-size:0.95rem;font-weight:700;color:{_trend_col};">
+        {_trend_icon} {trend}</div>
+    </div>
+    <div>
+      <div style="font-size:0.6rem;color:#6e7681;text-transform:uppercase;
+                  font-weight:700;letter-spacing:1px;">Expiry</div>
+      <div style="font-size:0.85rem;font-weight:600;color:#e6edf3;">{expiry}</div>
+    </div>
+  </div>
+</div>""", unsafe_allow_html=True)
+
+    # ── No-trade block ────────────────────────────────────────────────────────
+    if _res.get("no_trade"):
+        st.markdown("""
+<div style="background:rgba(248,81,73,0.07);border:1px solid rgba(248,81,73,0.25);
+            border-radius:12px;padding:18px 20px;text-align:center;">
+  <div style="font-size:1.6rem;font-weight:900;color:#f85149;letter-spacing:1px;">
+    ⛔ NO TRADE TODAY</div>
+  <div style="font-size:0.82rem;color:#8b949e;margin-top:6px;">
+    Market conditions do not meet all mandatory criteria for a high-probability trade.</div>
+</div>""", unsafe_allow_html=True)
+
+        # Show checklist if available
+        _checks = _res.get("checklist", {})
+        if _checks:
+            _check_html = "".join(
+                f'<div style="display:flex;align-items:center;gap:8px;padding:4px 0;">'
+                f'<span style="color:{"#00d4aa" if v else "#f85149"};font-size:0.9rem;">'
+                f'{"✅" if v else "❌"}</span>'
+                f'<span style="font-size:0.82rem;color:{"#e6edf3" if v else "#f85149"};">{k}</span></div>'
+                for k, v in _checks.items()
+            )
+            st.markdown(f"""
+<div style="background:#1a1e2a;border:1px solid #2a2e39;border-radius:10px;
+            padding:14px 16px;margin-top:14px;">
+  <div style="font-size:0.65rem;font-weight:700;color:#8b949e;letter-spacing:1.2px;
+              text-transform:uppercase;margin-bottom:8px;">Trade Checklist</div>
+  {_check_html}
+</div>""", unsafe_allow_html=True)
+
+    else:
+        # ── Trade card ────────────────────────────────────────────────────────
+        direction = _res.get("direction", "CALL")
+        strike    = _res.get("strike", 0)
+        ltp       = _res.get("ltp", 0)
+        vol       = _res.get("vol", 0)
+        iv        = _res.get("iv", 0)
+        tgt       = _res.get("targets", {})
+        rating    = _res.get("rating", 3)
+        prob      = _res.get("probability", 0)
+        sym_full  = _res.get("symbol", "NIFTY")
+        _d_color  = "#00d4aa" if direction == "CALL" else "#f85149"
+        _stars    = "⭐" * rating + "☆" * (5 - rating)
+
+        st.markdown(f"""
+<div style="background:#1a1e2a;border:2px solid {_d_color}44;border-radius:12px;
+            padding:16px 18px;margin-bottom:14px;">
+  <div style="display:flex;align-items:center;justify-content:space-between;
+              flex-wrap:wrap;gap:10px;margin-bottom:14px;">
+    <div>
+      <div style="font-size:0.62rem;font-weight:700;color:#8b949e;
+                  letter-spacing:1.2px;text-transform:uppercase;">Recommended Trade</div>
+      <div style="margin-top:4px;">
+        <span style="background:{_d_color}22;border:1px solid {_d_color}55;color:{_d_color};
+                     font-size:0.75rem;font-weight:800;padding:3px 10px;border-radius:20px;
+                     letter-spacing:0.5px;">BUY {direction}</span>
+        <span style="font-size:1.1rem;font-weight:900;color:#e6edf3;margin-left:10px;">
+          {sym_full} {int(strike)} {direction[:2]}</span>
+      </div>
+    </div>
+    <div style="text-align:right;">
+      <div style="font-size:1.1rem;color:#f0c040;letter-spacing:2px;">{_stars}</div>
+      <div style="font-size:0.72rem;color:#8b949e;margin-top:2px;">Trade Rating</div>
+    </div>
+  </div>
+
+  <div style="display:flex;flex-wrap:wrap;gap:14px;margin-bottom:14px;">
+    <div>
+      <div style="font-size:0.6rem;color:#6e7681;text-transform:uppercase;
+                  font-weight:700;letter-spacing:1px;">Current Premium</div>
+      <div style="font-size:1.05rem;font-weight:800;color:{_d_color};">₹{ltp:.1f}</div>
+    </div>
+    <div>
+      <div style="font-size:0.6rem;color:#6e7681;text-transform:uppercase;
+                  font-weight:700;letter-spacing:1px;">Entry Range</div>
+      <div style="font-size:0.88rem;font-weight:700;color:#e6edf3;">
+        ₹{tgt.get("entry_min", ltp):.1f} – ₹{tgt.get("entry_max", ltp):.1f}</div>
+    </div>
+    <div>
+      <div style="font-size:0.6rem;color:#f85149;text-transform:uppercase;
+                  font-weight:700;letter-spacing:1px;">Stop Loss</div>
+      <div style="font-size:0.88rem;font-weight:700;color:#f85149;">
+        ₹{tgt.get("sl", 0):.1f}</div>
+    </div>
+    <div>
+      <div style="font-size:0.6rem;color:#6e7681;text-transform:uppercase;
+                  font-weight:700;letter-spacing:1px;">Risk/Reward</div>
+      <div style="font-size:0.88rem;font-weight:700;color:#e6edf3;">
+        1 : {tgt.get("rr", 0):.1f}</div>
+    </div>
+    <div>
+      <div style="font-size:0.6rem;color:#6e7681;text-transform:uppercase;
+                  font-weight:700;letter-spacing:1px;">Probability</div>
+      <div style="font-size:0.88rem;font-weight:700;color:#e6edf3;">{prob}%</div>
+    </div>
+    {f'<div><div style="font-size:0.6rem;color:#6e7681;text-transform:uppercase;font-weight:700;letter-spacing:1px;">IV</div><div style="font-size:0.88rem;font-weight:700;color:#8b949e;">{iv:.1f}%</div></div>' if iv else ""}
+  </div>
+
+  <div style="border-top:1px solid #2a2e39;padding-top:12px;
+              display:flex;flex-wrap:wrap;gap:14px;">
+    <div>
+      <div style="font-size:0.6rem;color:#6e7681;text-transform:uppercase;
+                  font-weight:700;letter-spacing:1px;">Target 1</div>
+      <div style="font-size:0.88rem;font-weight:700;color:#00d4aa;">
+        ₹{tgt.get("t1", 0):.1f}</div>
+    </div>
+    <div>
+      <div style="font-size:0.6rem;color:#6e7681;text-transform:uppercase;
+                  font-weight:700;letter-spacing:1px;">Target 2</div>
+      <div style="font-size:0.88rem;font-weight:700;color:#00d4aa;">
+        ₹{tgt.get("t2", 0):.1f}</div>
+    </div>
+    <div>
+      <div style="font-size:0.6rem;color:#6e7681;text-transform:uppercase;
+                  font-weight:700;letter-spacing:1px;">Target 3</div>
+      <div style="font-size:0.88rem;font-weight:700;color:#00d4aa;">
+        ₹{tgt.get("t3", 0):.1f}</div>
+    </div>
+  </div>
+</div>""", unsafe_allow_html=True)
+
+        # Signals / reasons
+        _sigs = _res.get("signals", [])
+        if _sigs:
+            _sig_chips = " ".join(
+                f'<span style="background:rgba(0,212,170,0.08);border:1px solid rgba(0,212,170,0.2);'
+                f'color:#00d4aa;font-size:0.68rem;font-weight:700;padding:3px 9px;'
+                f'border-radius:20px;white-space:nowrap;">{s}</span>'
+                for s in _sigs
+            )
+            st.markdown(f"""
+<div style="background:#1a1e2a;border:1px solid #2a2e39;border-radius:10px;
+            padding:12px 14px;margin-bottom:14px;">
+  <div style="font-size:0.62rem;font-weight:700;color:#8b949e;letter-spacing:1.2px;
+              text-transform:uppercase;margin-bottom:8px;">Institutional Signals</div>
+  <div style="display:flex;flex-wrap:wrap;gap:6px;">{_sig_chips}</div>
+</div>""", unsafe_allow_html=True)
+
+        # Checklist
+        _checks = _res.get("checklist", {})
+        if _checks:
+            _check_html = "".join(
+                f'<div style="display:flex;align-items:center;gap:8px;padding:3px 0;">'
+                f'<span style="font-size:0.82rem;">{"✅" if v else "❌"}</span>'
+                f'<span style="font-size:0.78rem;color:{"#e6edf3" if v else "#f85149"};">{k}</span></div>'
+                for k, v in _checks.items()
+            )
+            st.markdown(f"""
+<div style="background:#1a1e2a;border:1px solid #2a2e39;border-radius:10px;
+            padding:12px 14px;margin-bottom:14px;">
+  <div style="font-size:0.62rem;font-weight:700;color:#8b949e;letter-spacing:1.2px;
+              text-transform:uppercase;margin-bottom:6px;">Mandatory Checklist</div>
+  {_check_html}
+</div>""", unsafe_allow_html=True)
+
+    # ── Support / Resistance ──────────────────────────────────────────────────
+    _supp = _res.get("support", 0)
+    _res2 = _res.get("resistance", 0)
+    _oi_d = _res.get("oi", {})
+    _pcr  = _oi_d.get("pcr", 0)
+    _mp   = _oi_d.get("max_pain", 0)
+
+    st.markdown(f"""
+<div style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:14px;">
+  <div style="flex:1;min-width:120px;background:#1a1e2a;border:1px solid #2a2e39;
+              border-radius:10px;padding:12px 14px;text-align:center;">
+    <div style="font-size:0.6rem;color:#6e7681;text-transform:uppercase;
+                font-weight:700;letter-spacing:1px;">Support (PE Wall)</div>
+    <div style="font-size:1.05rem;font-weight:800;color:#00d4aa;margin-top:4px;">
+      ₹{_supp:,.0f}</div>
+  </div>
+  <div style="flex:1;min-width:120px;background:#1a1e2a;border:1px solid #2a2e39;
+              border-radius:10px;padding:12px 14px;text-align:center;">
+    <div style="font-size:0.6rem;color:#6e7681;text-transform:uppercase;
+                font-weight:700;letter-spacing:1px;">Resistance (CE Wall)</div>
+    <div style="font-size:1.05rem;font-weight:800;color:#f85149;margin-top:4px;">
+      ₹{_res2:,.0f}</div>
+  </div>
+  <div style="flex:1;min-width:120px;background:#1a1e2a;border:1px solid #2a2e39;
+              border-radius:10px;padding:12px 14px;text-align:center;">
+    <div style="font-size:0.6rem;color:#6e7681;text-transform:uppercase;
+                font-weight:700;letter-spacing:1px;">Max Pain</div>
+    <div style="font-size:1.05rem;font-weight:800;color:#e6edf3;margin-top:4px;">
+      ₹{_mp:,.0f}</div>
+  </div>
+  <div style="flex:1;min-width:100px;background:#1a1e2a;border:1px solid #2a2e39;
+              border-radius:10px;padding:12px 14px;text-align:center;">
+    <div style="font-size:0.6rem;color:#6e7681;text-transform:uppercase;
+                font-weight:700;letter-spacing:1px;">PCR</div>
+    <div style="font-size:1.05rem;font-weight:800;
+                color:{"#00d4aa" if _pcr > 1.1 else "#f85149" if _pcr < 0.9 else "#e6edf3"};
+                margin-top:4px;">{_pcr:.2f}</div>
+  </div>
+</div>""", unsafe_allow_html=True)
+
+    # ── OI tables ─────────────────────────────────────────────────────────────
+    _top_ce = _oi_d.get("top_ce")
+    _top_pe = _oi_d.get("top_pe")
+    if _top_ce is not None and not _top_ce.empty:
+        with st.expander("📊 Top OI Strikes", expanded=False):
+            _ce_col, _pe_col = st.columns(2)
+            with _ce_col:
+                st.caption("Top 5 CE OI (Resistance)")
+                st.dataframe(_top_ce.rename(columns={
+                    "Strike": "Strike", "CE OI": "OI", "CE Chng OI": "Chg OI", "CE Vol": "Vol"
+                }), hide_index=True, use_container_width=True)
+            with _pe_col:
+                st.caption("Top 5 PE OI (Support)")
+                st.dataframe(_top_pe.rename(columns={
+                    "Strike": "Strike", "PE OI": "OI", "PE Chng OI": "Chg OI", "PE Vol": "Vol"
+                }), hide_index=True, use_container_width=True)
+
+    # Risk disclaimer
+    st.markdown(
+        '<div style="margin-top:10px;font-size:0.7rem;color:#484f58;padding:8px 10px;'
+        'border:1px solid #2a2e39;border-radius:6px;">'
+        '⚠️ For educational purposes only. Not investment advice. '
+        'Always use stop losses. Options trading involves significant risk of loss.</div>',
+        unsafe_allow_html=True)
+
+
+# ── Page routing (URL-driven via ?page=) ──────────────────────────────────────
+{
+    "smart_alerts_pro": page_smart_alerts_pro,
+    "gamma_blast":      page_gamma_blast,
+    "elder_ray":        page_elder_ray,
+    "late_session":     page_late_session,
+    "rpci":             page_rpci,
+    "red_flag":         page_red_flag,
+    "open_low":         page_open_low,
+    "agent_flow":       page_agent_flow,
+}.get(_cur_page, page_smart_alerts_pro)()
