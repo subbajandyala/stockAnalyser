@@ -605,7 +605,43 @@ with _kite_col:
             st.session_state.pop("_kite_auto_name", None)
             st.rerun()
     elif _has_secret:
-        st.link_button("🔑 Login", _login_url, use_container_width=True)
+        # Inject an anchor into the PARENT frame (allow-same-origin lets us
+        # access window.parent.document). The user click inside the iframe
+        # propagates as user-activation to the parent, so the anchor.click()
+        # navigates the top-level window directly — same-tab, no popup blocker.
+        _scomp.html(f"""
+<style>
+*{{box-sizing:border-box;margin:0;padding:0;}}
+html,body{{height:100%;background:transparent;overflow:hidden;}}
+button{{
+  width:100%;height:52px;
+  background:linear-gradient(135deg,rgba(56,126,209,0.18),rgba(56,126,209,0.1));
+  border:1px solid rgba(56,126,209,0.45);border-radius:9px;
+  color:#79c0ff;font-size:0.82rem;font-weight:700;cursor:pointer;
+  font-family:Inter,-apple-system,sans-serif;letter-spacing:0.2px;
+}}
+button:hover{{background:rgba(56,126,209,0.28);border-color:rgba(56,126,209,0.7);}}
+button:active{{background:rgba(56,126,209,0.4);transform:scale(0.98);}}
+</style>
+<button onclick="go()">🔑 Login</button>
+<script>
+function go(){{
+  var url={repr(_login_url)};
+  try{{
+    // Same-origin parent access: inject & click anchor in the top frame
+    var a=window.parent.document.createElement('a');
+    a.href=url;
+    a.style.display='none';
+    window.parent.document.body.appendChild(a);
+    a.click();
+    window.parent.document.body.removeChild(a);
+  }}catch(e){{
+    // Fallback: direct top-frame navigation
+    window.top.location.href=url;
+  }}
+}}
+</script>
+""", height=60)
 
 
 # ── Scrolling ticker ──────────────────────────────────────────────────────────
