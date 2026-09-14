@@ -523,19 +523,27 @@ if _rt and not st.session_state.get("kite_access_token", ""):
                     st.session_state["kite_access_token"] = _new_tok
                     st.session_state["kite_api_key"] = _ex_key
                     st.session_state["_kite_auto_name"] = _tok_data.get("user_name", "")
-                    st.query_params.clear()
+                    st.session_state["_kite_clean_url"] = True
                     st.rerun()
         except Exception:
             pass
 
-# ── localStorage persist ──────────────────────────────────────────────────────
-_ses_key = st.session_state.get("kite_api_key", "")
-_ses_tok = st.session_state.get("kite_access_token", "")
+# ── localStorage persist + client-side URL cleanup (no HTTP redirect) ─────────
+_ses_key   = st.session_state.get("kite_api_key", "")
+_ses_tok   = st.session_state.get("kite_access_token", "")
+_clean_url = st.session_state.pop("_kite_clean_url", False)
 _scomp.html(f"""<script>
 (function(){{
-  const CK={repr(_ses_key)}, CT={repr(_ses_tok)};
+  const CK={repr(_ses_key)}, CT={repr(_ses_tok)}, CLEAN={'true' if _clean_url else 'false'};
   if(CK) localStorage.setItem('mp_kite_api_key', CK);
   if(CT) localStorage.setItem('mp_kite_access_token', CT);
+  if(CLEAN || window.location.search.includes('request_token')) {{
+    try {{
+      var u = new URL(window.location.href);
+      ['request_token','action','type','status'].forEach(function(p){{u.searchParams.delete(p);}});
+      window.history.replaceState({{}},'',u);
+    }} catch(e) {{}}
+  }}
 }})();
 </script>""", height=0)
 
