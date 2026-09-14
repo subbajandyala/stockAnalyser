@@ -615,43 +615,51 @@ with _kite_col:
             st.session_state.pop("_kite_auto_name", None)
             st.rerun()
     elif _has_secret:
-        # Inject an anchor into the PARENT frame (allow-same-origin lets us
-        # access window.parent.document). The user click inside the iframe
-        # propagates as user-activation to the parent, so the anchor.click()
-        # navigates the top-level window directly — same-tab, no popup blocker.
-        _scomp.html(f"""
-<style>
-*{{box-sizing:border-box;margin:0;padding:0;}}
-html,body{{height:100%;background:transparent;overflow:hidden;}}
-button{{
-  width:100%;height:52px;
-  background:linear-gradient(135deg,rgba(56,126,209,0.18),rgba(56,126,209,0.1));
-  border:1px solid rgba(56,126,209,0.45);border-radius:9px;
-  color:#79c0ff;font-size:0.82rem;font-weight:700;cursor:pointer;
-  font-family:Inter,-apple-system,sans-serif;letter-spacing:0.2px;
-}}
-button:hover{{background:rgba(56,126,209,0.28);border-color:rgba(56,126,209,0.7);}}
-button:active{{background:rgba(56,126,209,0.4);transform:scale(0.98);}}
-</style>
-<button onclick="go()">🔑 Login</button>
-<script>
-function go(){{
-  var url={repr(_login_url)};
-  try{{
-    // Same-origin parent access: inject & click anchor in the top frame
-    var a=window.parent.document.createElement('a');
-    a.href=url;
-    a.style.display='none';
-    window.parent.document.body.appendChild(a);
-    a.click();
-    window.parent.document.body.removeChild(a);
-  }}catch(e){{
-    // Fallback: direct top-frame navigation
-    window.top.location.href=url;
-  }}
-}}
-</script>
-""", height=60)
+        st.markdown(
+            f'<a href="{_login_url}" target="_blank" style="'
+            f'display:block;width:100%;padding:14px 0;text-align:center;'
+            f'background:linear-gradient(135deg,rgba(56,126,209,0.18),rgba(56,126,209,0.1));'
+            f'border:1px solid rgba(56,126,209,0.45);border-radius:9px;'
+            f'color:#79c0ff;font-size:0.82rem;font-weight:700;'
+            f'text-decoration:none;cursor:pointer;letter-spacing:0.2px;">'
+            f'🔑 Login with Kite</a>',
+            unsafe_allow_html=True,
+        )
+        with st.expander("📋 Paste token (mobile/manual)"):
+            st.caption("After Kite login, copy the **request_token** from the redirect URL and paste below.")
+            _manual_rt = st.text_input("request_token", placeholder="Paste request_token here", key="manual_rt_input")
+            _manual_at = st.text_input("OR access_token (direct)", placeholder="Paste access_token here", key="manual_at_input", type="password")
+            if st.button("✅ Connect", key="manual_connect_btn"):
+                _mk = _get_secret("KITE_API_KEY", "plz6ik09bgb62mey")
+                _ms = _get_secret("KITE_API_SECRET", "")
+                if _manual_at.strip():
+                    st.session_state["kite_access_token"] = _manual_at.strip()
+                    st.session_state["kite_api_key"] = _mk
+                    st.rerun()
+                elif _manual_rt.strip() and _mk and _ms:
+                    import hashlib, requests as _mreq
+                    try:
+                        _mchk = hashlib.sha256((_mk + _manual_rt.strip() + _ms).encode()).hexdigest()
+                        _mr = _mreq.post(
+                            "https://api.kite.trade/session/token",
+                            data={"api_key": _mk, "request_token": _manual_rt.strip(), "checksum": _mchk},
+                            headers={"X-Kite-Version": "3"}, timeout=15,
+                        )
+                        if _mr.ok:
+                            _md = _mr.json().get("data", {})
+                            if _md.get("access_token"):
+                                st.session_state["kite_access_token"] = _md["access_token"]
+                                st.session_state["kite_api_key"] = _mk
+                                st.session_state["_kite_auto_name"] = _md.get("user_name", "")
+                                st.rerun()
+                            else:
+                                st.error(f"Token exchange failed: {_mr.json()}")
+                        else:
+                            st.error(f"Kite error {_mr.status_code}: {_mr.text[:200]}")
+                    except Exception as _me:
+                        st.error(str(_me))
+                else:
+                    st.warning("Paste a request_token or access_token above")
 
 
 # ── Scrolling ticker ──────────────────────────────────────────────────────────
