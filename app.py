@@ -7026,15 +7026,31 @@ def page_agent_flow():
         return
 
     # ── Controls ──────────────────────────────────────────────────────────────
-    _c1, _c2 = st.columns([2, 1])
+    _c1, _c2, _c3 = st.columns([2, 1, 1])
     with _c1:
         _af_sym = st.selectbox("Instrument", _AF_INSTRUMENTS,
                                index=0, key="af_symbol", label_visibility="collapsed")
     with _c2:
+        _af_interval = st.selectbox(
+            "Auto-refresh", [0, 30, 60, 120, 300],
+            format_func=lambda x: "Off" if x == 0 else f"{x}s",
+            key="af_interval", label_visibility="collapsed",
+        )
+    with _c3:
         _af_run = st.button("▶ Analyze", key="af_run_btn",
                             use_container_width=True, type="primary")
 
-    if _af_run:
+    # Auto-refresh tick (returns increasing int on each fire)
+    _af_tick = 0
+    if _af_interval > 0:
+        if _HAS_AUTOREFRESH:
+            _af_tick = _st_autorefresh(interval=_af_interval * 1000, key="af_ar")
+        else:
+            st.caption("Install streamlit-autorefresh for auto-refresh")
+
+    _af_do_run = _af_run or (_af_tick > 0 and st.session_state.get("af_result") is not None)
+
+    if _af_do_run:
         with st.spinner(f"Fetching live data for {_af_sym}…"):
             _af_res = _run_agent(_af_sym, _af_key, _af_tok)
         st.session_state["af_result"] = _af_res
