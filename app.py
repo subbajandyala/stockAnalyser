@@ -7025,32 +7025,35 @@ def page_agent_flow():
         st.warning("⚡ Connect Zerodha Kite to enable Agent Flow. This screen requires live option chain data via Kite Connect.")
         return
 
+    # ── Auto-refresh every 30 s (always on, same pattern as Elder Ray) ────────
+    _af_tick = 0
+    if _HAS_AUTOREFRESH:
+        _af_tick = _st_autorefresh(interval=30_000, key="af_autorefresh")
+
+    _af_prev_tick = st.session_state.get("af_prev_tick", -1)
+    _af_is_tick   = _af_tick != _af_prev_tick
+    st.session_state["af_prev_tick"] = _af_tick
+
     # ── Controls ──────────────────────────────────────────────────────────────
-    _c1, _c2, _c3 = st.columns([2, 1, 1])
+    _c1, _c2, _c3 = st.columns([2, 1.2, 1.8])
     with _c1:
         _af_sym = st.selectbox("Instrument", _AF_INSTRUMENTS,
                                index=0, key="af_symbol", label_visibility="collapsed")
     with _c2:
-        _af_interval = st.selectbox(
-            "Auto-refresh", [0, 30, 60, 120, 300],
-            format_func=lambda x: "Off" if x == 0 else f"{x}s",
-            key="af_interval", label_visibility="collapsed",
-        )
+        _af_run = st.button("🔄 Refresh", key="af_run_btn", use_container_width=True)
     with _c3:
-        _af_run = st.button("▶ Analyze", key="af_run_btn",
-                            use_container_width=True, type="primary")
+        _af_badge = (
+            '<span style="display:inline-block;background:rgba(0,212,170,.15);'
+            'color:#00d4aa;border:1px solid rgba(0,212,170,.4);'
+            'font-size:0.65rem;font-weight:700;padding:6px 10px;border-radius:6px;">'
+            '⟳ AUTO 30s</span>'
+        ) if _HAS_AUTOREFRESH else (
+            '<span style="color:#6e7681;font-size:0.72rem;">No autorefresh</span>'
+        )
+        st.markdown(_af_badge, unsafe_allow_html=True)
 
-    # Auto-refresh tick (returns increasing int on each fire)
-    _af_tick = 0
-    if _af_interval > 0:
-        if _HAS_AUTOREFRESH:
-            _af_tick = _st_autorefresh(interval=_af_interval * 1000, key="af_ar")
-        else:
-            st.caption("Install streamlit-autorefresh for auto-refresh")
-
-    _af_do_run = _af_run or (_af_tick > 0 and st.session_state.get("af_result") is not None)
-
-    if _af_do_run:
+    # Run on: manual refresh, tick change, or no cached result yet
+    if _af_run or _af_is_tick or st.session_state.get("af_result") is None:
         with st.spinner(f"Fetching live data for {_af_sym}…"):
             _af_res = _run_agent(_af_sym, _af_key, _af_tok)
         st.session_state["af_result"] = _af_res
@@ -7064,7 +7067,7 @@ def page_agent_flow():
     if _res is None:
         st.markdown(
             '<div style="color:#6e7681;font-size:0.85rem;margin-top:8px;">'
-            'Select an instrument and press <b>▶ Analyze</b> to run the institutional analysis.</div>',
+            'Click <b>🔄 Refresh</b> to run the institutional analysis.</div>',
             unsafe_allow_html=True)
         return
 
