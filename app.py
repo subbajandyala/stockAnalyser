@@ -63,6 +63,11 @@ from screener.late_session import (
 )
 from screener.open_low import run_open_low_scan as _run_open_low
 from screener.agent_flow import run_agent_analysis as _run_agent, INSTRUMENTS as _AF_INSTRUMENTS
+from screener.expiry_drama import (
+    run_expiry_drama as _run_expiry_drama,
+    get_today_expiry_instruments as _ed_today_expiries,
+    ALL_INSTRUMENTS as _ED_ALL_INSTRUMENTS,
+)
 from plotly.subplots import make_subplots
 
 try:
@@ -580,6 +585,7 @@ _NAV = [
     ("red_flag",         "🚨 Red Flag"),
     ("open_low",         "🚀 Open=Low"),
     ("agent_flow",       "🤖 Agent Flow"),
+    ("expiry_drama",     "🎭 Expiry Drama"),
 ]
 _NAV_KEYS   = [k for k, _ in _NAV]
 _NAV_LABELS = {k: lbl for k, lbl in _NAV}
@@ -7385,6 +7391,273 @@ def page_agent_flow():
         unsafe_allow_html=True)
 
 
+def page_expiry_drama():
+    _ed_key = st.session_state.get("kite_api_key",      _get_secret("KITE_API_KEY", ""))
+    _ed_tok = st.session_state.get("kite_access_token", "")
+    _ed_ok  = bool(_ed_key and _ed_tok)
+
+    st.markdown("""
+<div style="margin-bottom:6px;">
+  <div style="font-size:1.25rem;font-weight:900;color:#fff;letter-spacing:-0.5px;">🎭 Expiry Drama</div>
+  <div style="font-size:0.78rem;color:#6e7681;margin-top:2px;">
+    Find options with 10x–30x potential on expiry day · Live Kite data</div>
+</div>""", unsafe_allow_html=True)
+
+    if not _ed_ok:
+        st.warning("⚡ Connect Zerodha Kite to enable Expiry Drama. Live option chain data is required.")
+        return
+
+    # ── Auto-refresh every 30 s (Elder Ray pattern) ───────────────────────────
+    _ed_tick = 0
+    if _HAS_AUTOREFRESH:
+        _ed_tick = _st_autorefresh(interval=30_000, key="ed_autorefresh")
+
+    _ed_prev_tick = st.session_state.get("ed_prev_tick", -1)
+    _ed_is_tick   = _ed_tick != _ed_prev_tick
+    st.session_state["ed_prev_tick"] = _ed_tick
+
+    # ── Today's expiry badge ──────────────────────────────────────────────────
+    _today_expiries = _ed_today_expiries()
+    if _today_expiries:
+        _exp_chips = " ".join(
+            f'<span style="background:rgba(248,81,73,.18);color:#ff7b72;'
+            f'border:1px solid rgba(248,81,73,.4);font-size:0.65rem;font-weight:800;'
+            f'padding:3px 9px;border-radius:20px;letter-spacing:0.3px;">'
+            f'🔥 {s} EXPIRY</span>'
+            for s in _today_expiries
+        )
+        st.markdown(
+            f'<div style="margin-bottom:10px;">{_exp_chips}</div>',
+            unsafe_allow_html=True,
+        )
+
+    # ── Controls ──────────────────────────────────────────────────────────────
+    _c1, _c2, _c3 = st.columns([2, 1.2, 1.8])
+    with _c1:
+        _ed_default_idx = 0
+        if _today_expiries and _today_expiries[0] in _ED_ALL_INSTRUMENTS:
+            _ed_default_idx = _ED_ALL_INSTRUMENTS.index(_today_expiries[0])
+        _ed_sym = st.selectbox(
+            "Instrument", _ED_ALL_INSTRUMENTS,
+            index=_ed_default_idx, key="ed_symbol", label_visibility="collapsed",
+        )
+    with _c2:
+        _ed_run = st.button("🔄 Refresh", key="ed_run_btn", use_container_width=True)
+    with _c3:
+        _ed_badge = (
+            '<span style="display:inline-block;background:rgba(0,212,170,.15);'
+            'color:#00d4aa;border:1px solid rgba(0,212,170,.4);'
+            'font-size:0.65rem;font-weight:700;padding:6px 10px;border-radius:6px;">'
+            '⟳ AUTO 30s</span>'
+        ) if _HAS_AUTOREFRESH else (
+            '<span style="color:#6e7681;font-size:0.72rem;">No autorefresh</span>'
+        )
+        st.markdown(_ed_badge, unsafe_allow_html=True)
+
+    # ── Fetch / cache ─────────────────────────────────────────────────────────
+    _ed_cache_key = f"ed_result_{_ed_sym}"
+    _ed_ts_key    = f"ed_ts_{_ed_sym}"
+
+    if _ed_run or _ed_is_tick or st.session_state.get(_ed_cache_key) is None:
+        with st.spinner(f"Fetching live option chain for {_ed_sym}…"):
+            try:
+                _ed_res = _run_expiry_drama(_ed_key, _ed_tok, _ed_sym)
+                st.session_state[_ed_cache_key] = _ed_res
+                st.session_state[_ed_ts_key] = datetime.datetime.now(
+                    datetime.timezone(datetime.timedelta(hours=5, minutes=30))
+                ).strftime("%I:%M:%S %p IST")
+            except Exception as _e:
+                st.error(f"Failed to fetch {_ed_sym} option chain: {_e}")
+                return
+
+    _res = st.session_state.get(_ed_cache_key)
+    _ts  = st.session_state.get(_ed_ts_key, "")
+
+    if _res is None:
+        st.markdown(
+            '<div style="color:#6e7681;font-size:0.85rem;margin-top:8px;">'
+            'Click <b>🔄 Refresh</b> to analyse expiry drama candidates.</div>',
+            unsafe_allow_html=True)
+        return
+
+    if _ts:
+        st.caption(f"Updated {_ts}")
+
+    spot      = _res.get("spot", 0)
+    max_pain  = _res.get("max_pain", 0)
+    oi_magnet = _res.get("oi_magnet", 0)
+    pcr       = _res.get("pcr", 0)
+    atm       = _res.get("atm", 0)
+    bias      = _res.get("bias", "Neutral")
+    gap_pts   = _res.get("gap_pts", 0)
+    direction = _res.get("direction", "—")
+    expiry    = _res.get("expiry", "—")
+    is_expiry = _res.get("is_expiry_day", False)
+    ce_wall   = _res.get("ce_wall", 0)
+    pe_wall   = _res.get("pe_wall", 0)
+    cands_df  = _res.get("candidates_df", pd.DataFrame())
+
+    _bias_col = {"Bullish": "#00d4aa", "Bearish": "#f85149", "Neutral": "#8b949e"}.get(bias, "#8b949e")
+    _dir_icon = "▲" if gap_pts >= 0 else "▼"
+    _dir_col  = "#00d4aa" if gap_pts >= 0 else "#f85149"
+
+    # ── Market snapshot card ──────────────────────────────────────────────────
+    _expiry_badge = (
+        '<span style="background:rgba(248,81,73,.25);color:#ff7b72;'
+        'border:1px solid rgba(248,81,73,.5);font-size:0.62rem;font-weight:800;'
+        'padding:2px 8px;border-radius:12px;margin-left:8px;">TODAY\'s EXPIRY</span>'
+    ) if is_expiry else ""
+
+    st.markdown(f"""
+<div style="background:#1a1e2a;border:1px solid #2a2e39;border-radius:12px;
+            padding:16px 18px;margin-bottom:14px;">
+  <div style="display:flex;align-items:center;justify-content:space-between;
+              flex-wrap:wrap;gap:8px;margin-bottom:14px;">
+    <div>
+      <div style="font-size:0.62rem;font-weight:700;color:#8b949e;
+                  letter-spacing:1.2px;text-transform:uppercase;">Expiry</div>
+      <div style="font-size:0.88rem;font-weight:700;color:#e6edf3;margin-top:1px;">
+        {expiry}{_expiry_badge}</div>
+    </div>
+    <div style="text-align:right;">
+      <div style="font-size:0.62rem;font-weight:700;color:#8b949e;
+                  letter-spacing:1.2px;text-transform:uppercase;">Market Pull</div>
+      <div style="font-size:1.1rem;font-weight:900;color:{_dir_col};margin-top:1px;">
+        {_dir_icon} {abs(gap_pts):.0f} pts to Max Pain</div>
+    </div>
+  </div>
+  <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(110px,1fr));gap:12px;">
+    <div style="background:#0d1117;border:1px solid #21262d;border-radius:8px;padding:10px 12px;">
+      <div style="font-size:0.58rem;color:#6e7681;text-transform:uppercase;
+                  font-weight:700;letter-spacing:1px;">Spot</div>
+      <div style="font-size:1rem;font-weight:700;color:#e6edf3;margin-top:3px;">
+        ₹{spot:,.2f}</div>
+    </div>
+    <div style="background:#0d1117;border:1px solid #21262d;border-radius:8px;padding:10px 12px;">
+      <div style="font-size:0.58rem;color:#6e7681;text-transform:uppercase;
+                  font-weight:700;letter-spacing:1px;">Max Pain</div>
+      <div style="font-size:1rem;font-weight:700;color:#e3b341;margin-top:3px;">
+        ₹{max_pain:,.0f}</div>
+    </div>
+    <div style="background:#0d1117;border:1px solid #21262d;border-radius:8px;padding:10px 12px;">
+      <div style="font-size:0.58rem;color:#6e7681;text-transform:uppercase;
+                  font-weight:700;letter-spacing:1px;">OI Magnet</div>
+      <div style="font-size:1rem;font-weight:700;color:#79c0ff;margin-top:3px;">
+        ₹{oi_magnet:,.0f}</div>
+    </div>
+    <div style="background:#0d1117;border:1px solid #21262d;border-radius:8px;padding:10px 12px;">
+      <div style="font-size:0.58rem;color:#6e7681;text-transform:uppercase;
+                  font-weight:700;letter-spacing:1px;">PCR</div>
+      <div style="font-size:1rem;font-weight:700;color:{_bias_col};margin-top:3px;">
+        {pcr}</div>
+    </div>
+    <div style="background:#0d1117;border:1px solid #21262d;border-radius:8px;padding:10px 12px;">
+      <div style="font-size:0.58rem;color:#6e7681;text-transform:uppercase;
+                  font-weight:700;letter-spacing:1px;">CE Wall</div>
+      <div style="font-size:1rem;font-weight:700;color:#f85149;margin-top:3px;">
+        ₹{ce_wall:,.0f}</div>
+    </div>
+    <div style="background:#0d1117;border:1px solid #21262d;border-radius:8px;padding:10px 12px;">
+      <div style="font-size:0.58rem;color:#6e7681;text-transform:uppercase;
+                  font-weight:700;letter-spacing:1px;">PE Wall</div>
+      <div style="font-size:1rem;font-weight:700;color:#00d4aa;margin-top:3px;">
+        ₹{pe_wall:,.0f}</div>
+    </div>
+  </div>
+</div>""", unsafe_allow_html=True)
+
+    # ── How to read this screen ───────────────────────────────────────────────
+    with st.expander("📖 How Expiry Drama works", expanded=False):
+        st.markdown("""
+**On expiry day, option writers defend key OI strikes until the last 60-90 minutes.**
+When the market is forced toward Max Pain, heavily-written OTM strikes get breached —
+and cheap options near those strikes can explode 10x–30x in under an hour.
+
+**Scoring factors (0–100):**
+- **Low LTP** (₹0.5–30): cheaper entry = higher multiplier potential
+- **In Max Pain Path**: strike is between spot and max pain (in the direction of pull)
+- **High OI Wall**: large OI = writers defending aggressively = explosive if breached
+- **Fresh Writing**: OI added today = smart money positioning
+- **Volume Surge**: high Vol/OI ratio = active accumulation
+- **PCR Alignment**: PCR confirms the direction
+- **Big Gap**: spot-to-maxpain distance > 300 pts = more drama needed
+
+**Labels:**  🚀 Top Pick (70+) · 💣 Strong (55+) · ⚡ Watch (40+) · 👀 Speculative (35+)
+
+**Pain Mult**: estimated multiplier if market closes exactly at Max Pain.
+Actual results depend on when you enter/exit — earlier in the day gives more runway.
+        """, unsafe_allow_html=True)
+
+    # ── Candidates table ──────────────────────────────────────────────────────
+    if cands_df.empty:
+        st.info(
+            "No high-probability drama candidates found right now. "
+            "This is most active on expiry day during the last 1–2 hours of trade."
+        )
+    else:
+        n_top   = int((cands_df["Label"] == "🚀 Top Pick").sum())
+        n_strong = int((cands_df["Label"] == "💣 Strong").sum())
+        st.markdown(
+            f'<div style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:10px;">'
+            f'<span style="background:rgba(0,212,170,0.1);border:1px solid rgba(0,212,170,0.25);'
+            f'color:#00d4aa;font-size:0.72rem;font-weight:700;padding:3px 10px;border-radius:20px;">'
+            f'🎭 {len(cands_df)} candidates</span>'
+            + (f'<span style="background:rgba(248,81,73,0.1);border:1px solid rgba(248,81,73,0.25);'
+               f'color:#ff7b72;font-size:0.72rem;font-weight:700;padding:3px 10px;border-radius:20px;">'
+               f'🚀 {n_top} top picks</span>' if n_top else "")
+            + (f'<span style="background:rgba(240,136,62,0.1);border:1px solid rgba(240,136,62,0.25);'
+               f'color:#f0883e;font-size:0.72rem;font-weight:700;padding:3px 10px;border-radius:20px;">'
+               f'💣 {n_strong} strong</span>' if n_strong else "")
+            + f'</div>',
+            unsafe_allow_html=True,
+        )
+
+        _disp = cands_df[[
+            "Label", "Type", "Strike", "LTP", "OTM Dist",
+            "OI", "Vol", "Score", "Pain Mult", "Tags",
+        ]].copy()
+        _disp["LTP"]      = _disp["LTP"].map(lambda x: f"₹{x:.2f}")
+        _disp["OTM Dist"] = _disp["OTM Dist"].map(lambda x: f"{x} pts")
+        _disp["OI"]       = _disp["OI"].map(lambda x: f"{x:,}")
+        _disp["Vol"]      = _disp["Vol"].map(lambda x: f"{x:,}")
+        _disp["Pain Mult"] = _disp["Pain Mult"].map(
+            lambda x: f"{x:.1f}x" if x > 0 else "₹0"
+        )
+
+        st.dataframe(
+            _disp, use_container_width=True, hide_index=True,
+            column_config={
+                "Label":     st.column_config.TextColumn("Signal",    width="medium"),
+                "Type":      st.column_config.TextColumn("CE/PE",     width="small"),
+                "Strike":    st.column_config.NumberColumn("Strike",  width="small", format="%d"),
+                "LTP":       st.column_config.TextColumn("LTP",       width="small"),
+                "OTM Dist":  st.column_config.TextColumn("OTM",       width="small"),
+                "OI":        st.column_config.TextColumn("OI",        width="small"),
+                "Vol":       st.column_config.TextColumn("Volume",    width="small"),
+                "Score":     st.column_config.ProgressColumn("Score", min_value=0, max_value=100, format="%d"),
+                "Pain Mult": st.column_config.TextColumn("@ Max Pain", width="small"),
+                "Tags":      st.column_config.TextColumn("Signals",   width="large"),
+            },
+        )
+
+    # ── Expiry day note ───────────────────────────────────────────────────────
+    if not is_expiry:
+        _next_exp_dt = _res.get("expiry_dt")
+        _days_left = (_next_exp_dt.date() - datetime.datetime.now(_IST).date()).days if _next_exp_dt else "?"
+        st.info(
+            f"📅 Next {_ed_sym} expiry is **{expiry}** ({_days_left} day(s) away). "
+            "Expiry Drama candidates are most active on expiry day — especially the last 90 minutes."
+        )
+
+    # ── Disclaimer ────────────────────────────────────────────────────────────
+    st.markdown(
+        '<div style="margin-top:10px;font-size:0.7rem;color:#484f58;padding:8px 10px;'
+        'border:1px solid #2a2e39;border-radius:6px;">'
+        '⚠️ High-risk, high-reward options. Expiry-day OTM options can expire worthless. '
+        'Never risk more than you can afford to lose. Not investment advice.</div>',
+        unsafe_allow_html=True)
+
+
 # ── Page routing (URL-driven via ?page=) ──────────────────────────────────────
 {
     "smart_alerts_pro": page_smart_alerts_pro,
@@ -7395,4 +7668,5 @@ def page_agent_flow():
     "red_flag":         page_red_flag,
     "open_low":         page_open_low,
     "agent_flow":       page_agent_flow,
+    "expiry_drama":     page_expiry_drama,
 }.get(_cur_page, page_smart_alerts_pro)()
