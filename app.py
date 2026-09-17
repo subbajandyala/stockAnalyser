@@ -7643,7 +7643,8 @@ Actual results depend on when you enter/exit — earlier in the day gives more r
     # ── Expiry day note ───────────────────────────────────────────────────────
     if not is_expiry:
         _next_exp_dt = _res.get("expiry_dt")
-        _days_left = (_next_exp_dt.date() - datetime.datetime.now(_IST).date()).days if _next_exp_dt else "?"
+        _ed_ist = datetime.timezone(datetime.timedelta(hours=5, minutes=30))
+        _days_left = (_next_exp_dt.date() - datetime.datetime.now(_ed_ist).date()).days if _next_exp_dt else "?"
         st.info(
             f"📅 Next {_ed_sym} expiry is **{expiry}** ({_days_left} day(s) away). "
             "Expiry Drama candidates are most active on expiry day — especially the last 90 minutes."
