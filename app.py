@@ -73,6 +73,11 @@ from screener.nse_smartmoney import (
     run_smart_money_options  as _run_smart_money,
     run_promoter_pulse       as _run_promoter_pulse,
 )
+from screener.oi_buildup_history import (
+    fetch_oi_history   as _fetch_oi_history,
+    get_expiries       as _oih_get_expiries,
+    ALL_INSTRUMENTS    as _OIH_ALL_INSTRUMENTS,
+)
 from plotly.subplots import make_subplots
 
 try:
@@ -591,6 +596,7 @@ _NAV = [
     ("open_low",         "🚀 Open=Low"),
     ("agent_flow",       "🤖 Agent Flow"),
     ("expiry_drama",     "🎭 Expiry Drama"),
+    ("oi_history",       "📊 OI History"),
     ("fii_compass",      "🌊 FII Compass"),
     ("smart_money",      "🧠 Smart Money"),
     ("promoter_pulse",   "💰 Promoter Pulse"),
@@ -7711,6 +7717,310 @@ def _bias_color(bias: str) -> str:
     return {"Bullish": "#00d4aa", "Bearish": "#f85149"}.get(bias, "#8b949e")
 
 
+# ── Screen: OI Buildup History ────────────────────────────────────────────────
+
+def page_oi_history():
+    k = st.session_state.get("kite_api_key", _get_secret("KITE_API_KEY", ""))
+    t = st.session_state.get("kite_access_token", "")
+    if not (k and t):
+        st.warning("⚡ Connect Zerodha Kite to enable OI History.")
+        return
+
+    st.markdown("""
+<div style="margin-bottom:6px;">
+  <div style="font-size:1.25rem;font-weight:900;color:#fff;letter-spacing:-0.5px;">📊 OI Buildup History</div>
+  <div style="font-size:0.78rem;color:#6e7681;margin-top:2px;">
+    Track strike-level OI accumulation over any date range via Kite historical API</div>
+</div>""", unsafe_allow_html=True)
+
+    # ── Controls ──────────────────────────────────────────────────────────────
+    _ist = datetime.timezone(datetime.timedelta(hours=5, minutes=30))
+    _today = datetime.datetime.now(_ist).date()
+
+    _rc1, _rc2, _rc3, _rc4, _rc5 = st.columns([1, 1.4, 1, 1, 1])
+    with _rc1:
+        _oih_sym = st.selectbox("Index", _OIH_ALL_INSTRUMENTS, index=0, key="oih_sym", label_visibility="collapsed")
+    with _rc2:
+        # Load expiries for chosen symbol
+        _exp_cache_key = f"oih_expiries_{_oih_sym}"
+        if _exp_cache_key not in st.session_state:
+            try:
+                st.session_state[_exp_cache_key] = _oih_get_expiries(k, t, _oih_sym)
+            except Exception as _ex:
+                st.error(f"Expiry fetch failed: {_ex}")
+                return
+        _expiry_list = st.session_state[_exp_cache_key]
+        _expiry_labels = [e.strftime("%d %b %Y") for e in _expiry_list]
+        _exp_idx = st.selectbox("Expiry", range(len(_expiry_labels)),
+                                format_func=lambda i: _expiry_labels[i],
+                                key="oih_expiry", label_visibility="collapsed")
+        _chosen_expiry = _expiry_list[_exp_idx]
+    with _rc3:
+        _from_dt = st.date_input("From", value=_today - datetime.timedelta(days=14),
+                                  key="oih_from", label_visibility="collapsed")
+    with _rc4:
+        _to_dt = st.date_input("To", value=_today, key="oih_to", label_visibility="collapsed")
+    with _rc5:
+        _oih_run = st.button("🔄 Fetch OI History", key="oih_run", use_container_width=True)
+
+    _cache_key = f"oih_res_{_oih_sym}_{_chosen_expiry}_{_from_dt}_{_to_dt}"
+
+    if _oih_run or st.session_state.get(_cache_key) is None:
+        with st.spinner(f"Fetching {_oih_sym} OI history {_from_dt} → {_to_dt}…"):
+            try:
+                st.session_state[_cache_key] = _fetch_oi_history(k, t, _oih_sym, _chosen_expiry, _from_dt, _to_dt)
+            except Exception as _ex:
+                st.error(f"❌ {_ex}")
+                return
+
+    _res = st.session_state.get(_cache_key)
+    if not _res:
+        return
+
+    _spot   = _res["spot"]
+    _atm    = _res["atm"]
+    _summ   = _res["summary"]
+    _daily  = _res["daily"]
+    _dates  = _res["dates"]
+    _pivot  = _res["pivot"]
+
+    # ── Top metrics ───────────────────────────────────────────────────────────
+    _ce_added = int(_summ[(_summ["Type"] == "CE") & (_summ["OI Change"] > 0)]["OI Change"].sum())
+    _pe_added = int(_summ[(_summ["Type"] == "PE") & (_summ["OI Change"] > 0)]["OI Change"].sum())
+    _ce_shed  = int(_summ[(_summ["Type"] == "CE") & (_summ["OI Change"] < 0)]["OI Change"].sum())
+    _pe_shed  = int(_summ[(_summ["Type"] == "PE") & (_summ["OI Change"] < 0)]["OI Change"].sum())
+    _net_bias = "🐂 Bullish" if _pe_added > _ce_added else "🐻 Bearish"
+
+    _m1, _m2, _m3, _m4, _m5 = st.columns(5)
+    for _col, _lbl, _val, _clr in [
+        (_m1, "Spot",        f"₹{_spot:,.0f}",                           "#e6edf3"),
+        (_m2, "CE OI Added", f"{_ce_added/1000:.0f}K lots",               "#f85149"),
+        (_m3, "PE OI Added", f"{_pe_added/1000:.0f}K lots",               "#00d4aa"),
+        (_m4, "CE OI Shed",  f"{abs(_ce_shed)/1000:.0f}K lots",           "#ffa657"),
+        (_m5, "Net Bias",    _net_bias,                                    "#58a6ff"),
+    ]:
+        _col.markdown(f"""
+<div style="background:#1a1e2a;border:1px solid #2a2e39;border-radius:8px;padding:10px 14px;margin-bottom:8px;">
+  <div style="font-size:0.7rem;color:#6e7681;text-transform:uppercase;letter-spacing:1px;">{_lbl}</div>
+  <div style="font-size:1.15rem;font-weight:800;color:{_clr};margin-top:2px;">{_val}</div>
+</div>""", unsafe_allow_html=True)
+
+    st.markdown(f"<div style='font-size:0.75rem;color:#6e7681;margin-bottom:12px;'>Expiry: <b style='color:#e6edf3'>{_res['expiry']}</b> &nbsp;|&nbsp; Range: <b style='color:#e6edf3'>{_from_dt}</b> → <b style='color:#e6edf3'>{_to_dt}</b> &nbsp;|&nbsp; ATM: <b style='color:#00d4aa'>{int(_atm)}</b></div>", unsafe_allow_html=True)
+
+    # ── Tab layout ────────────────────────────────────────────────────────────
+    _t1, _t2, _t3, _t4 = st.tabs(["📊 OI Change Bar", "🔥 OI Heatmap", "📈 Strike Detail", "📋 Full Table"])
+
+    # ── Tab 1: OI Change Bar chart ────────────────────────────────────────────
+    with _t1:
+        _ce_summ = _summ[_summ["Type"] == "CE"].sort_values("Strike")
+        _pe_summ = _summ[_summ["Type"] == "PE"].sort_values("Strike")
+
+        _fig = go.Figure()
+        _fig.add_trace(go.Bar(
+            name="CE OI Change",
+            x=_ce_summ["Strike"].astype(str),
+            y=_ce_summ["OI Change"],
+            marker_color=[("#f85149" if v > 0 else "#00d4aa") for v in _ce_summ["OI Change"]],
+            text=[f"{v/1000:.0f}K" for v in _ce_summ["OI Change"]],
+            textposition="outside",
+        ))
+        _fig.add_trace(go.Bar(
+            name="PE OI Change",
+            x=_pe_summ["Strike"].astype(str),
+            y=_pe_summ["OI Change"],
+            marker_color=[("#00d4aa" if v > 0 else "#ffa657") for v in _pe_summ["OI Change"]],
+            text=[f"{v/1000:.0f}K" for v in _pe_summ["OI Change"]],
+            textposition="outside",
+            visible="legendonly",
+        ))
+        # ATM line
+        _fig.add_vline(
+            x=str(int(_atm)), line_dash="dot", line_color="#58a6ff",
+            annotation_text=f"ATM {int(_atm)}", annotation_position="top",
+        )
+        _fig.update_layout(
+            template="plotly_dark", paper_bgcolor="#131722", plot_bgcolor="#1a1e2a",
+            barmode="overlay", height=460,
+            title=dict(text=f"{_oih_sym} CE/PE OI Change — {_from_dt} to {_to_dt}", font_color="#e6edf3"),
+            xaxis=dict(title="Strike", tickangle=-45, gridcolor="#2a2e39"),
+            yaxis=dict(title="OI Change (contracts)", gridcolor="#2a2e39"),
+            legend=dict(bgcolor="rgba(0,0,0,0)", bordercolor="#2a2e39"),
+            margin=dict(t=50, b=60, l=60, r=20),
+        )
+        st.plotly_chart(_fig, use_container_width=True)
+
+        # Top CE and PE writers
+        _ct1, _ct2 = st.columns(2)
+        with _ct1:
+            st.markdown("<div style='font-size:0.85rem;font-weight:700;color:#f85149;margin-bottom:6px;'>🔴 Top CE OI Writers (Resistance)</div>", unsafe_allow_html=True)
+            _top_ce = _ce_summ[_ce_summ["OI Change"] > 0].nlargest(8, "OI Change")[["Strike", "OI Start", "OI End", "OI Change", "LTP End", "Signal"]]
+            _top_ce.columns = ["Strike", "OI Start", "OI End", "Net Added", "LTP", "Signal"]
+            st.dataframe(_top_ce.reset_index(drop=True), use_container_width=True, hide_index=True)
+        with _ct2:
+            st.markdown("<div style='font-size:0.85rem;font-weight:700;color:#00d4aa;margin-bottom:6px;'>🟢 Top PE OI Writers (Support)</div>", unsafe_allow_html=True)
+            _top_pe = _pe_summ[_pe_summ["OI Change"] > 0].nlargest(8, "OI Change")[["Strike", "OI Start", "OI End", "OI Change", "LTP End", "Signal"]]
+            _top_pe.columns = ["Strike", "OI Start", "OI End", "Net Added", "LTP", "Signal"]
+            st.dataframe(_top_pe.reset_index(drop=True), use_container_width=True, hide_index=True)
+
+    # ── Tab 2: OI Heatmap over time ───────────────────────────────────────────
+    with _t2:
+        _ht_type = st.radio("Show OI for", ["CE", "PE"], horizontal=True, key="oih_ht_type")
+        _daily_filt = _daily[_daily["type"] == _ht_type].copy()
+
+        if not _daily_filt.empty:
+            _heat_pivot = _daily_filt.pivot_table(index="strike", columns="date", values="oi", aggfunc="last").fillna(0)
+            _heat_pivot.columns = [d.strftime("%d %b") for d in _heat_pivot.columns]
+            _heat_pivot = _heat_pivot.sort_index(ascending=False)  # highest strike at top
+
+            _fig2 = go.Figure(go.Heatmap(
+                z=_heat_pivot.values,
+                x=_heat_pivot.columns.tolist(),
+                y=[str(int(s)) for s in _heat_pivot.index],
+                colorscale="RdYlGn" if _ht_type == "PE" else "RdYlGn_r",
+                text=[[f"{int(v/1000)}K" for v in row] for row in _heat_pivot.values],
+                texttemplate="%{text}",
+                showscale=True,
+                hovertemplate="Date: %{x}<br>Strike: %{y}<br>OI: %{z:,}<extra></extra>",
+            ))
+            # ATM marker
+            _atm_y = str(int(_atm))
+            if _atm_y in [str(int(s)) for s in _heat_pivot.index]:
+                _fig2.add_hline(
+                    y=[str(int(s)) for s in _heat_pivot.index].index(_atm_y),
+                    line_dash="dot", line_color="#58a6ff",
+                    annotation_text=f"ATM {int(_atm)}",
+                )
+            _fig2.update_layout(
+                template="plotly_dark", paper_bgcolor="#131722", plot_bgcolor="#1a1e2a",
+                height=600,
+                title=dict(text=f"{_oih_sym} {_ht_type} OI Heatmap by Strike & Date", font_color="#e6edf3"),
+                xaxis=dict(title="Date", gridcolor="#2a2e39"),
+                yaxis=dict(title="Strike", gridcolor="#2a2e39"),
+                margin=dict(t=50, b=60, l=80, r=20),
+            )
+            st.plotly_chart(_fig2, use_container_width=True)
+            st.caption("Green = high OI (for PE = support wall, for CE = resistance wall). OI build-up over dates shows institutional accumulation.")
+        else:
+            st.info("No data available for heatmap.")
+
+    # ── Tab 3: Strike Detail — OI evolution line chart ────────────────────────
+    with _t3:
+        _all_strikes = sorted(_daily["strike"].unique())
+        _default_strikes = [s for s in _all_strikes if abs(s - _atm) <= 3 * _INSTRUMENT_CONFIG_OIH.get(_oih_sym, {}).get("tick", 50)][:6]
+        _sel_strikes = st.multiselect(
+            "Select strikes to chart",
+            options=[int(s) for s in _all_strikes],
+            default=[int(s) for s in _default_strikes],
+            key="oih_sel_strikes",
+        )
+        _sel_type = st.radio("Option type", ["CE", "PE", "Both"], horizontal=True, key="oih_detail_type")
+
+        if _sel_strikes:
+            _types = ["CE", "PE"] if _sel_type == "Both" else [_sel_type]
+            _fig3 = go.Figure()
+            _colors_ce = ["#f85149", "#ff6b6b", "#ff8585", "#ff9f9f", "#ffb3b3", "#ffc8c8"]
+            _colors_pe = ["#00d4aa", "#26d9b5", "#4ddec0", "#73e3cb", "#99e8d6", "#bfede1"]
+            _ci, _pi = 0, 0
+            for _s in sorted(_sel_strikes):
+                for _tp in _types:
+                    _grp = _daily[(_daily["strike"] == _s) & (_daily["type"] == _tp)].sort_values("date")
+                    if _grp.empty:
+                        continue
+                    _col = (_colors_ce[_ci % len(_colors_ce)] if _tp == "CE" else _colors_pe[_pi % len(_colors_pe)])
+                    if _tp == "CE": _ci += 1
+                    else: _pi += 1
+                    _fig3.add_trace(go.Scatter(
+                        x=_grp["date"], y=_grp["oi"],
+                        mode="lines+markers",
+                        name=f"{int(_s)} {_tp}",
+                        line=dict(color=_col, width=2),
+                        marker=dict(size=6),
+                        hovertemplate=f"Strike {int(_s)} {_tp}<br>Date: %{{x}}<br>OI: %{{y:,}}<extra></extra>",
+                    ))
+            _fig3.update_layout(
+                template="plotly_dark", paper_bgcolor="#131722", plot_bgcolor="#1a1e2a",
+                height=460,
+                title=dict(text=f"{_oih_sym} OI Evolution by Strike", font_color="#e6edf3"),
+                xaxis=dict(title="Date", gridcolor="#2a2e39"),
+                yaxis=dict(title="Open Interest", gridcolor="#2a2e39"),
+                legend=dict(bgcolor="rgba(0,0,0,0)", bordercolor="#2a2e39"),
+                margin=dict(t=50, b=60, l=60, r=20),
+            )
+            st.plotly_chart(_fig3, use_container_width=True)
+
+            # LTP chart for selected strikes
+            _fig4 = go.Figure()
+            _ci, _pi = 0, 0
+            for _s in sorted(_sel_strikes):
+                for _tp in _types:
+                    _grp = _daily[(_daily["strike"] == _s) & (_daily["type"] == _tp)].sort_values("date")
+                    if _grp.empty:
+                        continue
+                    _col = (_colors_ce[_ci % len(_colors_ce)] if _tp == "CE" else _colors_pe[_pi % len(_colors_pe)])
+                    if _tp == "CE": _ci += 1
+                    else: _pi += 1
+                    _fig4.add_trace(go.Scatter(
+                        x=_grp["date"], y=_grp["ltp"],
+                        mode="lines+markers",
+                        name=f"{int(_s)} {_tp}",
+                        line=dict(color=_col, width=2, dash="dot"),
+                        marker=dict(size=5),
+                        hovertemplate=f"Strike {int(_s)} {_tp}<br>Date: %{{x}}<br>LTP: ₹%{{y:.2f}}<extra></extra>",
+                    ))
+            _fig4.update_layout(
+                template="plotly_dark", paper_bgcolor="#131722", plot_bgcolor="#1a1e2a",
+                height=320,
+                title=dict(text="Premium (LTP) Evolution", font_color="#e6edf3"),
+                xaxis=dict(title="Date", gridcolor="#2a2e39"),
+                yaxis=dict(title="LTP (₹)", gridcolor="#2a2e39"),
+                legend=dict(bgcolor="rgba(0,0,0,0)", bordercolor="#2a2e39"),
+                margin=dict(t=40, b=50, l=60, r=20),
+            )
+            st.plotly_chart(_fig4, use_container_width=True)
+
+    # ── Tab 4: Full summary table ──────────────────────────────────────────────
+    with _t4:
+        _show_type = st.radio("Filter type", ["All", "CE", "PE"], horizontal=True, key="oih_tbl_type")
+        _show_sig  = st.multiselect("Filter signal", _summ["Signal"].unique().tolist(), default=[], key="oih_tbl_sig")
+
+        _tbl = _summ.copy()
+        if _show_type != "All":
+            _tbl = _tbl[_tbl["Type"] == _show_type]
+        if _show_sig:
+            _tbl = _tbl[_tbl["Signal"].isin(_show_sig)]
+
+        # Colour-code OI Change column
+        def _oi_color(val):
+            if val > 0:
+                return "color: #00d4aa"
+            elif val < 0:
+                return "color: #f85149"
+            return ""
+
+        st.dataframe(
+            _tbl[["Strike", "Type", "OI Start", "OI End", "OI Change", "OI Max",
+                  "LTP Start", "LTP End", "LTP Chg", "Volume", "Signal"]]
+            .reset_index(drop=True),
+            use_container_width=True,
+            hide_index=True,
+        )
+
+        # Download
+        _csv = _tbl.to_csv(index=False)
+        st.download_button("⬇ Download CSV", _csv, file_name=f"{_oih_sym}_OI_history_{_from_dt}_{_to_dt}.csv",
+                           mime="text/csv", key="oih_dl")
+
+
+# helper dict re-use for tick lookup in page function above
+_INSTRUMENT_CONFIG_OIH = {
+    "NIFTY":      {"tick": 50},
+    "BANKNIFTY":  {"tick": 100},
+    "FINNIFTY":   {"tick": 50},
+    "MIDCPNIFTY": {"tick": 25},
+    "SENSEX":     {"tick": 100},
+}
+
+
 # ── Screen: FII Compass ───────────────────────────────────────────────────────
 
 def page_fii_compass():
@@ -8103,6 +8413,7 @@ Entry: near ATM · Stop loss: 30-40% of premium · Target: 2x-3x
     "open_low":         page_open_low,
     "agent_flow":       page_agent_flow,
     "expiry_drama":     page_expiry_drama,
+    "oi_history":       page_oi_history,
     "fii_compass":      page_fii_compass,
     "smart_money":      page_smart_money_options,
     "promoter_pulse":   page_promoter_pulse,
