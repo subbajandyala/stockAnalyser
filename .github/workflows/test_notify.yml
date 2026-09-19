@@ -10,9 +10,26 @@ jobs:
       - name: Send test push to ntfy.sh
         run: |
           curl -s \
-            -H "Title: Elder Ray Bot — Test ✅" \
+            -H "Title: 🚀 Elder Ray Bot — Sample Signal" \
             -H "Priority: high" \
-            -H "Tags: white_check_mark" \
-            -d "Your notification setup is working! You will receive Elder Ray signals here during market hours (09:15–15:30 IST)." \
+            -H "Tags: chart_increasing" \
+            -d "🚀 ELDER RAY SIGNAL — NIFTY
+🕐 10:32:15 IST
+
+Signal : STRONG BUY CE
+Type   : 🟢 BUY CALL (CE)
+Spot   : ₹24,850   ATM: 24850
+Score  : CE 9 | PE 2
+
+📌 Option to buy: NIFTY 24850 CE (nearest expiry)
+
+Why:
+  • Bull Power 15m: +0.42 — EMA rising
+  • VWAP Bias: price above VWAP — bullish
+  • RSI Zone: RSI 62 — bullish momentum
+
+⚠️ Verify before executing. Not financial advice.
+
+--- THIS IS A TEST MESSAGE ---" \
             https://ntfy.sh/subba-nifty-alt-1987
           echo "Done — check your phone"
