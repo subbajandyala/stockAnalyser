@@ -7833,10 +7833,17 @@ def page_oi_history():
             textposition="outside",
             visible="legendonly",
         ))
-        # ATM line
-        _fig.add_vline(
-            x=str(int(_atm)), line_dash="dot", line_color="#58a6ff",
-            annotation_text=f"ATM {int(_atm)}", annotation_position="top",
+        # ATM line — use add_shape/add_annotation (add_vline fails on categorical x-axis)
+        _atm_str = str(int(_atm))
+        _fig.add_shape(
+            type="line", xref="x", yref="paper",
+            x0=_atm_str, x1=_atm_str, y0=0, y1=1,
+            line=dict(dash="dot", color="#58a6ff", width=2),
+        )
+        _fig.add_annotation(
+            x=_atm_str, y=1.04, xref="x", yref="paper",
+            text=f"ATM {int(_atm)}", showarrow=False,
+            font=dict(color="#58a6ff", size=11),
         )
         _fig.update_layout(
             template="plotly_dark", paper_bgcolor="#131722", plot_bgcolor="#1a1e2a",
@@ -7869,26 +7876,33 @@ def page_oi_history():
 
         if not _daily_filt.empty:
             _heat_pivot = _daily_filt.pivot_table(index="strike", columns="date", values="oi", aggfunc="last").fillna(0)
-            _heat_pivot.columns = [d.strftime("%d %b") for d in _heat_pivot.columns]
+            # Rename columns safely — columns are Timestamps after pivot
+            _heat_pivot.columns = [pd.Timestamp(d).strftime("%d %b") for d in _heat_pivot.columns]
             _heat_pivot = _heat_pivot.sort_index(ascending=False)  # highest strike at top
+            _hy_labels = [str(int(s)) for s in _heat_pivot.index]
 
             _fig2 = go.Figure(go.Heatmap(
                 z=_heat_pivot.values,
                 x=_heat_pivot.columns.tolist(),
-                y=[str(int(s)) for s in _heat_pivot.index],
+                y=_hy_labels,
                 colorscale="RdYlGn" if _ht_type == "PE" else "RdYlGn_r",
                 text=[[f"{int(v/1000)}K" for v in row] for row in _heat_pivot.values],
                 texttemplate="%{text}",
                 showscale=True,
                 hovertemplate="Date: %{x}<br>Strike: %{y}<br>OI: %{z:,}<extra></extra>",
             ))
-            # ATM marker
+            # ATM marker — add_hline fails on categorical y; use add_shape instead
             _atm_y = str(int(_atm))
-            if _atm_y in [str(int(s)) for s in _heat_pivot.index]:
-                _fig2.add_hline(
-                    y=[str(int(s)) for s in _heat_pivot.index].index(_atm_y),
-                    line_dash="dot", line_color="#58a6ff",
-                    annotation_text=f"ATM {int(_atm)}",
+            if _atm_y in _hy_labels:
+                _fig2.add_shape(
+                    type="line", xref="paper", yref="y",
+                    x0=0, x1=1, y0=_atm_y, y1=_atm_y,
+                    line=dict(dash="dot", color="#58a6ff", width=2),
+                )
+                _fig2.add_annotation(
+                    x=1.01, y=_atm_y, xref="paper", yref="y",
+                    text=f"ATM", showarrow=False,
+                    font=dict(color="#58a6ff", size=10),
                 )
             _fig2.update_layout(
                 template="plotly_dark", paper_bgcolor="#131722", plot_bgcolor="#1a1e2a",
