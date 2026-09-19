@@ -202,22 +202,23 @@ def fetch_oi_history(
         .reset_index(drop=True)
     )
 
-    # Pivot: rows=strike, cols=date, values=OI for CE and PE
-    ce_pivot = (
+    # Pivot: rows=strike, cols=date-string, values=OI for CE and PE
+    def _date_str(ts) -> str:
+        return pd.Timestamp(ts).strftime("%Y-%m-%d")
+
+    ce_raw = (
         daily[daily["type"] == "CE"]
         .pivot_table(index="strike", columns="date", values="oi", aggfunc="last")
-        .add_prefix("CE_")
     )
-    pe_pivot = (
+    ce_raw.columns = [f"CE_{_date_str(d)}" for d in ce_raw.columns]
+
+    pe_raw = (
         daily[daily["type"] == "PE"]
         .pivot_table(index="strike", columns="date", values="oi", aggfunc="last")
-        .add_prefix("PE_")
     )
-    # Rename columns to date strings
-    ce_pivot.columns = [f"CE_{d.date()}" for d in ce_pivot.columns]
-    pe_pivot.columns = [f"PE_{d.date()}" for d in pe_pivot.columns]
+    pe_raw.columns = [f"PE_{_date_str(d)}" for d in pe_raw.columns]
 
-    pivot = ce_pivot.join(pe_pivot, how="outer").fillna(0).astype(int)
+    pivot = ce_raw.join(pe_raw, how="outer").fillna(0).astype(int)
 
     return {
         "spot":       spot,
@@ -225,7 +226,7 @@ def fetch_oi_history(
         "expiry":     expiry.strftime("%d %b %Y"),
         "from_date":  from_str,
         "to_date":    to_str,
-        "dates":      [d.date() for d in dates_sorted],
+        "dates":      [pd.Timestamp(d).date() for d in dates_sorted],
         "pivot":      pivot,
         "summary":    summary_df,
         "daily":      daily,
