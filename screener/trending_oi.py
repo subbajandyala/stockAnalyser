@@ -20,6 +20,7 @@ SENTIMENT     : Bullish if COI PCR > 1 or rising, Bearish if < 1 or falling
 """
 
 import datetime
+import functools
 import os
 from io import StringIO
 from typing import Optional
@@ -76,13 +77,14 @@ def ind_fmt(n: int) -> str:
 
 # ── Instrument helpers ────────────────────────────────────────────────────────
 
+@functools.lru_cache(maxsize=16)
 def fetch_instruments(api_key: str, access_token: str, symbol: str) -> pd.DataFrame:
     """
     Download options instruments for symbol from Kite.
     Returns DataFrame filtered to CE/PE for that symbol only.
     For MCX symbols (e.g. CRUDEOIL), also includes FUT rows so callers can
     derive the near-month futures symbol for spot-price lookup.
-    Caller should cache this in session_state (large download, daily stable).
+    lru_cache keeps the result in-process for the session lifetime.
     """
     exch = _EXCHANGE[symbol]
     resp = requests.get(

@@ -1,6 +1,7 @@
 import requests
 import pandas as pd
 import io
+import functools
 
 NSE_NIFTY500_URL = "https://archives.nseindia.com/content/indices/ind_nifty500list.csv"
 
@@ -115,6 +116,7 @@ FALLBACK_SYMBOLS = [
 ]
 
 
+@functools.lru_cache(maxsize=1)
 def get_nifty500_symbols() -> pd.DataFrame:
     try:
         resp = requests.get(NSE_NIFTY500_URL, headers=HEADERS, timeout=10)

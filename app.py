@@ -406,6 +406,11 @@ def _filter_market_hours(df: pd.DataFrame) -> pd.DataFrame:
     df.index = idx
     return df.between_time("09:15", "15:30")
 
+@st.cache_data(ttl=60, show_spinner=False)
+def _fetch_chart_data(nse_symbol: str, period: str, interval: str) -> pd.DataFrame:
+    return yf.download(nse_symbol, period=period, interval=interval, progress=False, auto_adjust=True)
+
+
 @st.dialog("📊 Chart", width="large")
 def chart_modal(nse_symbol: str, company: str, tf_key: str, extra_levels: dict | None = None):
     cfg           = TF_CONFIG[tf_key]
@@ -419,7 +424,7 @@ def chart_modal(nse_symbol: str, company: str, tf_key: str, extra_levels: dict |
     hcol2.link_button("🔗 TradingView", f"https://www.tradingview.com/chart/?symbol=NSE:{sym}", use_container_width=True)
 
     with st.spinner("Loading chart data..."):
-        df = yf.download(nse_symbol, period=chart_per, interval=interval, progress=False, auto_adjust=True)
+        df = _fetch_chart_data(nse_symbol, chart_per, interval)
 
     if df is None or df.empty:
         st.error("No data available.")
