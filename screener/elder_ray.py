@@ -22,6 +22,7 @@ Advanced features:
 """
 
 import datetime
+import os
 from io import StringIO
 from typing import Optional
 
@@ -35,28 +36,31 @@ _IST       = datetime.timezone(datetime.timedelta(hours=5, minutes=30))
 
 INDEX_CONFIG: dict[str, dict] = {
     "NIFTY": {
-        "yf":          "^NSEI",
-        "kite_spot":   "NSE:NIFTY 50",
-        "exch_opt":    "NFO",
-        "strike_step": 50,
-        "lot":         25,
-        "color":       "#00d4aa",
+        "yf":             "^NSEI",
+        "kite_spot":      "NSE:NIFTY 50",
+        "kite_token":     256265,   # NSE:NIFTY 50 instrument token
+        "exch_opt":       "NFO",
+        "strike_step":    50,
+        "lot":            25,
+        "color":          "#00d4aa",
     },
     "BANKNIFTY": {
-        "yf":          "^NSEBANK",
-        "kite_spot":   "NSE:NIFTY BANK",
-        "exch_opt":    "NFO",
-        "strike_step": 100,
-        "lot":         15,
-        "color":       "#79c0ff",
+        "yf":             "^NSEBANK",
+        "kite_spot":      "NSE:NIFTY BANK",
+        "kite_token":     260105,   # NSE:NIFTY BANK instrument token
+        "exch_opt":       "NFO",
+        "strike_step":    100,
+        "lot":            15,
+        "color":          "#79c0ff",
     },
     "SENSEX": {
-        "yf":          "^BSESN",
-        "kite_spot":   "BSE:SENSEX",
-        "exch_opt":    "BFO",
-        "strike_step": 100,
-        "lot":         10,
-        "color":       "#ffa657",
+        "yf":             "^BSESN",
+        "kite_spot":      "BSE:SENSEX",
+        "kite_token":     265,      # BSE:SENSEX instrument token
+        "exch_opt":       "BFO",
+        "strike_step":    100,
+        "lot":            10,
+        "color":          "#ffa657",
     },
 }
 
@@ -385,35 +389,114 @@ def _mkt_hours_filter(df: pd.DataFrame) -> pd.DataFrame:
     return df.between_time("09:15", "15:35")
 
 
+def _kite_creds() -> tuple[str, str]:
+    """Return (api_key, access_token) from env vars or ~/.kite_creds.json."""
+    import json
+    import pathlib
+    api_key = os.environ.get("KITE_API_KEY", "")
+    token   = os.environ.get("KITE_ACCESS_TOKEN", "")
+    if not (api_key and token):
+        p = pathlib.Path.home() / ".kite_creds.json"
+        if p.exists():
+            try:
+                c = json.loads(p.read_text())
+                api_key = api_key or c.get("api_key", "")
+                token   = token   or c.get("access_token", "")
+            except Exception:
+                pass
+    return api_key, token
+
+
+def _fetch_kite_candles(instrument_token: int, interval: str,
+                        api_key: str, access_token: str) -> pd.DataFrame:
+    """
+    Fetch OHLCV candles from Kite historical API.
+    interval: "15minute", "5minute", "minute"
+    Returns DataFrame with columns [open, high, low, close, volume] indexed by IST datetime.
+    """
+    now_ist   = datetime.datetime.now(_IST)
+    # look back enough candles for EMA/signal computation
+    days_back = {"15minute": 5, "5minute": 3, "minute": 1}.get(interval, 3)
+    from_dt   = (now_ist - datetime.timedelta(days=days_back)).strftime("%Y-%m-%d %H:%M:%S")
+    to_dt     = now_ist.strftime("%Y-%m-%d %H:%M:%S")
+
+    hdrs = {
+        "X-Kite-Version": "3",
+        "Authorization":  f"token {api_key}:{access_token}",
+    }
+    params = {
+        "from":           from_dt,
+        "to":             to_dt,
+        "continuous":     0,
+        "oi":             0,
+    }
+    url = f"{_KITE_BASE}/instruments/historical/{instrument_token}/{interval}"
+    r   = requests.get(url, headers=hdrs, params=params, timeout=20)
+    if not r.ok:
+        raise RuntimeError(f"Kite historical {r.status_code}: {r.text[:200]}")
+
+    candles = r.json().get("data", {}).get("candles", [])
+    if not candles:
+        raise RuntimeError("Empty candles from Kite")
+
+    df = pd.DataFrame(candles, columns=["datetime", "open", "high", "low", "close", "volume"])
+    df["datetime"] = pd.to_datetime(df["datetime"])
+    # Kite returns IST strings — localize correctly
+    if df["datetime"].dt.tz is None:
+        df["datetime"] = df["datetime"].dt.tz_localize("Asia/Kolkata")
+    else:
+        df["datetime"] = df["datetime"].dt.tz_convert("Asia/Kolkata")
+    df = df.set_index("datetime").sort_index()
+    df.columns = [c.capitalize() for c in df.columns]  # Open/High/Low/Close/Volume
+    return df.between_time("09:15", "15:35")
+
+
 def fetch_elder_ray_data(symbol: str) -> dict:
     """
     Download 15m, 5m, 1m OHLCV for the given index and compute Elder Ray.
+    Uses Kite API when KITE_API_KEY + KITE_ACCESS_TOKEN are set, else yfinance.
     Returns {"df_15m", "df_5m", "df_1m", "symbol", "error"}.
     """
     cfg    = INDEX_CONFIG.get(symbol, INDEX_CONFIG["NIFTY"])
     yf_sym = cfg["yf"]
 
+    api_key, access_token = _kite_creds()
+    use_kite = bool(api_key and access_token)
+    token_id = cfg.get("kite_token")
+
+    if use_kite:
+        print(f"  [{symbol}] Using Kite live data")
+    else:
+        print(f"  [{symbol}] Kite creds not set — falling back to yfinance")
+
     dfs: dict[str, pd.DataFrame] = {}
     errs: list[str] = []
 
-    for key, period, interval in [
-        ("df_15m", "5d",  "15m"),
-        ("df_5m",  "2d",  "5m"),
-        ("df_1m",  "1d",  "1m"),
-    ]:
+    kite_interval_map = {
+        "df_15m": ("15m",  "15minute"),
+        "df_5m":  ("5m",   "5minute"),
+        "df_1m":  ("1m",   "minute"),
+    }
+
+    for key, (yf_int, kite_int) in kite_interval_map.items():
+        yf_period = {"15m": "5d", "5m": "2d", "1m": "1d"}[yf_int]
         try:
-            raw = yf.download(yf_sym, period=period, interval=interval,
-                              auto_adjust=True, progress=False)
-            if isinstance(raw.columns, pd.MultiIndex):
-                raw.columns = raw.columns.get_level_values(0)
-            raw = _mkt_hours_filter(raw)
+            if use_kite and token_id:
+                raw = _fetch_kite_candles(token_id, kite_int, api_key, access_token)
+            else:
+                raw = yf.download(yf_sym, period=yf_period, interval=yf_int,
+                                  auto_adjust=True, progress=False)
+                if isinstance(raw.columns, pd.MultiIndex):
+                    raw.columns = raw.columns.get_level_values(0)
+                raw = _mkt_hours_filter(raw)
+
             if raw.empty:
-                errs.append(f"No {interval} data")
+                errs.append(f"No {yf_int} data")
                 dfs[key] = pd.DataFrame()
             else:
                 dfs[key] = compute_elder_ray(raw)
         except Exception as e:
-            errs.append(f"{interval}: {e}")
+            errs.append(f"{yf_int}: {e}")
             dfs[key] = pd.DataFrame()
 
     return {**dfs, "symbol": symbol, "error": "; ".join(errs) if errs else None}
