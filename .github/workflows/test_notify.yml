@@ -1,7 +1,7 @@
 name: Test Notification
 
 on:
-  workflow_dispatch:   # run manually from Actions tab anytime
+  workflow_dispatch:
 
 jobs:
   test:
@@ -9,27 +9,32 @@ jobs:
     steps:
       - name: Send test push to ntfy.sh
         run: |
+          cat > /tmp/msg.txt << 'EOF'
+          🚀 ELDER RAY SIGNAL — NIFTY
+          🕐 10:32:15 IST
+
+          Signal : STRONG BUY CE
+          Type   : 🟢 BUY CALL (CE)
+          Spot   : Rs.24,850   ATM: 24850
+          Score  : CE 9 | PE 2
+
+          Option to buy: NIFTY 24850 CE (nearest expiry)
+
+          Why:
+            Bull Power 15m: +0.42 - EMA rising
+            VWAP Bias: price above VWAP - bullish
+            RSI Zone: RSI 62 - bullish momentum
+
+          Verify before executing. Not financial advice.
+
+          --- THIS IS A TEST MESSAGE ---
+          EOF
+
           curl -s \
-            -H "Title: 🚀 Elder Ray Bot — Sample Signal" \
+            -H "Title: Elder Ray Bot - STRONG BUY CE - NIFTY" \
             -H "Priority: high" \
             -H "Tags: chart_increasing" \
-            -d "🚀 ELDER RAY SIGNAL — NIFTY
-🕐 10:32:15 IST
-
-Signal : STRONG BUY CE
-Type   : 🟢 BUY CALL (CE)
-Spot   : ₹24,850   ATM: 24850
-Score  : CE 9 | PE 2
-
-📌 Option to buy: NIFTY 24850 CE (nearest expiry)
-
-Why:
-  • Bull Power 15m: +0.42 — EMA rising
-  • VWAP Bias: price above VWAP — bullish
-  • RSI Zone: RSI 62 — bullish momentum
-
-⚠️ Verify before executing. Not financial advice.
-
---- THIS IS A TEST MESSAGE ---" \
+            --data-binary @/tmp/msg.txt \
             https://ntfy.sh/subba-nifty-alt-1987
-          echo "Done — check your phone"
+
+          echo "Sent — check your phone"
