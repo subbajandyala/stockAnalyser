@@ -43,7 +43,7 @@ jobs:
           NTFY_TOPIC: subba-nifty-alt-1987
         run: |
           python scripts/elder_ray_bot.py \
-            NIFTY BANKNIFTY SENSEX FINNIFTY \
+            NIFTY BANKNIFTY SENSEX \
             --once \
             --state-file /tmp/er_state.json
 
