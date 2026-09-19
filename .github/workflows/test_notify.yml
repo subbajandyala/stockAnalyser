@@ -1,0 +1,18 @@
+name: Test Notification
+
+on:
+  workflow_dispatch:   # run manually from Actions tab anytime
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Send test push to ntfy.sh
+        run: |
+          curl -s \
+            -H "Title: Elder Ray Bot — Test ✅" \
+            -H "Priority: high" \
+            -H "Tags: white_check_mark" \
+            -d "Your notification setup is working! You will receive Elder Ray signals here during market hours (09:15–15:30 IST)." \
+            https://ntfy.sh/subba-nifty-alt-1987
+          echo "Done — check your phone"
