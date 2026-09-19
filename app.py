@@ -7816,38 +7816,38 @@ def page_oi_history():
         _pe_summ = _summ[_summ["Type"] == "PE"].sort_values("Strike")
 
         _fig = go.Figure()
+        _all_strikes_str = _ce_summ["Strike"].astype(str).tolist()
         _fig.add_trace(go.Bar(
             name="CE OI Change",
-            x=_ce_summ["Strike"].astype(str),
+            x=_all_strikes_str,
             y=_ce_summ["OI Change"],
             marker_color=[("#f85149" if v > 0 else "#00d4aa") for v in _ce_summ["OI Change"]],
-            text=[f"{v/1000:.0f}K" for v in _ce_summ["OI Change"]],
-            textposition="outside",
+            text=[f"{int(v/1000)}K" for v in _ce_summ["OI Change"]],
+            textposition="auto",
         ))
         _fig.add_trace(go.Bar(
             name="PE OI Change",
-            x=_pe_summ["Strike"].astype(str),
+            x=_pe_summ["Strike"].astype(str).tolist(),
             y=_pe_summ["OI Change"],
             marker_color=[("#00d4aa" if v > 0 else "#ffa657") for v in _pe_summ["OI Change"]],
-            text=[f"{v/1000:.0f}K" for v in _pe_summ["OI Change"]],
-            textposition="outside",
+            text=[f"{int(v/1000)}K" for v in _pe_summ["OI Change"]],
+            textposition="auto",
             visible="legendonly",
         ))
-        # ATM line — use add_shape/add_annotation (add_vline fails on categorical x-axis)
+        # ATM marker — scatter point + annotation (add_vline/add_shape fail on categorical x)
         _atm_str = str(int(_atm))
-        _fig.add_shape(
-            type="line", xref="x", yref="paper",
-            x0=_atm_str, x1=_atm_str, y0=0, y1=1,
-            line=dict(dash="dot", color="#58a6ff", width=2),
-        )
-        _fig.add_annotation(
-            x=_atm_str, y=1.04, xref="x", yref="paper",
-            text=f"ATM {int(_atm)}", showarrow=False,
-            font=dict(color="#58a6ff", size=11),
-        )
+        if _atm_str in _all_strikes_str:
+            _fig.add_trace(go.Scatter(
+                x=[_atm_str], y=[0],
+                mode="markers+text",
+                marker=dict(color="#58a6ff", size=10, symbol="line-ns", line_width=2, line_color="#58a6ff"),
+                text=[f"ATM {int(_atm)}"], textposition="top center",
+                textfont=dict(color="#58a6ff", size=11),
+                showlegend=False, hoverinfo="skip",
+            ))
         _fig.update_layout(
             template="plotly_dark", paper_bgcolor="#131722", plot_bgcolor="#1a1e2a",
-            barmode="overlay", height=460,
+            barmode="group", height=460,
             title=dict(text=f"{_oih_sym} CE/PE OI Change — {_from_dt} to {_to_dt}", font_color="#e6edf3"),
             xaxis=dict(title="Strike", tickangle=-45, gridcolor="#2a2e39"),
             yaxis=dict(title="OI Change (contracts)", gridcolor="#2a2e39"),
@@ -7871,49 +7871,50 @@ def page_oi_history():
 
     # ── Tab 2: OI Heatmap over time ───────────────────────────────────────────
     with _t2:
+        import plotly.express as _px
         _ht_type = st.radio("Show OI for", ["CE", "PE"], horizontal=True, key="oih_ht_type")
         _daily_filt = _daily[_daily["type"] == _ht_type].copy()
 
         if not _daily_filt.empty:
-            _heat_pivot = _daily_filt.pivot_table(index="strike", columns="date", values="oi", aggfunc="last").fillna(0)
-            # Rename columns safely — columns are Timestamps after pivot
+            # Build pivot: rows=Strike (ascending, lowest at bottom), cols=date label
+            _heat_pivot = (
+                _daily_filt
+                .pivot_table(index="strike", columns="date", values="oi", aggfunc="last")
+                .fillna(0)
+            )
+            # Safe column rename using pd.Timestamp
             _heat_pivot.columns = [pd.Timestamp(d).strftime("%d %b") for d in _heat_pivot.columns]
-            _heat_pivot = _heat_pivot.sort_index(ascending=False)  # highest strike at top
-            _hy_labels = [str(int(s)) for s in _heat_pivot.index]
+            _heat_pivot.index   = _heat_pivot.index.astype(int)
+            _heat_pivot = _heat_pivot.sort_index(ascending=True)  # lowest strike at bottom
 
-            _fig2 = go.Figure(go.Heatmap(
-                z=_heat_pivot.values,
-                x=_heat_pivot.columns.tolist(),
-                y=_hy_labels,
-                colorscale="RdYlGn" if _ht_type == "PE" else "RdYlGn_r",
-                text=[[f"{int(v/1000)}K" for v in row] for row in _heat_pivot.values],
-                texttemplate="%{text}",
-                showscale=True,
-                hovertemplate="Date: %{x}<br>Strike: %{y}<br>OI: %{z:,}<extra></extra>",
-            ))
-            # ATM marker — add_hline fails on categorical y; use add_shape instead
-            _atm_y = str(int(_atm))
-            if _atm_y in _hy_labels:
-                _fig2.add_shape(
-                    type="line", xref="paper", yref="y",
-                    x0=0, x1=1, y0=_atm_y, y1=_atm_y,
-                    line=dict(dash="dot", color="#58a6ff", width=2),
-                )
-                _fig2.add_annotation(
-                    x=1.01, y=_atm_y, xref="paper", yref="y",
-                    text=f"ATM", showarrow=False,
-                    font=dict(color="#58a6ff", size=10),
-                )
+            # px.imshow handles DataFrame directly — no categorical axis issues
+            _cscale = "RdYlGn" if _ht_type == "PE" else "RdYlGn_r"
+            _fig2 = _px.imshow(
+                _heat_pivot,
+                aspect="auto",
+                color_continuous_scale=_cscale,
+                labels=dict(x="Date", y="Strike", color="OI"),
+                title=f"{_oih_sym} {_ht_type} OI by Strike & Date",
+            )
+            _fig2.update_traces(
+                hovertemplate="Date: %{x}<br>Strike: %{y}<br>OI: %{z:,.0f}<extra></extra>",
+            )
+            # ATM horizontal line using add_hline on numeric y-axis (px.imshow uses numeric)
+            _fig2.add_hline(
+                y=int(_atm), line_dash="dot", line_color="#58a6ff",
+                annotation_text=f"ATM {int(_atm)}", annotation_position="right",
+            )
             _fig2.update_layout(
                 template="plotly_dark", paper_bgcolor="#131722", plot_bgcolor="#1a1e2a",
                 height=600,
-                title=dict(text=f"{_oih_sym} {_ht_type} OI Heatmap by Strike & Date", font_color="#e6edf3"),
-                xaxis=dict(title="Date", gridcolor="#2a2e39"),
-                yaxis=dict(title="Strike", gridcolor="#2a2e39"),
-                margin=dict(t=50, b=60, l=80, r=20),
+                title=dict(font_color="#e6edf3"),
+                xaxis=dict(title="Date", tickangle=-45),
+                yaxis=dict(title="Strike"),
+                coloraxis_colorbar=dict(title="OI"),
+                margin=dict(t=50, b=80, l=70, r=20),
             )
             st.plotly_chart(_fig2, use_container_width=True)
-            st.caption("Green = high OI (for PE = support wall, for CE = resistance wall). OI build-up over dates shows institutional accumulation.")
+            st.caption("Green = high OI buildup (PE = support wall; CE = resistance wall). Track how OI grew at each strike over the period.")
         else:
             st.info("No data available for heatmap.")
 
