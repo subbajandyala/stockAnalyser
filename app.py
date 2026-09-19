@@ -68,6 +68,11 @@ from screener.expiry_drama import (
     get_today_expiry_instruments as _ed_today_expiries,
     ALL_INSTRUMENTS as _ED_ALL_INSTRUMENTS,
 )
+from screener.nse_smartmoney import (
+    run_fii_compass          as _run_fii_compass,
+    run_smart_money_options  as _run_smart_money,
+    run_promoter_pulse       as _run_promoter_pulse,
+)
 from plotly.subplots import make_subplots
 
 try:
@@ -586,6 +591,9 @@ _NAV = [
     ("open_low",         "🚀 Open=Low"),
     ("agent_flow",       "🤖 Agent Flow"),
     ("expiry_drama",     "🎭 Expiry Drama"),
+    ("fii_compass",      "🌊 FII Compass"),
+    ("smart_money",      "🧠 Smart Money"),
+    ("promoter_pulse",   "💰 Promoter Pulse"),
 ]
 _NAV_KEYS   = [k for k, _ in _NAV]
 _NAV_LABELS = {k: lbl for k, lbl in _NAV}
@@ -7659,6 +7667,431 @@ Actual results depend on when you enter/exit — earlier in the day gives more r
         unsafe_allow_html=True)
 
 
+def _sm_kite_check(label: str):
+    """Return (api_key, access_token) or render warning and return (None, None)."""
+    k = st.session_state.get("kite_api_key",      _get_secret("KITE_API_KEY", ""))
+    t = st.session_state.get("kite_access_token", "")
+    if not (k and t):
+        st.warning(f"⚡ Connect Zerodha Kite to enable {label}. Live Kite data is required.")
+        return None, None
+    return k, t
+
+
+def _sm_autorefresh(key: str):
+    tick = 0
+    if _HAS_AUTOREFRESH:
+        tick = _st_autorefresh(interval=30_000, key=key)
+    prev = st.session_state.get(f"{key}_prev", -1)
+    fired = tick != prev
+    st.session_state[f"{key}_prev"] = tick
+    return fired
+
+
+def _sm_badge():
+    return (
+        '<span style="display:inline-block;background:rgba(0,212,170,.15);'
+        'color:#00d4aa;border:1px solid rgba(0,212,170,.4);'
+        'font-size:0.65rem;font-weight:700;padding:6px 10px;border-radius:6px;">'
+        '⟳ AUTO 30s</span>'
+    ) if _HAS_AUTOREFRESH else '<span style="color:#6e7681;font-size:0.72rem;">No autorefresh</span>'
+
+
+def _metric_box(label: str, value: str, color: str = "#e6edf3") -> str:
+    return (
+        f'<div style="background:#0d1117;border:1px solid #21262d;'
+        f'border-radius:8px;padding:10px 12px;">'
+        f'<div style="font-size:0.58rem;color:#6e7681;text-transform:uppercase;'
+        f'font-weight:700;letter-spacing:1px;">{label}</div>'
+        f'<div style="font-size:1rem;font-weight:700;color:{color};margin-top:3px;">{value}</div>'
+        f'</div>'
+    )
+
+
+def _bias_color(bias: str) -> str:
+    return {"Bullish": "#00d4aa", "Bearish": "#f85149"}.get(bias, "#8b949e")
+
+
+# ── Screen: FII Compass ───────────────────────────────────────────────────────
+
+def page_fii_compass():
+    k, t = _sm_kite_check("FII Compass")
+    if not k:
+        return
+
+    st.markdown("""
+<div style="margin-bottom:6px;">
+  <div style="font-size:1.25rem;font-weight:900;color:#fff;letter-spacing:-0.5px;">🌊 FII Compass</div>
+  <div style="font-size:0.78rem;color:#6e7681;margin-top:2px;">
+    FII/DII flow trend · NIFTY & BANKNIFTY live option chains via Kite</div>
+</div>""", unsafe_allow_html=True)
+
+    _fired = _sm_autorefresh("fc_ar")
+    _c1, _c2, _c3 = st.columns([2, 1.2, 1.8])
+    with _c1:
+        _fc_run = st.button("🔄 Refresh", key="fc_run", use_container_width=True)
+    with _c3:
+        st.markdown(_sm_badge(), unsafe_allow_html=True)
+
+    if _fc_run or _fired or st.session_state.get("fc_res") is None:
+        with st.spinner("Fetching FII flows + option chains…"):
+            try:
+                st.session_state["fc_res"] = _run_fii_compass(k, t)
+                st.session_state["fc_ts"]  = datetime.datetime.now(
+                    datetime.timezone(datetime.timedelta(hours=5, minutes=30))
+                ).strftime("%I:%M:%S %p IST")
+            except Exception as _e:
+                st.error(f"Error: {_e}")
+                return
+
+    res = st.session_state.get("fc_res")
+    if not res:
+        return
+    if st.session_state.get("fc_ts"):
+        st.caption(f"Updated {st.session_state['fc_ts']}")
+
+    fii_5d   = res.get("fii_5d",    0.0)
+    fii_10d  = res.get("fii_10d",   0.0)
+    dii_5d   = res.get("dii_5d",    0.0)
+    fii_sig  = res.get("fii_signal", "—")
+    combined = res.get("combined",   "—")
+    action   = res.get("action",     "—")
+    fii_bias = res.get("fii_bias",   "Neutral")
+    fii_err  = res.get("fii_error")
+    fii_df   = res.get("fii_df",  pd.DataFrame())
+
+    _fc  = _bias_color(fii_bias)
+    _pos = fii_5d >= 0
+
+    # ── FII signal banner ─────────────────────────────────────────────────────
+    st.markdown(f"""
+<div style="background:#1a1e2a;border:1px solid #2a2e39;border-radius:12px;
+            padding:14px 18px;margin-bottom:14px;">
+  <div style="font-size:1.1rem;font-weight:900;color:{_fc};margin-bottom:10px;">
+    {fii_sig}</div>
+  <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:10px;">
+    {_metric_box("FII Net 5-Day", f"₹{fii_5d:+,.0f} Cr", "#00d4aa" if _pos else "#f85149")}
+    {_metric_box("FII Net 10-Day", f"₹{fii_10d:+,.0f} Cr", "#00d4aa" if fii_10d >= 0 else "#f85149")}
+    {_metric_box("DII Net 5-Day", f"₹{dii_5d:+,.0f} Cr", "#00d4aa" if dii_5d >= 0 else "#f85149")}
+  </div>
+</div>""", unsafe_allow_html=True)
+
+    if fii_err:
+        st.warning(f"⚠️ NSE FII data unavailable ({fii_err}). Kite option chain still live.")
+
+    # ── Combined signal ───────────────────────────────────────────────────────
+    _act_col = "#00d4aa" if "BULL" in action.upper() or "CE" in action.upper() else \
+               "#f85149" if "BEAR" in action.upper() or "PE" in action.upper() else "#8b949e"
+    st.markdown(f"""
+<div style="background:rgba(0,212,170,.06);border:1px solid rgba(0,212,170,.2);
+            border-radius:10px;padding:12px 16px;margin-bottom:14px;">
+  <div style="font-size:0.62rem;color:#6e7681;font-weight:700;
+              text-transform:uppercase;letter-spacing:1px;margin-bottom:4px;">Combined Signal</div>
+  <div style="font-size:0.95rem;font-weight:800;color:#e6edf3;">{combined}</div>
+  <div style="font-size:1.1rem;font-weight:900;color:{_act_col};margin-top:6px;">
+    ▶ {action}</div>
+</div>""", unsafe_allow_html=True)
+
+    # ── Index cards ───────────────────────────────────────────────────────────
+    idx_data = res.get("index_data", {})
+    cols = st.columns(2)
+    for col, idx_name in zip(cols, ["NIFTY", "BANKNIFTY"]):
+        d = idx_data.get(idx_name, {})
+        with col:
+            if "error" in d:
+                st.error(f"{idx_name}: {d['error']}")
+                continue
+            _bc  = _bias_color(d.get("bias", "Neutral"))
+            _gap = d.get("gap", 0)
+            _dc  = "#00d4aa" if _gap >= 0 else "#f85149"
+            st.markdown(f"""
+<div style="background:#1a1e2a;border:1px solid #2a2e39;border-radius:10px;
+            padding:14px 16px;">
+  <div style="font-size:0.9rem;font-weight:900;color:#e6edf3;margin-bottom:10px;">
+    {idx_name}
+    <span style="font-size:0.65rem;font-weight:700;padding:2px 8px;border-radius:10px;
+                 background:{_bc}22;color:{_bc};border:1px solid {_bc}55;margin-left:6px;">
+      {d.get("bias","—")}
+    </span>
+  </div>
+  <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;">
+    {_metric_box("Spot",      f"₹{d.get('spot',0):,.2f}")}
+    {_metric_box("PCR",       str(d.get("pcr",0)), _bc)}
+    {_metric_box("Max Pain",  f"₹{d.get('max_pain',0):,.0f}", "#e3b341")}
+    {_metric_box("Gap",       f"{'▲' if _gap>=0 else '▼'} {abs(_gap):.0f} pts", _dc)}
+    {_metric_box("ATM CE",    f"₹{d.get('atm_ce',0):.2f}", "#00d4aa")}
+    {_metric_box("ATM PE",    f"₹{d.get('atm_pe',0):.2f}", "#f85149")}
+    {_metric_box("CE Wall",   f"₹{d.get('ce_wall',0):,.0f}", "#f85149")}
+    {_metric_box("PE Wall",   f"₹{d.get('pe_wall',0):,.0f}", "#00d4aa")}
+  </div>
+  <div style="margin-top:8px;font-size:0.65rem;color:#6e7681;">
+    Expiry: {d.get("expiry","—")}</div>
+</div>""", unsafe_allow_html=True)
+
+    # ── FII flow table ────────────────────────────────────────────────────────
+    if not fii_df.empty:
+        st.markdown('<div style="margin-top:16px;font-size:0.78rem;font-weight:700;'
+                    'color:#8b949e;margin-bottom:6px;">FII/DII Daily Flow (₹ Cr)</div>',
+                    unsafe_allow_html=True)
+        _disp = fii_df.copy()
+        for c in ["FII Net", "DII Net"]:
+            if c in _disp.columns:
+                _disp[c] = _disp[c].map(lambda x: f"+{x:,.0f}" if x >= 0 else f"{x:,.0f}")
+        st.dataframe(_disp, use_container_width=True, hide_index=True)
+
+    st.markdown(
+        '<div style="margin-top:10px;font-size:0.7rem;color:#484f58;padding:8px 10px;'
+        'border:1px solid #2a2e39;border-radius:6px;">⚠️ Not investment advice. '
+        'FII flows are lagged; NSE data may not be available on cloud.</div>',
+        unsafe_allow_html=True)
+
+
+# ── Screen: Smart Money Options ───────────────────────────────────────────────
+
+def page_smart_money_options():
+    k, t = _sm_kite_check("Smart Money Options")
+    if not k:
+        return
+
+    st.markdown("""
+<div style="margin-bottom:6px;">
+  <div style="font-size:1.25rem;font-weight:900;color:#fff;letter-spacing:-0.5px;">🧠 Smart Money Options</div>
+  <div style="font-size:0.78rem;color:#6e7681;margin-top:2px;">
+    SEBI insider buys + bulk deals → F&O stock option plays via Kite</div>
+</div>""", unsafe_allow_html=True)
+
+    _fired = _sm_autorefresh("sm_ar")
+    _c1, _c2, _c3, _c4 = st.columns([1.5, 1, 1, 1.5])
+    with _c1:
+        _sm_days = st.selectbox("Insider window", [7, 14, 30],
+                                format_func=lambda x: f"Last {x} days",
+                                key="sm_days", label_visibility="collapsed")
+    with _c2:
+        _sm_run = st.button("🔄 Refresh", key="sm_run", use_container_width=True)
+    with _c4:
+        st.markdown(_sm_badge(), unsafe_allow_html=True)
+
+    _cache = f"sm_res_{_sm_days}"
+    if _sm_run or _fired or st.session_state.get(_cache) is None:
+        with st.spinner("Fetching insider trades + F&O option chains…"):
+            try:
+                st.session_state[_cache]  = _run_smart_money(k, t, days=_sm_days)
+                st.session_state["sm_ts"] = datetime.datetime.now(
+                    datetime.timezone(datetime.timedelta(hours=5, minutes=30))
+                ).strftime("%I:%M:%S %p IST")
+            except Exception as _e:
+                st.error(f"Error: {_e}")
+                return
+
+    res = st.session_state.get(_cache)
+    if not res:
+        return
+    if st.session_state.get("sm_ts"):
+        st.caption(f"Updated {st.session_state['sm_ts']}")
+
+    ins_err  = res.get("insider_error")
+    results  = res.get("results", [])
+    fo_ins   = res.get("fo_insider", pd.DataFrame())
+    bulk_sym = res.get("bulk_buy_syms", set())
+
+    if ins_err:
+        st.warning(f"⚠️ NSE insider data unavailable ({ins_err}). Showing Kite option data only.")
+
+    if not results:
+        st.info("No insider buys found in F&O stocks for this window. "
+                "NSE data may be blocked on cloud — try connecting via a local network.")
+        return
+
+    # Summary chips
+    n_bull = sum(1 for r in results if r["signal"] == "BUY CE")
+    n_bear = sum(1 for r in results if r["signal"] == "BUY PE")
+    st.markdown(
+        f'<div style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:12px;">'
+        f'<span style="background:rgba(0,212,170,.1);border:1px solid rgba(0,212,170,.3);'
+        f'color:#00d4aa;font-size:0.72rem;font-weight:700;padding:3px 10px;border-radius:20px;">'
+        f'🧠 {len(results)} setups</span>'
+        + (f'<span style="background:rgba(0,212,170,.1);border:1px solid rgba(0,212,170,.3);'
+           f'color:#00d4aa;font-size:0.72rem;font-weight:700;padding:3px 10px;border-radius:20px;">'
+           f'📈 {n_bull} BUY CE</span>' if n_bull else "")
+        + (f'<span style="background:rgba(248,81,73,.1);border:1px solid rgba(248,81,73,.3);'
+           f'color:#f85149;font-size:0.72rem;font-weight:700;padding:3px 10px;border-radius:20px;">'
+           f'📉 {n_bear} BUY PE</span>' if n_bear else "")
+        + '</div>',
+        unsafe_allow_html=True)
+
+    # Result cards
+    for r in results:
+        m     = r["metrics"]
+        _bc   = _bias_color(m.get("bias", "Neutral"))
+        _sig  = r["signal"]
+        _sc   = r.get("score", 0)
+        _bul  = "🔰" if r.get("in_bulk") else ""
+        st.markdown(f"""
+<div style="background:#1a1e2a;border:1px solid #2a2e39;border-radius:10px;
+            padding:14px 16px;margin-bottom:10px;">
+  <div style="display:flex;align-items:center;justify-content:space-between;
+              flex-wrap:wrap;gap:8px;margin-bottom:10px;">
+    <div>
+      <span style="font-size:1rem;font-weight:900;color:#e6edf3;">{r['symbol']}</span>
+      <span style="font-size:0.72rem;color:#6e7681;margin-left:8px;">{r['company'][:35]}</span>
+      {f'<span style="font-size:0.62rem;background:rgba(121,192,255,.15);color:#79c0ff;'
+       f'border:1px solid rgba(121,192,255,.3);padding:2px 7px;border-radius:10px;margin-left:6px;">'
+       f'{_bul} Bulk Deal</span>' if r.get("in_bulk") else ""}
+    </div>
+    <div style="display:flex;align-items:center;gap:8px;">
+      <span style="background:{_bc}22;color:{_bc};border:1px solid {_bc}55;
+                   font-size:0.72rem;font-weight:800;padding:4px 10px;border-radius:8px;">
+        ▶ {_sig}</span>
+      <span style="background:#21262d;color:#8b949e;font-size:0.65rem;
+                   padding:4px 8px;border-radius:6px;">Score {_sc}</span>
+    </div>
+  </div>
+  <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(110px,1fr));gap:8px;">
+    {_metric_box("Insider Txns",  str(r.get("transactions",0)))}
+    {_metric_box("Shares Bought", f"{r.get('total_shares',0):,}")}
+    {_metric_box("Category",      r.get("category","—")[:20], "#79c0ff")}
+    {_metric_box("Spot",          f"₹{r.get('spot',0):,.2f}")}
+    {_metric_box("PCR",           str(m.get("pcr",0)), _bc)}
+    {_metric_box("ATM CE",        f"₹{m.get('atm_ce',0):.2f}", "#00d4aa")}
+    {_metric_box("ATM PE",        f"₹{m.get('atm_pe',0):.2f}", "#f85149")}
+    {_metric_box("Max Pain",      f"₹{m.get('max_pain',0):,.0f}", "#e3b341")}
+  </div>
+  <div style="margin-top:6px;font-size:0.62rem;color:#6e7681;">
+    Expiry: {m.get("expiry","—")} · CE Wall: ₹{m.get("ce_wall",0):,.0f} · PE Wall: ₹{m.get("pe_wall",0):,.0f}</div>
+</div>""", unsafe_allow_html=True)
+
+    st.markdown(
+        '<div style="margin-top:6px;font-size:0.7rem;color:#484f58;padding:8px 10px;'
+        'border:1px solid #2a2e39;border-radius:6px;">⚠️ Insider disclosures are lagged by '
+        '1-2 days. Not investment advice. Always use stop losses.</div>',
+        unsafe_allow_html=True)
+
+
+# ── Screen: Promoter Pulse ────────────────────────────────────────────────────
+
+def page_promoter_pulse():
+    k, t = _sm_kite_check("Promoter Pulse")
+    if not k:
+        return
+
+    st.markdown("""
+<div style="margin-bottom:6px;">
+  <div style="font-size:1.25rem;font-weight:900;color:#fff;letter-spacing:-0.5px;">💰 Promoter Pulse</div>
+  <div style="font-size:0.78rem;color:#6e7681;margin-top:2px;">
+    Promoter accumulation (30-day) + bulk deal cross-reference → F&O options via Kite</div>
+</div>""", unsafe_allow_html=True)
+
+    _fired = _sm_autorefresh("pp_ar")
+    _c1, _c2, _c3 = st.columns([2, 1.2, 1.8])
+    with _c1:
+        _pp_run = st.button("🔄 Refresh", key="pp_run", use_container_width=True)
+    with _c3:
+        st.markdown(_sm_badge(), unsafe_allow_html=True)
+
+    if _pp_run or _fired or st.session_state.get("pp_res") is None:
+        with st.spinner("Fetching promoter trades + F&O option chains…"):
+            try:
+                st.session_state["pp_res"] = _run_promoter_pulse(k, t, days=30)
+                st.session_state["pp_ts"]  = datetime.datetime.now(
+                    datetime.timezone(datetime.timedelta(hours=5, minutes=30))
+                ).strftime("%I:%M:%S %p IST")
+            except Exception as _e:
+                st.error(f"Error: {_e}")
+                return
+
+    res = st.session_state.get("pp_res")
+    if not res:
+        return
+    if st.session_state.get("pp_ts"):
+        st.caption(f"Updated {st.session_state['pp_ts']}")
+
+    ins_err  = res.get("insider_error")
+    results  = res.get("results", [])
+    scored   = res.get("scored",  [])
+    bulk_sym = res.get("bulk_buy_syms", set())
+
+    if ins_err:
+        st.warning(f"⚠️ NSE data unavailable ({ins_err}). Kite option chains are still live.")
+
+    if not results:
+        st.info("No promoter buys found in F&O stocks (30 days). "
+                "NSE data may be blocked — try local network or check back during market hours.")
+        return
+
+    n3 = sum(1 for r in results if r.get("conviction") == "⭐⭐⭐")
+    n2 = sum(1 for r in results if r.get("conviction") == "⭐⭐")
+    st.markdown(
+        f'<div style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:12px;">'
+        f'<span style="background:rgba(0,212,170,.1);border:1px solid rgba(0,212,170,.3);'
+        f'color:#00d4aa;font-size:0.72rem;font-weight:700;padding:3px 10px;border-radius:20px;">'
+        f'💰 {len(results)} promoter stocks</span>'
+        + (f'<span style="background:rgba(227,179,65,.15);border:1px solid rgba(227,179,65,.3);'
+           f'color:#e3b341;font-size:0.72rem;font-weight:700;padding:3px 10px;border-radius:20px;">'
+           f'⭐⭐⭐ {n3} triple confirmed</span>' if n3 else "")
+        + (f'<span style="background:rgba(121,192,255,.1);border:1px solid rgba(121,192,255,.3);'
+           f'color:#79c0ff;font-size:0.72rem;font-weight:700;padding:3px 10px;border-radius:20px;">'
+           f'⭐⭐ {n2} double confirmed</span>' if n2 else "")
+        + '</div>',
+        unsafe_allow_html=True)
+
+    for r in results:
+        m     = r["metrics"]
+        _bc   = _bias_color(m.get("bias", "Neutral"))
+        _sig  = r.get("signal", "WATCH")
+        _conv = r.get("conviction", "⭐")
+        _conv_col = "#e3b341" if _conv == "⭐⭐⭐" else "#79c0ff" if _conv == "⭐⭐" else "#8b949e"
+        st.markdown(f"""
+<div style="background:#1a1e2a;border:1px solid #2a2e39;border-radius:10px;
+            padding:14px 16px;margin-bottom:10px;">
+  <div style="display:flex;align-items:center;justify-content:space-between;
+              flex-wrap:wrap;gap:8px;margin-bottom:10px;">
+    <div>
+      <span style="font-size:1rem;font-weight:900;color:#e6edf3;">{r['symbol']}</span>
+      <span style="font-size:0.72rem;color:#6e7681;margin-left:8px;">{r['company'][:35]}</span>
+    </div>
+    <div style="display:flex;align-items:center;gap:8px;">
+      <span style="color:{_conv_col};font-size:0.85rem;">{_conv}</span>
+      <span style="background:{_bc}22;color:{_bc};border:1px solid {_bc}55;
+                   font-size:0.72rem;font-weight:800;padding:4px 10px;border-radius:8px;">
+        ▶ {_sig}</span>
+    </div>
+  </div>
+  <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(110px,1fr));gap:8px;">
+    {_metric_box("Promoter Txns", str(r.get("txns",0)))}
+    {_metric_box("Shares Accum.", f"{r.get('total_shares',0):,}")}
+    {_metric_box("% Gained",      f"+{r.get('pct_gain',0):.3f}%", "#00d4aa")}
+    {_metric_box("Bulk Deal",     "✅ Yes" if r.get("in_bulk") else "—",
+                 "#00d4aa" if r.get("in_bulk") else "#6e7681")}
+    {_metric_box("Spot",          f"₹{r.get('spot',0):,.2f}")}
+    {_metric_box("PCR",           str(m.get("pcr",0)), _bc)}
+    {_metric_box("ATM CE",        f"₹{m.get('atm_ce',0):.2f}", "#00d4aa")}
+    {_metric_box("ATM PE",        f"₹{m.get('atm_pe',0):.2f}", "#f85149")}
+    {_metric_box("Max Pain",      f"₹{m.get('max_pain',0):,.0f}", "#e3b341")}
+    {_metric_box("CE Wall",       f"₹{m.get('ce_wall',0):,.0f}", "#f85149")}
+  </div>
+  <div style="margin-top:6px;font-size:0.62rem;color:#6e7681;">
+    Expiry: {m.get("expiry","—")} · Last buy: {r.get("latest_date","—")}</div>
+</div>""", unsafe_allow_html=True)
+
+    with st.expander("📖 How Promoter Pulse works"):
+        st.markdown("""
+**Triple Confirmation (⭐⭐⭐)** = Promoter buying + Bulk institutional deal + Option chain PCR bullish
+**Double Confirmation (⭐⭐)** = Any two of the above
+**Single (⭐)** = Promoter buying only
+
+**Why it matters:** Promoters know their company better than anyone.
+When they accumulate + institutions bulk-buy + options show bullish PCR, it's the highest-conviction setup.
+
+**Typical play:** ATM CE on the expiry 1-2 weeks away.
+Entry: near ATM · Stop loss: 30-40% of premium · Target: 2x-3x
+""")
+
+    st.markdown(
+        '<div style="margin-top:6px;font-size:0.7rem;color:#484f58;padding:8px 10px;'
+        'border:1px solid #2a2e39;border-radius:6px;">⚠️ Promoter disclosures are quarterly/delayed. '
+        'Not investment advice. Always use stop losses.</div>',
+        unsafe_allow_html=True)
+
+
 # ── Page routing (URL-driven via ?page=) ──────────────────────────────────────
 {
     "smart_alerts_pro": page_smart_alerts_pro,
@@ -7670,4 +8103,7 @@ Actual results depend on when you enter/exit — earlier in the day gives more r
     "open_low":         page_open_low,
     "agent_flow":       page_agent_flow,
     "expiry_drama":     page_expiry_drama,
+    "fii_compass":      page_fii_compass,
+    "smart_money":      page_smart_money_options,
+    "promoter_pulse":   page_promoter_pulse,
 }.get(_cur_page, page_smart_alerts_pro)()
