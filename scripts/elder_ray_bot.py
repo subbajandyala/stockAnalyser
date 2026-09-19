@@ -61,7 +61,12 @@ def _telegram_creds() -> tuple[str, str]:
     return tok, cid
 
 
-# ── Telegram ──────────────────────────────────────────────────────────────────
+def _ntfy_topic() -> str:
+    local = _load_local_creds()
+    return (os.getenv("NTFY_TOPIC") or local.get("ntfy_topic", ""))
+
+
+# ── Notification senders ──────────────────────────────────────────────────────
 
 def send_telegram(message: str, token: str, chat_id: str) -> bool:
     if not (token and chat_id):
@@ -75,6 +80,40 @@ def send_telegram(message: str, token: str, chat_id: str) -> bool:
         return r.ok
     except Exception:
         return False
+
+
+def send_ntfy(title: str, body: str, topic: str, priority: str = "high") -> bool:
+    """Send push notification via ntfy.sh — free, no account needed."""
+    if not topic:
+        return False
+    try:
+        r = requests.post(
+            f"https://ntfy.sh/{topic}",
+            data=body.encode("utf-8"),
+            headers={
+                "Title":    title,
+                "Priority": priority,
+                "Tags":     "chart_increasing",
+            },
+            timeout=10,
+        )
+        return r.ok
+    except Exception:
+        return False
+
+
+def notify(title: str, message: str, tg_token: str, tg_chat: str, ntfy_topic: str) -> None:
+    sent = False
+    if tg_token and tg_chat:
+        ok = send_telegram(message, tg_token, tg_chat)
+        print(f"  Telegram : {'✅ sent' if ok else '❌ failed'}")
+        sent = sent or ok
+    if ntfy_topic:
+        ok = send_ntfy(title, message, ntfy_topic)
+        print(f"  ntfy.sh  : {'✅ sent' if ok else '❌ failed'}")
+        sent = sent or ok
+    if not sent:
+        print("  No notification channel configured (Telegram or ntfy.sh)")
 
 
 # ── Alert formatter ───────────────────────────────────────────────────────────
@@ -140,6 +179,7 @@ def _save_state(state_file: str, state: dict) -> None:
 
 def scan_once(symbols: list[str], strong_only: bool, state_file: str) -> None:
     tg_token, tg_chat = _telegram_creds()
+    ntfy_topic        = _ntfy_topic()
     watch = {"STRONG BUY CE", "STRONG BUY PE"} if strong_only else ALERT_SIGNALS
 
     state = _load_state(state_file)   # {"NIFTY": "BUY CE", ...}
@@ -173,7 +213,6 @@ def scan_once(symbols: list[str], strong_only: bool, state_file: str) -> None:
         prev_signal = state.get(symbol)
 
         if signal not in watch:
-            # signal cleared — reset state so next trigger alerts fresh
             if prev_signal in watch:
                 state[symbol] = signal
             continue
@@ -182,15 +221,11 @@ def scan_once(symbols: list[str], strong_only: bool, state_file: str) -> None:
             print(f"       (already alerted — no change)")
             continue
 
-        # new or changed signal → alert
         message = _fmt_alert(result)
         print(f"\n{'='*55}\n{message}\n{'='*55}\n")
 
-        if tg_token and tg_chat:
-            ok = send_telegram(message, tg_token, tg_chat)
-            print(f"  Telegram: {'✅ sent' if ok else '❌ failed'}")
-        else:
-            print("  Telegram: not configured")
+        title = f"Elder Ray: {signal} — {symbol}"
+        notify(title, message, tg_token, tg_chat, ntfy_topic)
 
         state[symbol] = signal
 
@@ -202,6 +237,7 @@ def scan_once(symbols: list[str], strong_only: bool, state_file: str) -> None:
 
 def run_loop(symbols: list[str], interval_minutes: int, strong_only: bool) -> None:
     tg_token, tg_chat = _telegram_creds()
+    ntfy_topic        = _ntfy_topic()
     watch      = {"STRONG BUY CE", "STRONG BUY PE"} if strong_only else ALERT_SIGNALS
     last_signal    = {s: None for s in symbols}
     last_alert_ts  = {s: None for s in symbols}
@@ -210,6 +246,7 @@ def run_loop(symbols: list[str], interval_minutes: int, strong_only: bool) -> No
     print(f"🤖 Elder Ray Bot  |  {', '.join(symbols)}  |  every {interval_minutes}m")
     print(f"   Watching : {', '.join(sorted(watch))}")
     print(f"   Telegram : {'✅' if (tg_token and tg_chat) else '❌ not configured'}")
+    print(f"   ntfy.sh  : {'✅ topic=' + ntfy_topic if ntfy_topic else '❌ not configured'}")
     print()
 
     while True:
@@ -262,9 +299,8 @@ def run_loop(symbols: list[str], interval_minutes: int, strong_only: bool) -> No
             message = _fmt_alert(result)
             print(f"\n{'='*55}\n{message}\n{'='*55}\n")
 
-            if tg_token and tg_chat:
-                ok = send_telegram(message, tg_token, tg_chat)
-                print(f"  Telegram: {'✅ sent' if ok else '❌ failed'}")
+            title = f"Elder Ray: {signal} — {symbol}"
+            notify(title, message, tg_token, tg_chat, ntfy_topic)
 
             last_signal[symbol]   = signal
             last_alert_ts[symbol] = now_ist
