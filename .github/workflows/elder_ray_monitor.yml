@@ -1,0 +1,54 @@
+name: Elder Ray Signal Monitor
+
+# Runs every 5 minutes on weekdays during Indian market hours
+# Market hours: 09:15–15:30 IST = 03:45–10:00 UTC
+# Schedule runs 03:40–10:05 UTC to cover full session with some buffer
+
+on:
+  schedule:
+    - cron: '*/5 3-10 * * 1-5'   # every 5 min, 03:xx–10:xx UTC, Mon–Fri
+  workflow_dispatch:               # allow manual trigger from GitHub Actions UI
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt --quiet
+
+      # Restore signal state from previous run (same calendar day)
+      - name: Restore signal state
+        uses: actions/cache@v4
+        with:
+          path: /tmp/er_state.json
+          key: elder-ray-state-${{ github.run_id }}
+          restore-keys: |
+            elder-ray-state-
+
+      - name: Run Elder Ray scan
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          python scripts/elder_ray_bot.py \
+            NIFTY BANKNIFTY SENSEX FINNIFTY \
+            --once \
+            --state-file /tmp/er_state.json
+
+      # Save updated state for next run
+      - name: Save signal state
+        uses: actions/cache@v4
+        with:
+          path: /tmp/er_state.json
+          key: elder-ray-state-${{ github.run_id }}
