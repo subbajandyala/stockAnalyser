@@ -8,6 +8,11 @@ on:
   schedule:
     - cron: '*/5 3-10 * * 1-5'   # every 5 min, 03:xx–10:xx UTC, Mon–Fri
   workflow_dispatch:               # allow manual trigger from GitHub Actions UI
+    inputs:
+      test_notify:
+        description: 'Send a test notification only (no market scan)'
+        type: boolean
+        default: false
 
 jobs:
   scan:
@@ -29,6 +34,7 @@ jobs:
 
       # Restore signal state from previous run (same calendar day)
       - name: Restore signal state
+        if: ${{ !inputs.test_notify }}
         uses: actions/cache@v4
         with:
           path: /tmp/er_state.json
@@ -36,7 +42,19 @@ jobs:
           restore-keys: |
             elder-ray-state-
 
+      - name: Send test notification
+        if: ${{ inputs.test_notify }}
+        env:
+          NTFY_TOPIC: subba-nifty-alt-1987
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          python scripts/elder_ray_bot.py \
+            NIFTY BANKNIFTY SENSEX \
+            --test-notify
+
       - name: Run Elder Ray scan
+        if: ${{ !inputs.test_notify }}
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
@@ -49,6 +67,7 @@ jobs:
 
       # Save updated state for next run
       - name: Save signal state
+        if: ${{ !inputs.test_notify }}
         uses: actions/cache@v4
         with:
           path: /tmp/er_state.json

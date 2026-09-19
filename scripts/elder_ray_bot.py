@@ -326,6 +326,8 @@ if __name__ == "__main__":
                     help="Single scan then exit (for GitHub Actions / cron)")
     ap.add_argument("--state-file", default="/tmp/er_state.json",
                     help="State file path for --once mode (default: /tmp/er_state.json)")
+    ap.add_argument("--test-notify", action="store_true",
+                    help="Send a test notification and exit (to verify ntfy/Telegram is working)")
     args = ap.parse_args()
 
     symbols = [s.upper() for s in args.symbols]
@@ -334,7 +336,20 @@ if __name__ == "__main__":
             print(f"Unknown symbol: {s}. Valid: {list(INDEX_CONFIG.keys())}")
             sys.exit(1)
 
-    if args.once:
+    if args.test_notify:
+        tg_token, tg_chat = _telegram_creds()
+        ntfy_topic = _ntfy_topic()
+        now = datetime.datetime.now(_IST).strftime("%H:%M IST")
+        title = "Elder Ray Bot — Test Notification"
+        body  = (
+            f"✅ *Elder Ray Bot is working!*\n"
+            f"Time: {now}\n"
+            f"Watching: {', '.join(symbols)}\n\n"
+            f"You will receive alerts here when STRONG BUY CE or BUY CE signals fire during market hours (09:15–15:30 IST)."
+        )
+        print(body)
+        notify(title, body, tg_token, tg_chat, ntfy_topic)
+    elif args.once:
         scan_once(symbols, args.strong_only, args.state_file)
     else:
         try:
