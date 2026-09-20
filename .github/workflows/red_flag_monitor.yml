@@ -1,0 +1,67 @@
+name: Red Flag Signal Monitor
+
+# Runs every 10 minutes on weekdays during Indian market hours
+# Market hours: 09:15-15:30 IST = 03:45-10:00 UTC
+
+on:
+  schedule:
+    - cron: '*/10 3-10 * * 1-5'   # every 10 min, Mon-Fri
+  workflow_dispatch:
+    inputs:
+      test_notify:
+        description: 'Send a test notification only (no market scan)'
+        type: boolean
+        default: false
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 9
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt --quiet
+
+      - name: Restore signal state
+        if: ${{ !inputs.test_notify }}
+        uses: actions/cache@v4
+        with:
+          path: /tmp/rf_state.json
+          key: red-flag-state-${{ github.run_id }}
+          restore-keys: |
+            red-flag-state-
+
+      - name: Send test notification
+        if: ${{ inputs.test_notify }}
+        env:
+          NTFY_TOPIC: subba-red-flag-vol-spike-1987
+          KITE_API_KEY: ${{ secrets.KITE_API_KEY }}
+          KITE_ACCESS_TOKEN: ${{ secrets.KITE_ACCESS_TOKEN }}
+        run: python scripts/red_flag_bot.py --test-notify
+
+      - name: Run Red Flag scan
+        if: ${{ !inputs.test_notify }}
+        env:
+          NTFY_TOPIC: subba-red-flag-vol-spike-1987
+          KITE_API_KEY: ${{ secrets.KITE_API_KEY }}
+          KITE_ACCESS_TOKEN: ${{ secrets.KITE_ACCESS_TOKEN }}
+        run: |
+          python scripts/red_flag_bot.py \
+            --once \
+            --state-file /tmp/rf_state.json
+
+      - name: Save signal state
+        if: ${{ !inputs.test_notify }}
+        uses: actions/cache@v4
+        with:
+          path: /tmp/rf_state.json
+          key: red-flag-state-${{ github.run_id }}
