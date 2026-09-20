@@ -91,9 +91,10 @@ def send_ntfy(title: str, body: str, topic: str, priority: str = "high") -> bool
             f"https://ntfy.sh/{topic}",
             data=body.encode("utf-8"),
             headers={
-                "Title":    title,
-                "Priority": priority,
-                "Tags":     "chart_increasing",
+                "Title":        title.encode("utf-8"),
+                "Priority":     priority,
+                "Tags":         "chart_increasing",
+                "Content-Type": "text/plain; charset=utf-8",
             },
             timeout=10,
         )
