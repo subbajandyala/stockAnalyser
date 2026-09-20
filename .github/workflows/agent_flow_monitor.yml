@@ -1,0 +1,71 @@
+name: Agent Flow Signal Monitor
+
+# Runs every 5 minutes on weekdays during Indian market hours
+# Market hours: 09:15-15:30 IST = 03:45-10:00 UTC
+
+on:
+  schedule:
+    - cron: '*/5 3-10 * * 1-5'   # every 5 min, Mon-Fri
+  workflow_dispatch:
+    inputs:
+      test_notify:
+        description: 'Send a test notification only (no market scan)'
+        type: boolean
+        default: false
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt --quiet
+
+      - name: Restore signal state
+        if: ${{ !inputs.test_notify }}
+        uses: actions/cache@v4
+        with:
+          path: /tmp/af_state.json
+          key: agent-flow-state-${{ github.run_id }}
+          restore-keys: |
+            agent-flow-state-
+
+      - name: Send test notification
+        if: ${{ inputs.test_notify }}
+        env:
+          NTFY_TOPIC: subba-agent-flow-confirmation-1987
+          KITE_API_KEY: ${{ secrets.KITE_API_KEY }}
+          KITE_ACCESS_TOKEN: ${{ secrets.KITE_ACCESS_TOKEN }}
+        run: |
+          python scripts/agent_flow_bot.py \
+            NIFTY BANKNIFTY SENSEX \
+            --test-notify
+
+      - name: Run Agent Flow scan
+        if: ${{ !inputs.test_notify }}
+        env:
+          NTFY_TOPIC: subba-agent-flow-confirmation-1987
+          KITE_API_KEY: ${{ secrets.KITE_API_KEY }}
+          KITE_ACCESS_TOKEN: ${{ secrets.KITE_ACCESS_TOKEN }}
+        run: |
+          python scripts/agent_flow_bot.py \
+            NIFTY BANKNIFTY SENSEX \
+            --once \
+            --state-file /tmp/af_state.json
+
+      - name: Save signal state
+        if: ${{ !inputs.test_notify }}
+        uses: actions/cache@v4
+        with:
+          path: /tmp/af_state.json
+          key: agent-flow-state-${{ github.run_id }}
