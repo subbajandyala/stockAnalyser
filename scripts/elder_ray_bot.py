@@ -97,8 +97,11 @@ def send_ntfy(title: str, body: str, topic: str, priority: str = "high") -> bool
             },
             timeout=10,
         )
+        if not r.ok:
+            print(f"  ntfy.sh HTTP {r.status_code}: {r.text[:200]}")
         return r.ok
-    except Exception:
+    except Exception as e:
+        print(f"  ntfy.sh exception: {e}")
         return False
 
 
