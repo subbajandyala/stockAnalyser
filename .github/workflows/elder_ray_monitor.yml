@@ -1,8 +1,7 @@
 name: Elder Ray Signal Monitor
 
 # Runs every 5 minutes on weekdays during Indian market hours
-# Market hours: 09:15–15:30 IST = 03:45–10:00 UTC
-# Schedule runs 03:40–10:05 UTC to cover full session with some buffer
+# Market hours: 09:15-15:30 IST = 03:45-10:00 UTC
 
 on:
   schedule:

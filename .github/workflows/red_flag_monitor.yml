@@ -2,6 +2,7 @@ name: Red Flag Signal Monitor
 
 # Runs every 10 minutes on weekdays during Indian market hours
 # Market hours: 09:15-15:30 IST = 03:45-10:00 UTC
+# v2: re-registered cron schedule
 
 on:
   schedule:

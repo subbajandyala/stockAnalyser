@@ -1,9 +1,10 @@
 name: Gamma Blast Signal Monitor
 
 # Runs every minute on expiry days during the blast window
-# Blast window: 2:00 PM – 3:30 PM IST = 08:30–10:00 UTC
-# Tuesday  → NIFTY   expiry
-# Thursday → SENSEX  expiry
+# Blast window: 2:00 PM - 3:30 PM IST = 08:30-10:00 UTC
+# Tuesday  -> NIFTY   expiry
+# Thursday -> SENSEX  expiry
+# v2: re-registered cron schedule
 
 on:
   schedule:
