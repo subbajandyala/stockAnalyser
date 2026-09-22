@@ -2,6 +2,7 @@ name: Elder Ray Signal Monitor
 
 # Runs every 5 minutes on weekdays during Indian market hours
 # Market hours: 09:15-15:30 IST = 03:45-10:00 UTC
+# v3: force cron re-activation 2026-09-22
 
 on:
   schedule:
