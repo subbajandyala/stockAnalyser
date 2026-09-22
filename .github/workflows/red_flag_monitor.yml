@@ -7,6 +7,8 @@ name: Red Flag Signal Monitor
 on:
   schedule:
     - cron: '*/10 3-10 * * 1-5'   # every 10 min, Mon-Fri
+  repository_dispatch:
+    types: [market-scan]
   workflow_dispatch:
     inputs:
       test_notify:
