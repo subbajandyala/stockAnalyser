@@ -385,6 +385,8 @@ if __name__ == "__main__":
                     help="State file path for --once mode (default: /tmp/er_state.json)")
     ap.add_argument("--test-notify", action="store_true",
                     help="Send a test notification and exit (to verify ntfy/Telegram is working)")
+    ap.add_argument("--test-order", action="store_true",
+                    help="Place a test NIFTY CE market order in Kite (bypasses signal/market-hours check)")
     args = ap.parse_args()
 
     symbols = [s.upper() for s in args.symbols]
@@ -393,7 +395,52 @@ if __name__ == "__main__":
             print(f"Unknown symbol: {s}. Valid: {list(INDEX_CONFIG.keys())}")
             sys.exit(1)
 
-    if args.test_notify:
+    if args.test_order:
+        from kiteconnect import KiteConnect
+        _local = _load_local_creds()
+        api_key      = os.getenv("KITE_API_KEY")      or _local.get("api_key", "plz6ik09bgb62mey")
+        access_token = os.getenv("KITE_ACCESS_TOKEN") or _local.get("access_token", "")
+        ntfy_topic   = _ntfy_topic()
+        if not access_token:
+            print("ERROR: KITE_ACCESS_TOKEN required")
+            sys.exit(1)
+        kite = KiteConnect(api_key=api_key)
+        kite.set_access_token(access_token)
+        spot = 25000.0
+        try:
+            q = kite.ltp(["NSE:NIFTY 50"])
+            spot = float(q["NSE:NIFTY 50"]["last_price"])
+        except Exception as e:
+            print(f"LTP fetch failed ({e}) — using fallback spot {spot:.0f}")
+        print(f"[TEST ORDER] NIFTY CE @ spot {spot:.0f}")
+        trade = _place_order("NIFTY", "CE", spot, api_key, access_token)
+        if "error" in trade:
+            print(f"[TEST ORDER] Result: {trade['error']}")
+        else:
+            print(
+                f"[TEST ORDER] ORDER PLACED — {trade['tradingsymbol']}"
+                f" | Entry ₹{trade.get('entry_price', 0)}"
+                f" | SL ₹{trade.get('sl', 0)}"
+                f" | Target ₹{trade.get('target', 0)}"
+                f" | GTT {trade.get('gtt_id', 'N/A')}"
+                f" | Order ID: {trade['order_id']}"
+            )
+            if ntfy_topic:
+                send_ntfy(
+                    f"TEST ORDER: {trade['tradingsymbol']}",
+                    (
+                        f"[TEST] Symbol  : NIFTY CE\n"
+                        f"Strike  : {trade['strike']}\n"
+                        f"Qty     : {trade['qty']}\n"
+                        f"Entry   : Rs.{trade.get('entry_price', 0)}\n"
+                        f"SL      : Rs.{trade.get('sl', 0)} (-30%)\n"
+                        f"Target  : Rs.{trade.get('target', 0)} (+60%)\n"
+                        f"GTT ID  : {trade.get('gtt_id', 'N/A')}\n"
+                        f"Order ID: {trade['order_id']}"
+                    ),
+                    ntfy_topic,
+                )
+    elif args.test_notify:
         tg_token, tg_chat = _telegram_creds()
         ntfy_topic = _ntfy_topic()
         now = datetime.datetime.now(_IST).strftime("%H:%M IST")

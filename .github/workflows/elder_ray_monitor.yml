@@ -15,6 +15,10 @@ on:
         description: 'Send a test notification only (no market scan)'
         type: boolean
         default: false
+      test_order:
+        description: 'Place a test NIFTY CE order in Kite (bypasses signal/market-hours check)'
+        type: boolean
+        default: false
 
 jobs:
   scan:
@@ -36,13 +40,24 @@ jobs:
 
       # Restore signal state from previous run (same calendar day)
       - name: Restore signal state
-        if: ${{ !inputs.test_notify }}
+        if: ${{ !inputs.test_notify && !inputs.test_order }}
         uses: actions/cache@v4
         with:
           path: /tmp/er_state.json
           key: elder-ray-state-${{ github.run_id }}
           restore-keys: |
             elder-ray-state-
+
+      - name: Place test order
+        if: ${{ inputs.test_order }}
+        env:
+          NTFY_TOPIC: subba-nifty-alt-1987
+          KITE_API_KEY: ${{ secrets.KITE_API_KEY }}
+          KITE_ACCESS_TOKEN: ${{ secrets.KITE_ACCESS_TOKEN }}
+        run: |
+          python scripts/elder_ray_bot.py \
+            NIFTY \
+            --test-order
 
       - name: Send test notification
         if: ${{ inputs.test_notify }}
@@ -58,7 +73,7 @@ jobs:
             --test-notify
 
       - name: Run Elder Ray scan
-        if: ${{ !inputs.test_notify }}
+        if: ${{ !inputs.test_notify && !inputs.test_order }}
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
@@ -74,7 +89,7 @@ jobs:
 
       # Save updated state for next run
       - name: Save signal state
-        if: ${{ !inputs.test_notify }}
+        if: ${{ !inputs.test_notify && !inputs.test_order }}
         uses: actions/cache@v4
         with:
           path: /tmp/er_state.json
