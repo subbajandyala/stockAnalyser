@@ -1,0 +1,6 @@
+[build]
+builder = "nixpacks"
+
+[deploy]
+startCommand = "python scripts/elder_ray_bot.py NIFTY BANKNIFTY SENSEX --once"
+cronSchedule = "*/5 3-10 * * 1-5"
