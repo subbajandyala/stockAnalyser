@@ -7,6 +7,8 @@ name: Agent Flow Signal Monitor
 on:
   schedule:
     - cron: '*/5 3-10 * * 1-5'   # every 5 min, Mon-Fri
+  repository_dispatch:
+    types: [market-scan]
   workflow_dispatch:
     inputs:
       test_notify:
