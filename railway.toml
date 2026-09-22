@@ -2,5 +2,4 @@
 builder = "nixpacks"
 
 [deploy]
-startCommand = "python scripts/elder_ray_bot.py NIFTY --test-order"
-cronSchedule = "*/5 3-10 * * 1-5"
+startCommand = "python scripts/elder_ray_bot.py NIFTY --test-order && sleep 3600"
