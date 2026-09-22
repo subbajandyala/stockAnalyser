@@ -60,6 +60,7 @@ jobs:
           NTFY_TOPIC: subba-agent-flow-confirmation-1987
           KITE_API_KEY: ${{ secrets.KITE_API_KEY }}
           KITE_ACCESS_TOKEN: ${{ secrets.KITE_ACCESS_TOKEN }}
+          KITE_AUTO_TRADE: "1"
         run: |
           python scripts/agent_flow_bot.py \
             NIFTY BANKNIFTY SENSEX \

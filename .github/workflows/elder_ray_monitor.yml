@@ -65,6 +65,7 @@ jobs:
           NTFY_TOPIC: subba-nifty-alt-1987
           KITE_API_KEY: ${{ secrets.KITE_API_KEY }}
           KITE_ACCESS_TOKEN: ${{ secrets.KITE_ACCESS_TOKEN }}
+          KITE_AUTO_TRADE: "1"
         run: |
           python scripts/elder_ray_bot.py \
             NIFTY BANKNIFTY SENSEX \
