@@ -401,6 +401,11 @@ if __name__ == "__main__":
         api_key      = os.getenv("KITE_API_KEY")      or _local.get("api_key", "plz6ik09bgb62mey")
         access_token = os.getenv("KITE_ACCESS_TOKEN") or _local.get("access_token", "")
         ntfy_topic   = _ntfy_topic()
+        try:
+            outbound_ip = requests.get("https://api.ipify.org", timeout=5).text.strip()
+            print(f"[TEST ORDER] Outbound IP: {outbound_ip}")
+        except Exception:
+            print("[TEST ORDER] Could not determine outbound IP")
         if not access_token:
             print("ERROR: KITE_ACCESS_TOKEN required")
             sys.exit(1)

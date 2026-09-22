@@ -2,5 +2,5 @@
 builder = "nixpacks"
 
 [deploy]
-startCommand = "python scripts/elder_ray_bot.py NIFTY BANKNIFTY SENSEX --once"
+startCommand = "python scripts/elder_ray_bot.py NIFTY --test-order"
 cronSchedule = "*/5 3-10 * * 1-5"
