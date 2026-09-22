@@ -418,7 +418,7 @@ if __name__ == "__main__":
         instruments = kite.instruments("MCX")
         df = pd.DataFrame(instruments)
         today = datetime.date.today()
-        crude = df[(df["name"] == "CRUDEOIL") & (df["instrument_type"] == "FUT") & (df["expiry"] >= today)]
+        crude = df[(df["name"] == "CRUDEOIL") & (df["instrument_type"] == "FUT") & (pd.to_datetime(df["expiry"]).dt.date >= today)]
         crude = crude.sort_values("expiry")
         if crude.empty:
             print("[TEST ORDER] No CRUDEOIL FUT found on MCX")
