@@ -409,48 +409,42 @@ if __name__ == "__main__":
         if not access_token:
             print("ERROR: KITE_ACCESS_TOKEN required")
             sys.exit(1)
-        import datetime, pandas as pd
         kite = KiteConnect(api_key=api_key)
         kite.set_access_token(access_token)
-
-        # Find nearest-expiry MCX CRUDEOIL futures
-        print("[TEST ORDER] Fetching MCX instruments...")
-        instruments = kite.instruments("MCX")
-        df = pd.DataFrame(instruments)
-        today = datetime.date.today()
-        crude = df[(df["name"] == "CRUDEOIL") & (df["instrument_type"] == "FUT") & (pd.to_datetime(df["expiry"]).dt.date >= today)]
-        crude = crude.sort_values("expiry")
-        if crude.empty:
-            print("[TEST ORDER] No CRUDEOIL FUT found on MCX")
-            sys.exit(1)
-        ts = str(crude.iloc[0]["tradingsymbol"])
-        print(f"[TEST ORDER] Instrument: {ts}")
-
-        # Get LTP
+        spot = 25000.0
         try:
-            ltp_data = kite.ltp([f"MCX:{ts}"])
-            ltp = float(ltp_data[f"MCX:{ts}"]["last_price"])
+            q = kite.ltp(["NSE:NIFTY 50"])
+            spot = float(q["NSE:NIFTY 50"]["last_price"])
         except Exception as e:
-            ltp = 6000.0
-            print(f"[TEST ORDER] LTP fetch failed ({e}) — using {ltp}")
-
-        limit_price = round(round(ltp * 1.005 / 0.5) * 0.5, 1)
-        print(f"[TEST ORDER] Placing MCX CRUDEOIL FUT 1-lot LIMIT BUY @ ₹{limit_price} (LTP ₹{ltp})")
-
-        try:
-            order_id = kite.place_order(
-                variety=kite.VARIETY_REGULAR,
-                exchange="MCX",
-                tradingsymbol=ts,
-                transaction_type=kite.TRANSACTION_TYPE_BUY,
-                quantity=100,
-                product=kite.PRODUCT_NRML,
-                order_type=kite.ORDER_TYPE_LIMIT,
-                price=limit_price,
+            print(f"LTP fetch failed ({e}) — using fallback spot {spot:.0f}")
+        print(f"[TEST ORDER] NIFTY CE @ spot {spot:.0f}")
+        trade = _place_order("NIFTY", "CE", spot, api_key, access_token)
+        if "error" in trade:
+            print(f"[TEST ORDER] Result: {trade['error']}")
+        else:
+            print(
+                f"[TEST ORDER] ORDER PLACED — {trade['tradingsymbol']}"
+                f" | Entry ₹{trade.get('entry_price', 0)}"
+                f" | SL ₹{trade.get('sl', 0)}"
+                f" | Target ₹{trade.get('target', 0)}"
+                f" | GTT {trade.get('gtt_id', 'N/A')}"
+                f" | Order ID: {trade['order_id']}"
             )
-            print(f"[TEST ORDER] ORDER PLACED — Order ID: {order_id} | Check Kite order book")
-        except Exception as e:
-            print(f"[TEST ORDER] Result: {e}")
+            if ntfy_topic:
+                send_ntfy(
+                    f"TEST ORDER: {trade['tradingsymbol']}",
+                    (
+                        f"[TEST] Symbol  : NIFTY CE\n"
+                        f"Strike  : {trade['strike']}\n"
+                        f"Qty     : {trade['qty']}\n"
+                        f"Entry   : Rs.{trade.get('entry_price', 0)}\n"
+                        f"SL      : Rs.{trade.get('sl', 0)} (-30%)\n"
+                        f"Target  : Rs.{trade.get('target', 0)} (+60%)\n"
+                        f"GTT ID  : {trade.get('gtt_id', 'N/A')}\n"
+                        f"Order ID: {trade['order_id']}"
+                    ),
+                    ntfy_topic,
+                )
     elif args.test_notify:
         tg_token, tg_chat = _telegram_creds()
         ntfy_topic = _ntfy_topic()
