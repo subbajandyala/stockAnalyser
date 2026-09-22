@@ -16,6 +16,9 @@ Telegram setup (any one of):
     - GitHub Secrets: TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID  (cloud mode)
     - Environment vars: TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID
     - ~/.kite_creds.json keys: "telegram_bot_token", "telegram_chat_id"
+
+Set KITE_AUTO_TRADE=1 to enable auto order execution (NIFTY and SENSEX only,
+STRONG signals only).
 """
 
 import argparse
@@ -31,6 +34,10 @@ sys.path.insert(0, str(pathlib.Path(__file__).parent.parent))
 import requests
 
 from screener.elder_ray import run_elder_ray_signal, INDEX_CONFIG
+from screener.kite_order import place_order_for_signal as _place_order
+
+_AUTO_TRADE   = os.environ.get("KITE_AUTO_TRADE", "0") == "1"
+_TRADE_SYMBOLS = {"NIFTY", "SENSEX"}   # BANKNIFTY excluded
 
 _IST = datetime.timezone(datetime.timedelta(hours=5, minutes=30))
 
@@ -66,7 +73,7 @@ def _ntfy_topic() -> str:
     return (os.getenv("NTFY_TOPIC") or local.get("ntfy_topic", ""))
 
 
-# ── Notification senders ──────────────────────────────────────────────────────
+# ── Notification senders ───────────────────────────────────────────────────────────────
 
 def send_telegram(message: str, token: str, chat_id: str) -> bool:
     if not (token and chat_id):
@@ -120,7 +127,7 @@ def notify(title: str, message: str, tg_token: str, tg_chat: str, ntfy_topic: st
         print("  No notification channel configured (Telegram or ntfy.sh)")
 
 
-# ── Alert formatter ───────────────────────────────────────────────────────────
+# ── Alert formatter ───────────────────────────────────────────────────────────────
 
 def _fmt_alert(result: dict) -> str:
     signal    = result["signal"]
@@ -166,7 +173,7 @@ def _fmt_alert(result: dict) -> str:
     return "\n".join(lines)
 
 
-# ── State management (for --once / GitHub Actions mode) ───────────────────────
+# ── State management (for --once / GitHub Actions mode) ──────────────────────────────────
 
 def _load_state(state_file: str) -> dict:
     try:
@@ -179,12 +186,17 @@ def _save_state(state_file: str, state: dict) -> None:
     pathlib.Path(state_file).write_text(json.dumps(state, indent=2))
 
 
-# ── Single scan (GitHub Actions / --once mode) ────────────────────────────────
+# ── Single scan (GitHub Actions / --once mode) ────────────────────────────────────────────
 
 def scan_once(symbols: list[str], strong_only: bool, state_file: str) -> None:
     tg_token, tg_chat = _telegram_creds()
     ntfy_topic        = _ntfy_topic()
     watch = {"STRONG BUY CE", "STRONG BUY PE"} if strong_only else ALERT_SIGNALS
+
+    # Kite creds for auto-trade (already validated by elder_ray module, reuse here)
+    _local = _load_local_creds()
+    _api_key      = os.getenv("KITE_API_KEY")      or _local.get("api_key", "plz6ik09bgb62mey")
+    _access_token = os.getenv("KITE_ACCESS_TOKEN") or _local.get("access_token", "")
 
     state = _load_state(state_file)   # {"NIFTY": "BUY CE", ...}
 
@@ -231,13 +243,54 @@ def scan_once(symbols: list[str], strong_only: bool, state_file: str) -> None:
         title = f"Elder Ray: {signal} — {symbol}"
         notify(title, message, tg_token, tg_chat, ntfy_topic)
 
+        # ── Auto-execute order ─────────────────────────────────────────────────────────────
+        if _AUTO_TRADE and symbol in _TRADE_SYMBOLS and "STRONG" in signal:
+            direction = "CE" if signal.endswith("CE") else "PE"
+            spot      = result.get("price", 0)
+            print(f"  [AUTO-TRADE] Placing {direction} order for {symbol} @ spot {spot:.0f}")
+            trade = _place_order(symbol, direction, spot, _api_key, _access_token)
+            if "error" in trade:
+                print(f"  [AUTO-TRADE] SKIPPED — {trade['error']}")
+                if ntfy_topic:
+                    send_ntfy(
+                        f"Auto-Trade SKIPPED: {symbol}",
+                        f"Signal: {signal}\nReason: {trade['error']}",
+                        ntfy_topic,
+                        priority="default",
+                    )
+            else:
+                print(
+                    f"  [AUTO-TRADE] ORDER PLACED — {trade['tradingsymbol']}"
+                    f" | Entry ₹{trade['entry_price']}"
+                    f" | SL ₹{trade['sl']}"
+                    f" | Target ₹{trade['target']}"
+                    f" | GTT {trade.get('gtt_id', 'N/A')}"
+                )
+                if ntfy_topic:
+                    send_ntfy(
+                        f"ORDER PLACED: {trade['tradingsymbol']}",
+                        (
+                            f"Symbol  : {symbol} {trade['opt_type']}\n"
+                            f"Strike  : {trade['strike']}\n"
+                            f"Qty     : {trade['qty']}\n"
+                            f"Entry   : Rs.{trade['entry_price']}\n"
+                            f"SL      : Rs.{trade['sl']} (-30%)\n"
+                            f"Target  : Rs.{trade['target']} (+60%)\n"
+                            f"GTT ID  : {trade.get('gtt_id', 'N/A')}\n"
+                            f"Order ID: {trade['order_id']}"
+                        ),
+                        ntfy_topic,
+                    )
+                state[f"{symbol}:trade"] = trade["order_id"]
+        # ────────────────────────────────────────────────────────────────────────────────
+
         state[symbol] = signal
 
     _save_state(state_file, state)
     print("State saved.")
 
 
-# ── Continuous loop (local mode) ──────────────────────────────────────────────
+# ── Continuous loop (local mode) ───────────────────────────────────────────────────────────────
 
 def run_loop(symbols: list[str], interval_minutes: int, strong_only: bool) -> None:
     tg_token, tg_chat = _telegram_creds()

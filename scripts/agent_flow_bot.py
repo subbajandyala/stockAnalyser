@@ -8,6 +8,7 @@ Cloud / GitHub Actions (--once):
     python scripts/agent_flow_bot.py NIFTY BANKNIFTY SENSEX --once
 
 Requires KITE_API_KEY and KITE_ACCESS_TOKEN env vars (or ~/.kite_creds.json).
+Set KITE_AUTO_TRADE=1 to enable auto order execution (NIFTY and SENSEX only).
 """
 
 import argparse
@@ -23,6 +24,10 @@ sys.path.insert(0, str(pathlib.Path(__file__).parent.parent))
 import requests
 
 from screener.agent_flow import run_agent_analysis, INSTRUMENTS
+from screener.kite_order import place_order_for_signal as _place_order
+
+_AUTO_TRADE = os.environ.get("KITE_AUTO_TRADE", "0") == "1"
+_TRADE_SYMBOLS = {"NIFTY", "SENSEX"}   # BANKNIFTY excluded
 
 _IST         = datetime.timezone(datetime.timedelta(hours=5, minutes=30))
 MARKET_OPEN  = datetime.time(9, 15)
@@ -59,7 +64,7 @@ def _ntfy_topic() -> str:
     return t
 
 
-# ── Notification ──────────────────────────────────────────────────────────────
+# ── Notification ───────────────────────────────────────────────────────────────
 
 def send_ntfy(title: str, body: str, topic: str) -> bool:
     if not topic:
@@ -84,7 +89,7 @@ def send_ntfy(title: str, body: str, topic: str) -> bool:
         return False
 
 
-# ── Alert formatter ───────────────────────────────────────────────────────────
+# ── Alert formatter ───────────────────────────────────────────────────────────────
 
 _STARS = {1: "★", 2: "★★", 3: "★★★", 4: "★★★★", 5: "★★★★★"}
 
@@ -143,7 +148,7 @@ def _fmt_alert(r: dict) -> tuple[str, str]:
     return title, "\n".join(lines)
 
 
-# ── State management ──────────────────────────────────────────────────────────
+# ── State management ───────────────────────────────────────────────────────────────
 
 def _load_state(path: str) -> dict:
     try:
@@ -213,6 +218,46 @@ def scan_once(symbols: list[str], state_file: str) -> None:
             print(f"  ntfy.sh : {'OK' if ok else 'FAILED'}")
         else:
             print("  No ntfy topic configured.")
+
+        # ── Auto-execute order ─────────────────────────────────────────────────────────────
+        if _AUTO_TRADE and symbol in _TRADE_SYMBOLS:
+            direction = result.get("direction", "")   # "CALL" or "PUT"
+            spot      = result.get("spot", 0)
+            print(f"  [AUTO-TRADE] Placing {direction} order for {symbol} @ spot {spot:.0f}")
+            trade = _place_order(symbol, direction, spot, api_key, access_token)
+            if "error" in trade:
+                print(f"  [AUTO-TRADE] SKIPPED — {trade['error']}")
+                if ntfy_topic:
+                    send_ntfy(
+                        f"Auto-Trade SKIPPED: {symbol}",
+                        f"Signal: {direction}\nReason: {trade['error']}",
+                        ntfy_topic,
+                    )
+            else:
+                print(
+                    f"  [AUTO-TRADE] ORDER PLACED — {trade['tradingsymbol']}"
+                    f" | Entry ₹{trade['entry_price']}"
+                    f" | SL ₹{trade['sl']}"
+                    f" | Target ₹{trade['target']}"
+                    f" | GTT {trade.get('gtt_id', 'N/A')}"
+                )
+                if ntfy_topic:
+                    send_ntfy(
+                        f"ORDER PLACED: {trade['tradingsymbol']}",
+                        (
+                            f"Symbol  : {symbol} {trade['opt_type']}\n"
+                            f"Strike  : {trade['strike']}\n"
+                            f"Qty     : {trade['qty']}\n"
+                            f"Entry   : Rs.{trade['entry_price']}\n"
+                            f"SL      : Rs.{trade['sl']} (-30%)\n"
+                            f"Target  : Rs.{trade['target']} (+60%)\n"
+                            f"GTT ID  : {trade.get('gtt_id', 'N/A')}\n"
+                            f"Order ID: {trade['order_id']}"
+                        ),
+                        ntfy_topic,
+                    )
+                state[f"{symbol}:trade"] = trade["order_id"]
+        # ────────────────────────────────────────────────────────────────────────────────
 
         state[symbol] = state_key
 
