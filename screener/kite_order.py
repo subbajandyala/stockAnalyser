@@ -159,9 +159,19 @@ def place_order_for_signal(
     if not ts:
         return {"error": f"Could not find tradingsymbol for {symbol} {strike} {opt_type}"}
 
-    _LOG.info(f"Placing order: BUY {qty} x {ts} @ MARKET (NRML)")
+    # 3. Fetch option LTP and compute limit price (1% above to ensure fill)
+    try:
+        ltp_data = kite.ltp([f"{exchange}:{ts}"])
+        option_ltp = float(ltp_data[f"{exchange}:{ts}"]["last_price"])
+    except Exception as e:
+        return {"error": f"Could not fetch option LTP for {ts}: {e}"}
 
-    # 3. Place market buy order (NRML so GTT works)
+    # Round to nearest 0.05 (NSE tick size for options)
+    limit_price = round(round(option_ltp * 1.01 / 0.05) * 0.05, 2)
+
+    _LOG.info(f"Placing order: BUY {qty} x {ts} @ LIMIT {limit_price} (NRML)")
+
+    # 4. Place limit buy order (NRML so GTT works; market orders blocked via API)
     try:
         order_id = kite.place_order(
             variety=kite.VARIETY_REGULAR,
@@ -170,15 +180,18 @@ def place_order_for_signal(
             transaction_type=kite.TRANSACTION_TYPE_BUY,
             quantity=qty,
             product=kite.PRODUCT_NRML,
-            order_type=kite.ORDER_TYPE_MARKET,
+            order_type=kite.ORDER_TYPE_LIMIT,
+            price=limit_price,
         )
     except Exception as e:
         return {"error": f"Order placement failed: {e}"}
 
     _LOG.info(f"Order placed: {order_id}")
 
-    # 4. Get fill price
+    # 5. Get fill price (wait briefly for limit fill)
     entry_price = _fill_price(kite, order_id, exchange, ts)
+    if not entry_price:
+        entry_price = limit_price  # use limit price as proxy if fill not confirmed
     if not entry_price:
         return {
             "order_id":      order_id,
@@ -186,11 +199,11 @@ def place_order_for_signal(
             "error":         "Order placed but fill price unavailable — GTT not set",
         }
 
-    # 5. SL and target levels
+    # 6. SL and target levels
     sl_price     = round(entry_price * (1 - SL_PCT), 1)
     target_price = round(entry_price * (1 + TARGET_PCT), 1)
 
-    # 6. GTT two-leg (OCO): [sl_trigger, target_trigger]
+    # 7. GTT two-leg (OCO): [sl_trigger, target_trigger]
     gtt_id = None
     try:
         gtt_id = kite.place_gtt(
