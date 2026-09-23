@@ -207,84 +207,101 @@ def scan_once(symbols: list[str], strong_only: bool, state_file: str) -> None:
         print("Market closed — no scan needed.")
         return
 
+    # ── Pass 1: collect all signals ───────────────────────────────────────────
+    scan_results = {}
     for symbol in symbols:
         try:
             result = run_elder_ray_signal(symbol)
         except Exception as e:
             print(f"  {symbol}: ERROR — {e}")
             continue
-
         if result.get("error"):
             print(f"  {symbol}: {result['error']}")
             continue
-
+        scan_results[symbol] = result
         signal = result.get("signal", "WAIT")
         sce    = result.get("score_ce", 0)
         spe    = result.get("score_pe", 0)
         price  = result.get("price", 0)
-
         marker = "🔥" if "STRONG" in signal else ("⚡" if signal in ALERT_SIGNALS else "  ")
         print(f"  {marker} {symbol:12s} | {signal:16s} | CE:{sce} PE:{spe} | ₹{price:,.0f}")
 
+    # ── Pass 2: notifications ─────────────────────────────────────────────────
+    for symbol, result in scan_results.items():
+        signal      = result.get("signal", "WAIT")
         prev_signal = state.get(symbol)
-
         if signal not in watch:
             if prev_signal in watch:
                 state[symbol] = signal
             continue
-
         if signal == prev_signal:
-            print(f"       (already alerted — no change)")
+            print(f"       {symbol}: already alerted — no change")
             continue
-
         message = _fmt_alert(result)
         print(f"\n{'='*55}\n{message}\n{'='*55}\n")
-
-        title = f"Elder Ray: {signal} — {symbol}"
-        notify(title, message, tg_token, tg_chat, ntfy_topic)
-
-        # ── Auto-execute order ─────────────────────────────────────────────────────────────
-        if _AUTO_TRADE and symbol in _TRADE_SYMBOLS and "STRONG" in signal:
-            direction = "CE" if signal.endswith("CE") else "PE"
-            spot      = result.get("price", 0)
-            print(f"  [AUTO-TRADE] Placing {direction} order for {symbol} @ spot {spot:.0f}")
-            trade = _place_order(symbol, direction, spot, _api_key, _access_token)
-            if "error" in trade:
-                print(f"  [AUTO-TRADE] SKIPPED — {trade['error']}")
-                if ntfy_topic:
-                    send_ntfy(
-                        f"Auto-Trade SKIPPED: {symbol}",
-                        f"Signal: {signal}\nReason: {trade['error']}",
-                        ntfy_topic,
-                        priority="default",
-                    )
-            else:
-                print(
-                    f"  [AUTO-TRADE] ORDER PLACED — {trade['tradingsymbol']}"
-                    f" | Entry ₹{trade['entry_price']}"
-                    f" | SL ₹{trade['sl']}"
-                    f" | Target ₹{trade['target']}"
-                    f" | GTT {trade.get('gtt_id', 'N/A')}"
-                )
-                if ntfy_topic:
-                    send_ntfy(
-                        f"ORDER PLACED: {trade['tradingsymbol']}",
-                        (
-                            f"Symbol  : {symbol} {trade['opt_type']}\n"
-                            f"Strike  : {trade['strike']}\n"
-                            f"Qty     : {trade['qty']}\n"
-                            f"Entry   : Rs.{trade['entry_price']}\n"
-                            f"SL      : Rs.{trade['sl']} (-30%)\n"
-                            f"Target  : Rs.{trade['target']} (+60%)\n"
-                            f"GTT ID  : {trade.get('gtt_id', 'N/A')}\n"
-                            f"Order ID: {trade['order_id']}"
-                        ),
-                        ntfy_topic,
-                    )
-                state[f"{symbol}:trade"] = trade["order_id"]
-        # ────────────────────────────────────────────────────────────────────────────────
-
+        notify(f"Elder Ray: {signal} — {symbol}", message, tg_token, tg_chat, ntfy_topic)
         state[symbol] = signal
+
+    # ── Pass 3: auto-trade with capital split logic ───────────────────────────
+    if _AUTO_TRADE:
+        # Collect tradeable STRONG signals (new signals only, NIFTY/SENSEX only)
+        tradeable = {
+            sym: res for sym, res in scan_results.items()
+            if sym in _TRADE_SYMBOLS
+            and "STRONG" in res.get("signal", "")
+            and res.get("signal") != state.get(f"{sym}:last_trade_signal")
+        }
+
+        if tradeable:
+            directions = {sym: ("CE" if res["signal"].endswith("CE") else "PE")
+                          for sym, res in tradeable.items()}
+            unique_dirs = set(directions.values())
+
+            if len(unique_dirs) > 1:
+                # Conflicting signals — skip all
+                conflict_msg = " vs ".join(f"{s}:{d}" for s, d in directions.items())
+                print(f"  [AUTO-TRADE] CONFLICT — {conflict_msg} — skipping all")
+                if ntfy_topic:
+                    send_ntfy("Auto-Trade CONFLICT", f"Conflicting signals: {conflict_msg}\nNo orders placed.", ntfy_topic, priority="default")
+            else:
+                # Same direction — split capital equally
+                n = len(tradeable)
+                fraction = 1.0 / n
+                print(f"  [AUTO-TRADE] {n} signal(s) — capital split {fraction:.0%} each")
+
+                for sym, res in tradeable.items():
+                    direction = directions[sym]
+                    spot      = res.get("price", 0)
+                    print(f"  [AUTO-TRADE] {sym} {direction} @ spot {spot:.0f} ({fraction:.0%} capital)")
+                    trade = _place_order(sym, direction, spot, _api_key, _access_token, fraction)
+                    if "error" in trade:
+                        print(f"  [AUTO-TRADE] SKIPPED — {trade['error']}")
+                        if ntfy_topic:
+                            send_ntfy(f"Auto-Trade SKIPPED: {sym}", f"Signal: {res['signal']}\nReason: {trade['error']}", ntfy_topic, priority="default")
+                    else:
+                        print(
+                            f"  [AUTO-TRADE] ORDER PLACED — {trade['tradingsymbol']}"
+                            f" | Qty {trade['qty']} | Entry ₹{trade['entry_price']}"
+                            f" | SL ₹{trade['sl']} | Target ₹{trade['target']}"
+                            f" | GTT {trade.get('gtt_id', 'N/A')}"
+                        )
+                        if ntfy_topic:
+                            send_ntfy(
+                                f"ORDER PLACED: {trade['tradingsymbol']}",
+                                (
+                                    f"Symbol  : {sym} {trade['opt_type']}\n"
+                                    f"Strike  : {trade['strike']}\n"
+                                    f"Qty     : {trade['qty']} ({fraction:.0%} capital)\n"
+                                    f"Entry   : Rs.{trade['entry_price']}\n"
+                                    f"SL      : Rs.{trade['sl']} (-30%)\n"
+                                    f"Target  : Rs.{trade['target']} (+60%)\n"
+                                    f"GTT ID  : {trade.get('gtt_id', 'N/A')}\n"
+                                    f"Order ID: {trade['order_id']}"
+                                ),
+                                ntfy_topic,
+                            )
+                        state[f"{sym}:trade"] = trade["order_id"]
+                        state[f"{sym}:last_trade_signal"] = res["signal"]
 
     _save_state(state_file, state)
     print("State saved.")

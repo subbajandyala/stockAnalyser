@@ -87,23 +87,29 @@ def _resolve_tradingsymbol(
     return str(filtered.iloc[0]["tradingsymbol"])
 
 
-def _calc_qty(kite: KiteConnect, symbol: str, ltp: float) -> int:
-    """Return total units to buy based on available cash (95% utilisation, min 1 lot)."""
+def _calc_qty(kite: KiteConnect, symbol: str, ltp: float, capital_fraction: float = 1.0) -> int:
+    """Return total units to buy based on available cash (95% utilisation, min 1 lot).
+
+    capital_fraction: 0.5 when splitting between two symbols, 1.0 for single trade.
+    Falls back to 1 lot on zero balance or API error so order always fires.
+    """
     lot = LOT_SIZE[symbol]
     cost_per_lot = ltp * lot
     try:
-        seg = "equity"  # NFO and BFO are both under equity segment
-        margins = kite.margins(seg)
+        margins = kite.margins("equity")
         available = float(margins.get("available", {}).get("live_balance", 0))
     except Exception as e:
         _LOG.warning(f"Margin fetch failed ({e}) — defaulting to 1 lot")
         return lot
     if available <= 0 or cost_per_lot <= 0:
         return lot
-    usable = available * 0.95          # keep 5% buffer
+    usable = available * 0.95 * capital_fraction
     max_lots = int(usable / cost_per_lot)
     lots = max(1, max_lots)
-    _LOG.info(f"Balance ₹{available:.0f} → {lots} lot(s) of {symbol} @ ₹{ltp} (₹{cost_per_lot:.0f}/lot)")
+    _LOG.info(
+        f"Balance ₹{available:.0f} × {capital_fraction:.0%} → "
+        f"{lots} lot(s) of {symbol} @ ₹{ltp} (₹{cost_per_lot:.0f}/lot)"
+    )
     return lots * lot
 
 
@@ -144,17 +150,19 @@ def place_order_for_signal(
     spot: float,
     api_key: str,
     access_token: str,
+    capital_fraction: float = 1.0,
 ) -> dict:
     """
-    Place 1-lot ATM option order + GTT for the given signal.
+    Place ATM option order + GTT for the given signal.
 
     Args:
-        symbol:    "NIFTY" or "SENSEX"
-        direction: "CE" / "CALL" / "STRONG BUY CE" → CE
-                   "PE" / "PUT"  / "STRONG BUY PE"  → PE
-        spot:      current spot price (used to compute ATM strike)
-        api_key:   Kite API key
-        access_token: Kite access token (daily)
+        symbol:           "NIFTY" or "SENSEX"
+        direction:        "CE" / "CALL" / "STRONG BUY CE" → CE
+                          "PE" / "PUT"  / "STRONG BUY PE"  → PE
+        spot:             current spot price (used to compute ATM strike)
+        api_key:          Kite API key
+        access_token:     Kite access token (daily)
+        capital_fraction: fraction of available balance to use (0.5 = 50/50 split)
 
     Returns dict with keys:
         order_id, tradingsymbol, strike, opt_type, qty, entry_price, sl, target, gtt_id
@@ -188,8 +196,8 @@ def place_order_for_signal(
     # Round to nearest 0.05 (NSE tick size for options)
     limit_price = round(round(option_ltp * 1.01 / 0.05) * 0.05, 2)
 
-    # Dynamic lot sizing based on available balance
-    qty = _calc_qty(kite, symbol, option_ltp)
+    # Dynamic lot sizing based on available balance and capital fraction
+    qty = _calc_qty(kite, symbol, option_ltp, capital_fraction)
 
     _LOG.info(f"Placing order: BUY {qty} x {ts} @ LIMIT {limit_price} (NRML)")
 
