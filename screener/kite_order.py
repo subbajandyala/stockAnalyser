@@ -87,6 +87,26 @@ def _resolve_tradingsymbol(
     return str(filtered.iloc[0]["tradingsymbol"])
 
 
+def _calc_qty(kite: KiteConnect, symbol: str, ltp: float) -> int:
+    """Return total units to buy based on available cash (95% utilisation, min 1 lot)."""
+    lot = LOT_SIZE[symbol]
+    cost_per_lot = ltp * lot
+    try:
+        seg = "equity"  # NFO and BFO are both under equity segment
+        margins = kite.margins(seg)
+        available = float(margins.get("available", {}).get("live_balance", 0))
+    except Exception as e:
+        _LOG.warning(f"Margin fetch failed ({e}) — defaulting to 1 lot")
+        return lot
+    if available <= 0 or cost_per_lot <= 0:
+        return lot
+    usable = available * 0.95          # keep 5% buffer
+    max_lots = int(usable / cost_per_lot)
+    lots = max(1, max_lots)
+    _LOG.info(f"Balance ₹{available:.0f} → {lots} lot(s) of {symbol} @ ₹{ltp} (₹{cost_per_lot:.0f}/lot)")
+    return lots * lot
+
+
 def _fill_price(kite: KiteConnect, order_id: str, exchange: str, ts: str) -> float:
     """Wait briefly for fill, return average_price; fall back to LTP."""
     time.sleep(2)   # give exchange 2s to fill a market order
@@ -145,7 +165,6 @@ def place_order_for_signal(
 
     opt_type = "CE" if any(x in direction.upper() for x in ("CE", "CALL", "BUY CE")) else "PE"
     exchange = _EXCHANGE[symbol]
-    qty      = LOT_SIZE[symbol]
 
     kite = _kite_client(api_key, access_token)
 
@@ -168,6 +187,9 @@ def place_order_for_signal(
 
     # Round to nearest 0.05 (NSE tick size for options)
     limit_price = round(round(option_ltp * 1.01 / 0.05) * 0.05, 2)
+
+    # Dynamic lot sizing based on available balance
+    qty = _calc_qty(kite, symbol, option_ltp)
 
     _LOG.info(f"Placing order: BUY {qty} x {ts} @ LIMIT {limit_price} (NRML)")
 
