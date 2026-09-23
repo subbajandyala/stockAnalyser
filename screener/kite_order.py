@@ -144,6 +144,88 @@ def has_open_position(kite: KiteConnect, symbol: str) -> bool:
     return False
 
 
+def position_pnl_pct(kite: KiteConnect, symbol: str) -> float | None:
+    """Return unrealised P&L % for the open option position, or None if not found."""
+    try:
+        for pos in kite.positions().get("net", []):
+            ts  = pos.get("tradingsymbol", "")
+            qty = int(pos.get("quantity", 0))
+            if ts.startswith(symbol) and qty != 0:
+                avg = float(pos.get("average_price", 0))
+                cur = float(pos.get("last_price", avg))
+                return (cur - avg) / avg if avg > 0 else 0.0
+    except Exception as e:
+        _LOG.warning(f"P&L fetch failed: {e}")
+    return None
+
+
+def exit_position(symbol: str, api_key: str, access_token: str, gtt_id: int | None = None) -> dict:
+    """
+    Exit all open NRML option positions for symbol.
+
+    Steps:
+      1. Cancel GTT (if gtt_id given) so it doesn't fire after exit.
+      2. Place a LIMIT SELL at LTP × 0.99 (rounded to 0.05) for each open lot.
+
+    Returns {"exits": [...]} on success, {"error": "..."} on failure.
+    """
+    exchange = _EXCHANGE.get(symbol)
+    if not exchange:
+        return {"error": f"Unsupported symbol: {symbol}"}
+
+    kite = _kite_client(api_key, access_token)
+
+    # Step 1: cancel GTT to avoid double-sell after manual exit
+    if gtt_id:
+        try:
+            kite.delete_gtt(gtt_id)
+            _LOG.info(f"GTT {gtt_id} cancelled before exit")
+        except Exception as e:
+            _LOG.warning(f"GTT cancel failed ({e}) — proceeding with exit anyway")
+
+    # Step 2: fetch open positions
+    try:
+        net = kite.positions().get("net", [])
+    except Exception as e:
+        return {"error": f"Could not fetch positions: {e}"}
+
+    exits = []
+    for pos in net:
+        ts  = pos.get("tradingsymbol", "")
+        qty = int(pos.get("quantity", 0))
+        if not ts.startswith(symbol) or qty == 0:
+            continue
+
+        # Fetch LTP for limit price
+        try:
+            ltp_data   = kite.ltp([f"{exchange}:{ts}"])
+            ltp        = float(ltp_data[f"{exchange}:{ts}"]["last_price"])
+            exit_limit = round(round(ltp * 0.99 / 0.05) * 0.05, 2)
+        except Exception as e:
+            return {"error": f"Could not fetch LTP for {ts} exit: {e}"}
+
+        try:
+            order_id = kite.place_order(
+                variety=kite.VARIETY_REGULAR,
+                exchange=exchange,
+                tradingsymbol=ts,
+                transaction_type=kite.TRANSACTION_TYPE_SELL,
+                quantity=abs(qty),
+                product=kite.PRODUCT_NRML,
+                order_type=kite.ORDER_TYPE_LIMIT,
+                price=exit_limit,
+            )
+            exits.append({"tradingsymbol": ts, "qty": abs(qty), "order_id": order_id, "exit_limit": exit_limit})
+            _LOG.info(f"Exit order placed: SELL {abs(qty)} x {ts} @ LIMIT {exit_limit}")
+        except Exception as e:
+            return {"error": f"Exit order failed for {ts}: {e}"}
+
+    if not exits:
+        return {"error": f"No open position found for {symbol}"}
+
+    return {"exits": exits}
+
+
 def place_order_for_signal(
     symbol: str,
     direction: str,

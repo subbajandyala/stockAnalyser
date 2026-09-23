@@ -33,8 +33,15 @@ sys.path.insert(0, str(pathlib.Path(__file__).parent.parent))
 
 import requests
 
+from kiteconnect import KiteConnect as _KC
+
 from screener.elder_ray import run_elder_ray_signal, INDEX_CONFIG
-from screener.kite_order import place_order_for_signal as _place_order
+from screener.kite_order import (
+    place_order_for_signal as _place_order,
+    has_open_position     as _has_pos,
+    position_pnl_pct      as _pnl_pct,
+    exit_position         as _exit_pos,
+)
 
 _AUTO_TRADE   = os.environ.get("KITE_AUTO_TRADE", "0") == "1"
 _TRADE_SYMBOLS = {"NIFTY", "SENSEX"}   # BANKNIFTY excluded
@@ -45,6 +52,11 @@ DEFAULT_SYMBOLS  = ["NIFTY", "BANKNIFTY", "SENSEX", "FINNIFTY"]
 ALERT_SIGNALS    = {"STRONG BUY CE", "BUY CE", "STRONG BUY PE", "BUY PE"}
 MARKET_OPEN      = datetime.time(9, 15)
 MARKET_CLOSE     = datetime.time(15, 30)
+NO_ENTRY_AFTER   = datetime.time(14, 30)   # no new orders after this time
+
+# Reversal thresholds
+_CONTRA_MIN_MINUTES = 30    # ignore contra signal within 30 min of entry
+_REVERSAL_LOSS_PCT  = -0.20  # only reverse when position is losing > 20%
 
 
 # ── Credentials ───────────────────────────────────────────────────────────────
@@ -198,9 +210,16 @@ def scan_once(symbols: list[str], strong_only: bool, state_file: str) -> None:
     _api_key      = os.getenv("KITE_API_KEY")      or _local.get("api_key", "plz6ik09bgb62mey")
     _access_token = os.getenv("KITE_ACCESS_TOKEN") or _local.get("access_token", "")
 
-    state = _load_state(state_file)   # {"NIFTY": "BUY CE", ...}
+    state = _load_state(state_file)
 
-    now_ist = datetime.datetime.now(_IST)
+    now_ist   = datetime.datetime.now(_IST)
+    today_str = now_ist.strftime("%Y-%m-%d")
+
+    # Reset all state at the start of each new trading day
+    if state.get("date") != today_str:
+        state = {"date": today_str}
+        print(f"[{now_ist.strftime('%H:%M:%S IST')}] New trading day — state reset")
+
     print(f"[{now_ist.strftime('%H:%M:%S IST')}] Elder Ray scan — {', '.join(symbols)}")
 
     if not (MARKET_OPEN <= now_ist.time() <= MARKET_CLOSE):
@@ -242,66 +261,189 @@ def scan_once(symbols: list[str], strong_only: bool, state_file: str) -> None:
         notify(f"Elder Ray: {signal} — {symbol}", message, tg_token, tg_chat, ntfy_topic)
         state[symbol] = signal
 
-    # ── Pass 3: auto-trade with capital split logic ───────────────────────────
+    # ── Pass 3: auto-trade ────────────────────────────────────────────────────
     if _AUTO_TRADE:
-        # Collect tradeable STRONG signals (new signals only, NIFTY/SENSEX only)
-        tradeable = {
-            sym: res for sym, res in scan_results.items()
-            if sym in _TRADE_SYMBOLS
-            and "STRONG" in res.get("signal", "")
-            and res.get("signal") != state.get(f"{sym}:last_trade_signal")
-        }
+        if now_ist.time() >= NO_ENTRY_AFTER:
+            print(f"  [AUTO-TRADE] Past {NO_ENTRY_AFTER.strftime('%H:%M')} IST cutoff — no new orders")
+        else:
+            _kite = _KC(api_key=_api_key)
+            _kite.set_access_token(_access_token)
 
-        if tradeable:
-            directions = {sym: ("CE" if res["signal"].endswith("CE") else "PE")
-                          for sym, res in tradeable.items()}
-            unique_dirs = set(directions.values())
+            tradeable = {}  # sym → res  (no open position, fresh entry)
+            reversals  = {}  # sym → res  (open contra position eligible to flip)
 
-            if len(unique_dirs) > 1:
-                # Conflicting signals — skip all
-                conflict_msg = " vs ".join(f"{s}:{d}" for s, d in directions.items())
-                print(f"  [AUTO-TRADE] CONFLICT — {conflict_msg} — skipping all")
-                if ntfy_topic:
-                    send_ntfy("Auto-Trade CONFLICT", f"Conflicting signals: {conflict_msg}\nNo orders placed.", ntfy_topic, priority="default")
-            else:
-                # Same direction — split capital equally
-                n = len(tradeable)
-                fraction = 1.0 / n
-                print(f"  [AUTO-TRADE] {n} signal(s) — capital split {fraction:.0%} each")
+            for sym, res in scan_results.items():
+                if sym not in _TRADE_SYMBOLS:
+                    continue
+                if "STRONG" not in res.get("signal", ""):
+                    continue
 
-                for sym, res in tradeable.items():
-                    direction = directions[sym]
-                    spot      = res.get("price", 0)
-                    print(f"  [AUTO-TRADE] {sym} {direction} @ spot {spot:.0f} ({fraction:.0%} capital)")
-                    trade = _place_order(sym, direction, spot, _api_key, _access_token, fraction)
-                    if "error" in trade:
-                        print(f"  [AUTO-TRADE] SKIPPED — {trade['error']}")
-                        if ntfy_topic:
-                            send_ntfy(f"Auto-Trade SKIPPED: {sym}", f"Signal: {res['signal']}\nReason: {trade['error']}", ntfy_topic, priority="default")
-                    else:
+                new_dir = "CE" if res["signal"].endswith("CE") else "PE"
+
+                if not _has_pos(_kite, sym):
+                    # No open position — skip if we already attempted this signal today
+                    if res["signal"] == state.get(f"{sym}:last_trade_signal"):
+                        print(f"       {sym}: already attempted today — skipping")
+                        continue
+                    tradeable[sym] = res
+                else:
+                    # Open position exists — check direction
+                    existing_dir = state.get(f"{sym}:entry_direction", "")
+                    if not existing_dir or new_dir == existing_dir:
+                        print(f"  [AUTO-TRADE] {sym}: already in {existing_dir or '?'} — holding")
+                        continue
+
+                    # Contra signal — check reversal eligibility
+                    entry_time_str    = state.get(f"{sym}:entry_time", "")
+                    minutes_since_entry = 9999.0
+                    if entry_time_str:
+                        try:
+                            et = datetime.datetime.fromisoformat(entry_time_str)
+                            minutes_since_entry = (now_ist - et).total_seconds() / 60
+                        except Exception:
+                            pass
+
+                    if minutes_since_entry < _CONTRA_MIN_MINUTES:
                         print(
-                            f"  [AUTO-TRADE] ORDER PLACED — {trade['tradingsymbol']}"
-                            f" | Qty {trade['qty']} | Entry ₹{trade['entry_price']}"
-                            f" | SL ₹{trade['sl']} | Target ₹{trade['target']}"
-                            f" | GTT {trade.get('gtt_id', 'N/A')}"
+                            f"  [AUTO-TRADE] {sym}: contra {new_dir} signal only "
+                            f"{minutes_since_entry:.0f}m after entry — noise filter, ignoring"
                         )
-                        if ntfy_topic:
-                            send_ntfy(
-                                f"ORDER PLACED: {trade['tradingsymbol']}",
-                                (
-                                    f"Symbol  : {sym} {trade['opt_type']}\n"
-                                    f"Strike  : {trade['strike']}\n"
-                                    f"Qty     : {trade['qty']} ({fraction:.0%} capital)\n"
-                                    f"Entry   : Rs.{trade['entry_price']}\n"
-                                    f"SL      : Rs.{trade['sl']} (-30%)\n"
-                                    f"Target  : Rs.{trade['target']} (+60%)\n"
-                                    f"GTT ID  : {trade.get('gtt_id', 'N/A')}\n"
-                                    f"Order ID: {trade['order_id']}"
-                                ),
-                                ntfy_topic,
+                        continue
+
+                    # Check current P&L of open position
+                    pnl = _pnl_pct(_kite, sym)
+                    if pnl is None:
+                        # Position gone — GTT must have triggered; treat as fresh
+                        print(f"  [AUTO-TRADE] {sym}: position gone (GTT triggered?) — treating as fresh entry")
+                        tradeable[sym] = res
+                        continue
+
+                    if pnl > _REVERSAL_LOSS_PCT:
+                        print(
+                            f"  [AUTO-TRADE] {sym}: contra {new_dir} signal — P&L {pnl:+.0%} "
+                            f"— holding (need <{_REVERSAL_LOSS_PCT:.0%} to reverse)"
+                        )
+                        continue
+
+                    # Losing > 20% after 30+ min with contra signal — eligible for reversal
+                    print(
+                        f"  [AUTO-TRADE] {sym}: REVERSAL — {existing_dir}→{new_dir} "
+                        f"| P&L {pnl:+.0%} | {minutes_since_entry:.0f}m since entry"
+                    )
+                    reversals[sym] = res
+
+            # ── Execute reversals first (independent of conflict logic) ──────
+            for sym, res in reversals.items():
+                new_dir  = "CE" if res["signal"].endswith("CE") else "PE"
+                old_dir  = state.get(f"{sym}:entry_direction", "?")
+                gtt_id   = state.get(f"{sym}:gtt_id")
+
+                exit_res = _exit_pos(sym, _api_key, _access_token, gtt_id)
+                if "error" in exit_res:
+                    print(f"  [AUTO-TRADE] {sym}: EXIT FAILED — {exit_res['error']} — not flipping")
+                    if ntfy_topic:
+                        send_ntfy(f"EXIT FAILED: {sym}", f"Reversal exit failed:\n{exit_res['error']}", ntfy_topic, priority="high")
+                    continue
+
+                print(f"  [AUTO-TRADE] {sym}: exited {old_dir} — now entering {new_dir}")
+                if ntfy_topic:
+                    send_ntfy(f"REVERSAL: {sym} {old_dir}→{new_dir}", f"Exited {old_dir} (loss >20%)\nNow entering {new_dir}...", ntfy_topic)
+
+                # Clear old position state
+                for k in (f"{sym}:entry_time", f"{sym}:entry_direction", f"{sym}:entry_price",
+                          f"{sym}:gtt_id", f"{sym}:trade", f"{sym}:last_trade_signal"):
+                    state.pop(k, None)
+
+                spot  = res.get("price", 0)
+                trade = _place_order(sym, new_dir, spot, _api_key, _access_token, 1.0)
+                if "error" in trade:
+                    print(f"  [AUTO-TRADE] {sym}: reversal re-entry FAILED — {trade['error']}")
+                    if ntfy_topic:
+                        send_ntfy(f"REVERSAL RE-ENTRY FAILED: {sym}", trade["error"], ntfy_topic, priority="high")
+                    state[f"{sym}:last_trade_signal"] = res["signal"]
+                else:
+                    print(
+                        f"  [AUTO-TRADE] REVERSAL ORDER — {trade['tradingsymbol']}"
+                        f" | Entry ₹{trade['entry_price']} | SL ₹{trade['sl']} | Target ₹{trade['target']}"
+                    )
+                    if ntfy_topic:
+                        send_ntfy(
+                            f"REVERSAL ORDER: {trade['tradingsymbol']}",
+                            (
+                                f"Reversed: {old_dir} → {new_dir}\n"
+                                f"Strike  : {trade['strike']}\n"
+                                f"Qty     : {trade['qty']}\n"
+                                f"Entry   : Rs.{trade['entry_price']}\n"
+                                f"SL      : Rs.{trade['sl']} (-30%)\n"
+                                f"Target  : Rs.{trade['target']} (+60%)\n"
+                                f"GTT ID  : {trade.get('gtt_id', 'N/A')}"
+                            ),
+                            ntfy_topic,
+                        )
+                    state[f"{sym}:trade"]             = trade["order_id"]
+                    state[f"{sym}:last_trade_signal"] = res["signal"]
+                    state[f"{sym}:gtt_id"]            = trade.get("gtt_id")
+                    state[f"{sym}:entry_time"]        = now_ist.isoformat()
+                    state[f"{sym}:entry_direction"]   = new_dir
+                    state[f"{sym}:entry_price"]       = trade.get("entry_price", 0)
+
+            # ── Fresh entries with conflict detection + capital split ─────────
+            if tradeable:
+                directions  = {sym: ("CE" if res["signal"].endswith("CE") else "PE")
+                               for sym, res in tradeable.items()}
+                unique_dirs = set(directions.values())
+
+                if len(unique_dirs) > 1:
+                    conflict_msg = " vs ".join(f"{s}:{d}" for s, d in directions.items())
+                    print(f"  [AUTO-TRADE] CONFLICT — {conflict_msg} — skipping all")
+                    if ntfy_topic:
+                        send_ntfy("Auto-Trade CONFLICT", f"Conflicting signals: {conflict_msg}\nNo orders placed.", ntfy_topic, priority="default")
+                else:
+                    n        = len(tradeable)
+                    fraction = 1.0 / n
+                    print(f"  [AUTO-TRADE] {n} fresh signal(s) — capital split {fraction:.0%} each")
+
+                    for sym, res in tradeable.items():
+                        direction = directions[sym]
+                        spot      = res.get("price", 0)
+                        print(f"  [AUTO-TRADE] {sym} {direction} @ spot {spot:.0f} ({fraction:.0%} capital)")
+                        trade = _place_order(sym, direction, spot, _api_key, _access_token, fraction)
+                        if "error" in trade:
+                            error_msg = trade["error"]
+                            print(f"  [AUTO-TRADE] SKIPPED — {error_msg}")
+                            if ntfy_topic:
+                                send_ntfy(f"Auto-Trade SKIPPED: {sym}", f"Signal: {res['signal']}\nReason: {error_msg}", ntfy_topic, priority="default")
+                            # Re-fire fix: mark attempted unless it was blocked by an existing position
+                            if "already exists" not in error_msg:
+                                state[f"{sym}:last_trade_signal"] = res["signal"]
+                        else:
+                            print(
+                                f"  [AUTO-TRADE] ORDER PLACED — {trade['tradingsymbol']}"
+                                f" | Qty {trade['qty']} | Entry ₹{trade['entry_price']}"
+                                f" | SL ₹{trade['sl']} | Target ₹{trade['target']}"
+                                f" | GTT {trade.get('gtt_id', 'N/A')}"
                             )
-                        state[f"{sym}:trade"] = trade["order_id"]
-                        state[f"{sym}:last_trade_signal"] = res["signal"]
+                            if ntfy_topic:
+                                send_ntfy(
+                                    f"ORDER PLACED: {trade['tradingsymbol']}",
+                                    (
+                                        f"Symbol  : {sym} {trade['opt_type']}\n"
+                                        f"Strike  : {trade['strike']}\n"
+                                        f"Qty     : {trade['qty']} ({fraction:.0%} capital)\n"
+                                        f"Entry   : Rs.{trade['entry_price']}\n"
+                                        f"SL      : Rs.{trade['sl']} (-30%)\n"
+                                        f"Target  : Rs.{trade['target']} (+60%)\n"
+                                        f"GTT ID  : {trade.get('gtt_id', 'N/A')}\n"
+                                        f"Order ID: {trade['order_id']}"
+                                    ),
+                                    ntfy_topic,
+                                )
+                            state[f"{sym}:trade"]             = trade["order_id"]
+                            state[f"{sym}:last_trade_signal"] = res["signal"]
+                            state[f"{sym}:gtt_id"]            = trade.get("gtt_id")
+                            state[f"{sym}:entry_time"]        = now_ist.isoformat()
+                            state[f"{sym}:entry_direction"]   = direction
+                            state[f"{sym}:entry_price"]       = trade.get("entry_price", 0)
 
     _save_state(state_file, state)
     print("State saved.")
