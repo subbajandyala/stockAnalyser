@@ -65,5 +65,6 @@ class Handler(BaseHTTPRequestHandler):
         self._send(HTML.format(msg=msg))
 
 if __name__ == "__main__":
+    HTTPServer.allow_reuse_address = True
     print(f"Token server running at http://157.245.154.130:{PORT}")
     HTTPServer(("0.0.0.0", PORT), Handler).serve_forever()
