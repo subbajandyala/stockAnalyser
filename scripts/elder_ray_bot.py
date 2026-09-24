@@ -270,6 +270,41 @@ def scan_once(symbols: list[str], strong_only: bool, state_file: str) -> None:
             _kite = _KC(api_key=_api_key)
             _kite.set_access_token(_access_token)
 
+            # ── Detect closed positions and unlock re-entry after 30 min ─────
+            for sym in list(_TRADE_SYMBOLS):
+                if not state.get(f"{sym}:entry_direction"):
+                    continue  # no trade recorded today for this symbol
+                if _has_pos(_kite, sym):
+                    continue  # position still open, nothing to do
+
+                # Position is gone (manual exit or GTT triggered)
+                exit_time_str = state.get(f"{sym}:exit_time")
+                if not exit_time_str:
+                    # First scan after position closed — start cooldown
+                    state[f"{sym}:exit_time"] = now_ist.isoformat()
+                    print(f"  [AUTO-TRADE] {sym}: position closed — 30min cooldown before re-entry")
+                    if ntfy_topic:
+                        send_ntfy(f"Position closed: {sym}", "30min cooldown started before next re-entry.", ntfy_topic, priority="default")
+                    continue
+
+                # Check if cooldown has passed
+                try:
+                    exit_time = datetime.datetime.fromisoformat(exit_time_str)
+                    minutes_since_exit = (now_ist - exit_time).total_seconds() / 60
+                except Exception:
+                    minutes_since_exit = 9999
+
+                if minutes_since_exit < 30:
+                    remaining = int(30 - minutes_since_exit)
+                    print(f"  [AUTO-TRADE] {sym}: cooldown after exit — {remaining}min remaining")
+                    continue
+
+                # 30 min passed — clear all blocks, allow fresh re-entry
+                print(f"  [AUTO-TRADE] {sym}: cooldown complete — re-entry unlocked")
+                for k in (f"{sym}:last_trade_signal", f"{sym}:entry_direction",
+                          f"{sym}:entry_price", f"{sym}:gtt_id", f"{sym}:trade", f"{sym}:exit_time"):
+                    state.pop(k, None)
+
             tradeable       = {}  # sym → res  (no open position, fresh entry)
             profit_bookings = {}  # sym → res  (in profit >= 15%, contra signal → book and go flat)
             reversals       = {}  # sym → res  (losing > 20%, contra signal → exit + re-enter)
