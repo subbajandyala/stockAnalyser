@@ -54,9 +54,10 @@ MARKET_OPEN      = datetime.time(9, 15)
 MARKET_CLOSE     = datetime.time(15, 30)
 NO_ENTRY_AFTER   = datetime.time(14, 30)   # no new orders after this time
 
-# Reversal thresholds
+# Reversal / profit-booking thresholds
 _CONTRA_MIN_MINUTES = 30    # ignore contra signal within 30 min of entry
-_REVERSAL_LOSS_PCT  = -0.20  # only reverse when position is losing > 20%
+_PROFIT_BOOK_PCT    =  0.15  # book profit and go flat when position is up >= 15% on contra signal
+_REVERSAL_LOSS_PCT  = -0.20  # only reverse (exit + re-enter) when position is losing > 20%
 
 
 # ── Credentials ───────────────────────────────────────────────────────────────
@@ -269,8 +270,9 @@ def scan_once(symbols: list[str], strong_only: bool, state_file: str) -> None:
             _kite = _KC(api_key=_api_key)
             _kite.set_access_token(_access_token)
 
-            tradeable = {}  # sym → res  (no open position, fresh entry)
-            reversals  = {}  # sym → res  (open contra position eligible to flip)
+            tradeable       = {}  # sym → res  (no open position, fresh entry)
+            profit_bookings = {}  # sym → res  (in profit >= 15%, contra signal → book and go flat)
+            reversals       = {}  # sym → res  (losing > 20%, contra signal → exit + re-enter)
 
             for sym, res in scan_results.items():
                 if sym not in _TRADE_SYMBOLS:
@@ -318,6 +320,15 @@ def scan_once(symbols: list[str], strong_only: bool, state_file: str) -> None:
                         tradeable[sym] = res
                         continue
 
+                    # In profit >= 15% with a contra signal → book profit, go flat
+                    if pnl >= _PROFIT_BOOK_PCT:
+                        print(
+                            f"  [AUTO-TRADE] {sym}: contra {new_dir} signal — P&L {pnl:+.0%} "
+                            f"— BOOKING PROFIT (signal reversed, locking in gains)"
+                        )
+                        profit_bookings[sym] = res
+                        continue
+
                     if pnl > _REVERSAL_LOSS_PCT:
                         print(
                             f"  [AUTO-TRADE] {sym}: contra {new_dir} signal — P&L {pnl:+.0%} "
@@ -332,7 +343,42 @@ def scan_once(symbols: list[str], strong_only: bool, state_file: str) -> None:
                     )
                     reversals[sym] = res
 
-            # ── Execute reversals first (independent of conflict logic) ──────
+            # ── Book profits (exit flat, no re-entry) ────────────────────────
+            for sym, res in profit_bookings.items():
+                old_dir = state.get(f"{sym}:entry_direction", "?")
+                gtt_id  = state.get(f"{sym}:gtt_id")
+
+                exit_res = _exit_pos(sym, _api_key, _access_token, gtt_id)
+                if "error" in exit_res:
+                    print(f"  [AUTO-TRADE] {sym}: PROFIT-BOOK EXIT FAILED — {exit_res['error']}")
+                    if ntfy_topic:
+                        send_ntfy(f"PROFIT BOOK FAILED: {sym}", f"Could not exit: {exit_res['error']}", ntfy_topic, priority="high")
+                    continue
+
+                pnl = _pnl_pct(_kite, sym) or 0.0  # best-effort final P&L for the alert
+                print(f"  [AUTO-TRADE] {sym}: PROFIT BOOKED — exited {old_dir} at ~{pnl:+.0%} | going flat")
+                if ntfy_topic:
+                    exits = exit_res.get("exits", [])
+                    ts_label = exits[0]["tradingsymbol"] if exits else sym
+                    send_ntfy(
+                        f"PROFIT BOOKED: {ts_label}",
+                        (
+                            f"Exited {old_dir} position\n"
+                            f"Reason : contra signal fired, locking gains\n"
+                            f"P&L    : ~{pnl:+.0%} on premium\n"
+                            f"Now    : FLAT — no new entry"
+                        ),
+                        ntfy_topic,
+                    )
+
+                # Clear position state; last_trade_signal marks signal as done for today
+                new_dir = "CE" if res["signal"].endswith("CE") else "PE"
+                for k in (f"{sym}:entry_time", f"{sym}:entry_direction", f"{sym}:entry_price",
+                          f"{sym}:gtt_id", f"{sym}:trade"):
+                    state.pop(k, None)
+                state[f"{sym}:last_trade_signal"] = res["signal"]
+
+            # ── Execute reversals (exit + re-enter, independent of conflict logic) ──
             for sym, res in reversals.items():
                 new_dir  = "CE" if res["signal"].endswith("CE") else "PE"
                 old_dir  = state.get(f"{sym}:entry_direction", "?")
