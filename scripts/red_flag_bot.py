@@ -47,7 +47,8 @@ def _kite_creds() -> tuple[str, str]:
 
 
 def _ntfy_topic() -> str:
-    return os.environ.get("NTFY_TOPIC", "")
+    # Prefer a dedicated red-flag topic; fall back to the shared one
+    return os.environ.get("NTFY_RF_TOPIC", "") or os.environ.get("NTFY_TOPIC", "")
 
 
 # ── Notification ──────────────────────────────────────────────────────────────
