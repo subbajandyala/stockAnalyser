@@ -7263,9 +7263,15 @@ def page_agent_flow():
     </div>
     <div>
       <div style="font-size:0.6rem;color:#6e7681;text-transform:uppercase;
-                  font-weight:700;letter-spacing:1px;">Entry Range</div>
+                  font-weight:700;letter-spacing:1px;">Ideal Entry</div>
       <div style="font-size:0.88rem;font-weight:700;color:#e6edf3;">
         ₹{tgt.get("entry_min", ltp):.1f} – ₹{tgt.get("entry_max", ltp):.1f}</div>
+    </div>
+    <div>
+      <div style="font-size:0.6rem;color:#f0883e;text-transform:uppercase;
+                  font-weight:700;letter-spacing:1px;">Max Entry</div>
+      <div style="font-size:0.88rem;font-weight:700;color:#f0883e;">
+        ₹{round(ltp * 1.05, 1):.1f}</div>
     </div>
     <div>
       <div style="font-size:0.6rem;color:#f85149;text-transform:uppercase;
@@ -7400,6 +7406,52 @@ def page_agent_flow():
                 st.dataframe(_top_pe.rename(columns={
                     "Strike": "Strike", "PE OI": "OI", "PE Chng OI": "Chg OI", "PE Vol": "Vol"
                 }), hide_index=True, use_container_width=True)
+
+    # ── Risk Assessment section (only when a trade is recommended) ───────────────
+    if not _res.get("no_trade"):
+        _risk_lbl  = _res.get("risk", "")
+        _theta_lbl = _res.get("theta_risk", "")
+        _liq_lbl   = _res.get("liquidity", "")
+        _ba_lbl    = _res.get("bid_ask", "")
+
+        def _rl_color(lbl):
+            return {"High": "#f85149", "Very High": "#f85149",
+                    "Moderate": "#f0883e", "Low": "#00d4aa",
+                    "Excellent": "#00d4aa", "Good": "#3fb950",
+                    "Fair": "#f0883e", "Poor": "#f85149"}.get(lbl, "#8b949e")
+
+        if _risk_lbl:
+            st.markdown(f"""
+<div style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:14px;">
+  <div style="flex:1;min-width:110px;background:#1a1e2a;border:1px solid #2a2e39;
+              border-radius:10px;padding:10px 12px;text-align:center;">
+    <div style="font-size:0.58rem;color:#6e7681;text-transform:uppercase;
+                font-weight:700;letter-spacing:1px;">Risk</div>
+    <div style="font-size:0.92rem;font-weight:800;color:{_rl_color(_risk_lbl)};
+                margin-top:4px;">{_risk_lbl}</div>
+  </div>
+  <div style="flex:1;min-width:110px;background:#1a1e2a;border:1px solid #2a2e39;
+              border-radius:10px;padding:10px 12px;text-align:center;">
+    <div style="font-size:0.58rem;color:#6e7681;text-transform:uppercase;
+                font-weight:700;letter-spacing:1px;">Theta Risk</div>
+    <div style="font-size:0.92rem;font-weight:800;color:{_rl_color(_theta_lbl)};
+                margin-top:4px;">{_theta_lbl}</div>
+  </div>
+  <div style="flex:1;min-width:110px;background:#1a1e2a;border:1px solid #2a2e39;
+              border-radius:10px;padding:10px 12px;text-align:center;">
+    <div style="font-size:0.58rem;color:#6e7681;text-transform:uppercase;
+                font-weight:700;letter-spacing:1px;">Liquidity</div>
+    <div style="font-size:0.92rem;font-weight:800;color:{_rl_color(_liq_lbl)};
+                margin-top:4px;">{_liq_lbl}</div>
+  </div>
+  <div style="flex:1;min-width:110px;background:#1a1e2a;border:1px solid #2a2e39;
+              border-radius:10px;padding:10px 12px;text-align:center;">
+    <div style="font-size:0.58rem;color:#6e7681;text-transform:uppercase;
+                font-weight:700;letter-spacing:1px;">Bid/Ask Spread</div>
+    <div style="font-size:0.92rem;font-weight:800;color:{_rl_color(_ba_lbl)};
+                margin-top:4px;">{_ba_lbl}</div>
+  </div>
+</div>""", unsafe_allow_html=True)
 
     # Risk disclaimer
     st.markdown(

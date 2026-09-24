@@ -266,6 +266,38 @@ def _rating(confidence: int, n_pass: int) -> int:
     return 1
 
 
+def _risk_assessment(vix: float, vol: float, expiry: str, iv: float) -> dict:
+    """Return risk/theta/liquidity/bid-ask labels for the trade card."""
+    # Risk level: driven by VIX
+    if vix > 20:   risk = "High"
+    elif vix > 15: risk = "Moderate"
+    else:          risk = "Low"
+
+    # Theta risk: days to nearest expiry
+    try:
+        exp_dt = datetime.datetime.strptime(expiry, "%d-%b-%Y").date()
+        dte = (exp_dt - datetime.date.today()).days
+    except Exception:
+        dte = 30
+    if dte == 0:   theta = "Very High"
+    elif dte <= 2: theta = "High"
+    elif dte <= 5: theta = "Moderate"
+    else:          theta = "Low"
+
+    # Liquidity: option volume
+    if vol > 5000:   liquidity = "Excellent"
+    elif vol > 1000: liquidity = "Good"
+    elif vol > 200:  liquidity = "Fair"
+    else:            liquidity = "Poor"
+
+    # Bid-Ask spread proxy (we don't have direct bid/ask; use volume as proxy)
+    if vol > 3000:   bid_ask = "Excellent"
+    elif vol > 800:  bid_ask = "Good"
+    else:            bid_ask = "Moderate"
+
+    return {"risk": risk, "theta_risk": theta, "liquidity": liquidity, "bid_ask": bid_ask}
+
+
 # ── Public entry point ────────────────────────────────────────────────────────
 
 def run_agent_analysis(symbol: str, api_key: str, access_token: str) -> dict:
@@ -352,6 +384,7 @@ def run_agent_analysis(symbol: str, api_key: str, access_token: str) -> dict:
     # 9. Assemble trade
     prob   = min(conf - 4, 91)
     rating = _rating(conf, n_pass)
+    risk_a = _risk_assessment(vix, sk["vol"], expiry, sk["iv"])
 
     return {**common,
             "no_trade":   False,
@@ -364,4 +397,5 @@ def run_agent_analysis(symbol: str, api_key: str, access_token: str) -> dict:
             "checklist":  checks,
             "rating":     rating,
             "probability": prob,
-            "signals":    oi["signals"]}
+            "signals":    oi["signals"],
+            **risk_a}
