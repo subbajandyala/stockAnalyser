@@ -446,12 +446,48 @@ def scan_once(symbols: list[str], strong_only: bool, state_file: str) -> None:
                         gain = round(cur - scalp_entry, 1)
                         print(f"  [SCALP] {sym} {scalp_dir}: ₹{scalp_entry} → ₹{cur} ({gain:+.1f} pts)")
 
+                        has_pos = _has_pos(_kite_s, sym)
+
                         if gain >= tgt:
-                            _scalp_exit(sym, scalp_dir, scalp_entry, cur, gain, "target")
+                            if has_pos:
+                                _scalp_exit(sym, scalp_dir, scalp_entry, cur, gain, "target")
+                            else:
+                                # No auto-trade position — notify only
+                                if ntfy_topic:
+                                    send_ntfy(
+                                        f"🎯 BOOK NOW: {sym} {scalp_dir} +{gain:.0f} pts",
+                                        f"Target hit!\n\n{sym} {scalp_dir}\nEntry  : ₹{scalp_entry:.1f}\nNow    : ₹{cur:.1f}\nGain   : +{gain:.0f} pts\n\nBook your position now!",
+                                        ntfy_topic, priority="urgent",
+                                    )
+                                state[f"{sym}:scalp_state"] = "booked"
+
                         elif gain <= -stp:
-                            _scalp_exit(sym, scalp_dir, scalp_entry, cur, gain, "stop")
+                            if has_pos:
+                                _scalp_exit(sym, scalp_dir, scalp_entry, cur, gain, "stop")
+                            else:
+                                if ntfy_topic:
+                                    send_ntfy(
+                                        f"🛑 STOP HIT: {sym} {scalp_dir} {gain:.0f} pts",
+                                        f"Stop hit!\n\n{sym} {scalp_dir}\nEntry  : ₹{scalp_entry:.1f}\nNow    : ₹{cur:.1f}\nLoss   : {gain:.0f} pts\n\nExit now!",
+                                        ntfy_topic, priority="urgent",
+                                    )
+                                for _k in (f"{sym}:scalp_ts", f"{sym}:scalp_entry",
+                                           f"{sym}:scalp_dir", f"{sym}:scalp_state"):
+                                    state.pop(_k, None)
+
                         elif now_ist.time() >= _SCALP_EOD_CLOSE:
-                            _scalp_exit(sym, scalp_dir, scalp_entry, cur, gain, "eod")
+                            if has_pos:
+                                _scalp_exit(sym, scalp_dir, scalp_entry, cur, gain, "eod")
+                            else:
+                                if ntfy_topic:
+                                    send_ntfy(
+                                        f"⏰ EOD EXIT: {sym} {scalp_dir} {gain:+.0f} pts",
+                                        f"2:00 PM — close your position!\n\n{sym} {scalp_dir}\nEntry  : ₹{scalp_entry:.1f}\nNow    : ₹{cur:.1f}\nP&L    : {gain:+.0f} pts",
+                                        ntfy_topic, priority="high",
+                                    )
+                                for _k in (f"{sym}:scalp_ts", f"{sym}:scalp_entry",
+                                           f"{sym}:scalp_dir", f"{sym}:scalp_state"):
+                                    state.pop(_k, None)
 
                 elif scalp_state == "booked":
                     # Pass 4 (auto-trade) handles re-entry via fresh signal detection.
