@@ -239,78 +239,66 @@ def _build_excel(log: dict) -> bytes:
     return buf.getvalue(), total_pnl
 
 
-# ── Email ─────────────────────────────────────────────────────────────────────
+# ── Delivery: ntfy attachment (works over HTTPS, no SMTP needed) ──────────────
 
-def _send_email(
-    gmail_user: str,
-    app_password: str,
-    to_addr: str,
+import requests as _requests
+
+
+def _ntfy_topic() -> str:
+    p = pathlib.Path.home() / ".kite_creds.json"
+    try:
+        c = json.loads(p.read_text()) if p.exists() else {}
+    except Exception:
+        c = {}
+    return os.getenv("NTFY_TOPIC") or c.get("ntfy_topic", "")
+
+
+def _send_ntfy_report(
+    topic: str,
     date_str: str,
     excel_bytes: bytes,
     total_pnl: float,
     n_signals: int,
     n_trades: int,
 ) -> bool:
-    sign = "+" if total_pnl >= 0 else ""
-    subject = (
-        f"Elder Ray EOD Report {date_str} | "
-        f"P&L {sign}₹{total_pnl:,.0f} | "
-        f"{n_trades} trades | {n_signals} signals"
-    )
-
-    body = (
-        f"Elder Ray EOD Report — {date_str}\n\n"
-        f"Signals fired : {n_signals}\n"
-        f"Trades        : {n_trades}\n"
-        f"Total P&L     : {sign}₹{total_pnl:,.0f}\n\n"
-        f"See the attached Excel for full details.\n\n"
-        f"—\nElder Ray Bot | Not financial advice."
-    )
-
-    msg = MIMEMultipart()
-    msg["From"]    = gmail_user
-    msg["To"]      = to_addr
-    msg["Subject"] = subject
-    msg.attach(MIMEText(body, "plain"))
-
-    part = MIMEBase("application", "octet-stream")
-    part.set_payload(excel_bytes)
-    encoders.encode_base64(part)
-    part.add_header(
-        "Content-Disposition",
-        f'attachment; filename="elder_ray_{date_str}.xlsx"',
-    )
-    msg.attach(part)
-
+    if not topic:
+        print("  No ntfy topic configured")
+        return False
+    sign     = "+" if total_pnl >= 0 else ""
+    title    = f"EOD Report {date_str} | P&L {sign}₹{total_pnl:,.0f} | {n_trades} trades"
+    filename = f"elder_ray_{date_str}.xlsx"
     try:
-        with smtplib.SMTP("smtp.gmail.com", 587) as s:
-            s.ehlo()
-            s.starttls()
-            s.login(gmail_user, app_password)
-            s.sendmail(gmail_user, to_addr, msg.as_string())
-        return True
+        r = _requests.post(
+            f"https://ntfy.sh/{topic}",
+            data=excel_bytes,
+            headers={
+                "Title":        title.encode("utf-8"),
+                "Filename":     filename,
+                "Tags":         "bar_chart",
+                "Priority":     "default",
+                "Content-Type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            },
+            timeout=30,
+        )
+        if not r.ok:
+            print(f"  ntfy HTTP {r.status_code}: {r.text[:200]}")
+        return r.ok
     except Exception as e:
-        print(f"  Email failed: {e}")
+        print(f"  ntfy attachment failed: {e}")
         return False
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
-    now_ist   = datetime.datetime.now(_IST)
-    date_str  = now_ist.strftime("%Y-%m-%d")
+    now_ist  = datetime.datetime.now(_IST)
+    date_str = now_ist.strftime("%Y-%m-%d")
     print(f"[{now_ist.strftime('%H:%M IST')}] EOD report for {date_str}")
 
-    creds = _creds()
+    creds        = _creds()
     api_key      = creds["api_key"]
     access_token = creds["access_token"]
-    gmail_user   = creds["gmail_user"]
-    app_password = creds["gmail_app_password"]
-    report_to    = creds["report_to"]
-
-    if not gmail_user or not app_password:
-        print("ERROR: gmail_user and gmail_app_password required in ~/.kite_creds.json")
-        sys.exit(1)
+    topic        = _ntfy_topic()
 
     log = _load_log(date_str)
     print(f"  Signals : {len(log['signals'])}")
@@ -327,11 +315,8 @@ if __name__ == "__main__":
 
     sign = "+" if total_pnl >= 0 else ""
     print(f"  Total P&L: {sign}₹{total_pnl:,.0f}")
-    print(f"  Emailing to {report_to}...")
+    print(f"  Sending via ntfy ({topic})...")
 
-    ok = _send_email(
-        gmail_user, app_password, report_to,
-        date_str, excel_bytes, total_pnl,
-        len(log["signals"]), len(log["trades"]),
-    )
-    print(f"  Email: {'✅ sent' if ok else '❌ failed'}")
+    ok = _send_ntfy_report(topic, date_str, excel_bytes, total_pnl,
+                           len(log["signals"]), len(log["trades"]))
+    print(f"  ntfy: {'✅ sent' if ok else '❌ failed'}")
