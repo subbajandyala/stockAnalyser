@@ -67,6 +67,16 @@ def _load_log(date_str: str) -> dict:
         return {"date": date_str, "signals": [], "trades": []}
 
 
+def _load_rf_log(date_str: str) -> dict:
+    p = pathlib.Path(f"/tmp/rf_signal_log_{date_str}.json")
+    if not p.exists():
+        return {"date": date_str, "signals": []}
+    try:
+        return json.loads(p.read_text())
+    except Exception:
+        return {"date": date_str, "signals": []}
+
+
 # ── Fetch final premiums for open trades ──────────────────────────────────────
 
 def _fill_final_premiums(trades: list, api_key: str, access_token: str) -> None:
@@ -281,17 +291,64 @@ def _write_kite_signals_sheet(ws, kite_signals: list) -> None:
     ws.freeze_panes = "A2"
 
 
-def _build_excel(log: dict) -> bytes:
+def _write_rf_signals_sheet(ws, signals: list) -> None:
+    ws.title = "Red Flag Signals"
+    ws.sheet_properties.tabColor = "D32F2F"
+
+    headers = ["Time", "Symbol", "Signal", "Chg %", "Flags"]
+    ws.append(headers)
+    for col, h in enumerate(headers, 1):
+        cell = ws.cell(1, col)
+        cell.font      = Font(bold=True, color=_WHITE, name="Calibri", size=11)
+        cell.fill      = _hdr_fill(_HEADER)
+        cell.alignment = Alignment(horizontal="center")
+        cell.border    = _thin_border()
+
+    for s in signals:
+        chg = s.get("chg_pct", 0)
+        ws.append([
+            s.get("time", ""),
+            s.get("symbol", ""),
+            s.get("signal", ""),
+            chg,
+            s.get("flags", ""),
+        ])
+        row_num   = ws.max_row
+        chg_cell  = ws.cell(row_num, 4)
+        sig_cell  = ws.cell(row_num, 3)
+        is_ce     = "CE" in str(s.get("signal", ""))
+        sig_cell.font = Font(
+            color=_TEAL if is_ce else "FFFF6B6B",
+            bold=True, name="Calibri",
+        )
+        chg_cell.font = Font(
+            color=("FF00AA6C" if chg >= 0 else "FFD32F2F"),
+            bold=True, name="Calibri",
+        )
+        for col in range(1, 6):
+            ws.cell(row_num, col).border    = _thin_border()
+            ws.cell(row_num, col).alignment = Alignment(horizontal="center")
+
+    for col_cells in ws.columns:
+        length = max(len(str(c.value or "")) for c in col_cells) + 4
+        ws.column_dimensions[get_column_letter(col_cells[0].column)].width = length
+
+    ws.freeze_panes = "A2"
+
+
+def _build_excel(log: dict, rf_log: dict) -> bytes:
     wb = openpyxl.Workbook()
     wb.remove(wb.active)
 
     ws_trades      = wb.create_sheet("Trades")
     ws_kite        = wb.create_sheet("Kite Signals")
     ws_all_signals = wb.create_sheet("All Signals")
+    ws_rf          = wb.create_sheet("Red Flag Signals")
 
     total_pnl = _write_trades_sheet(ws_trades, log.get("trades", []))
     _write_kite_signals_sheet(ws_kite, log.get("kite_signals", []))
     _write_signals_sheet(ws_all_signals, log.get("signals", []), log["date"])
+    _write_rf_signals_sheet(ws_rf, rf_log.get("signals", []))
 
     buf = io.BytesIO()
     wb.save(buf)
@@ -360,9 +417,11 @@ if __name__ == "__main__":
     access_token = creds["access_token"]
     topic        = _eod_topic()
 
-    log = _load_log(date_str)
-    print(f"  Signals : {len(log['signals'])}")
-    print(f"  Trades  : {len(log['trades'])}")
+    log    = _load_log(date_str)
+    rf_log = _load_rf_log(date_str)
+    print(f"  Signals     : {len(log['signals'])}")
+    print(f"  Trades      : {len(log['trades'])}")
+    print(f"  RF Signals  : {len(rf_log['signals'])}")
 
     if api_key and access_token:
         print("  Fetching final premiums for open trades...")
@@ -371,7 +430,7 @@ if __name__ == "__main__":
         print("  No Kite creds — open trades will show no exit premium")
 
     print("  Building Excel...")
-    excel_bytes, total_pnl = _build_excel(log)
+    excel_bytes, total_pnl = _build_excel(log, rf_log)
 
     sign = "+" if total_pnl >= 0 else ""
     print(f"  Total P&L: {sign}₹{total_pnl:,.0f}")

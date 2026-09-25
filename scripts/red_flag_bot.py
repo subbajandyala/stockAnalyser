@@ -78,6 +78,36 @@ def send_ntfy(title: str, body: str, topic: str) -> bool:
 
 # ── Single scan ───────────────────────────────────────────────────────────────
 
+def _rf_log_path(date_str: str) -> pathlib.Path:
+    return pathlib.Path(f"/tmp/rf_signal_log_{date_str}.json")
+
+
+def _load_rf_log(date_str: str) -> dict:
+    p = _rf_log_path(date_str)
+    try:
+        return json.loads(p.read_text()) if p.exists() else {"date": date_str, "signals": []}
+    except Exception:
+        return {"date": date_str, "signals": []}
+
+
+def _log_rf_signals(date_str: str, new_signals: dict, df) -> None:
+    log  = _load_rf_log(date_str)
+    now  = datetime.datetime.now(_IST).strftime("%H:%M")
+    for sym, trade in new_signals.items():
+        row = df[df["symbol"] == sym]
+        if row.empty:
+            continue
+        row = row.iloc[0]
+        log["signals"].append({
+            "time":    now,
+            "symbol":  sym,
+            "signal":  trade,
+            "chg_pct": round(float(row.get("chg_pct", 0)), 2),
+            "flags":   ", ".join(row.get("flags", [])) if isinstance(row.get("flags"), list) else str(row.get("flags", "")),
+        })
+    _rf_log_path(date_str).write_text(json.dumps(log, indent=2))
+
+
 def scan_once(state_file: str) -> None:
     api_key, access_token = _kite_creds()
     ntfy_topic = _ntfy_topic()
@@ -132,6 +162,9 @@ def scan_once(state_file: str) -> None:
         # Still save state
         pathlib.Path(state_file).write_text(json.dumps(current, indent=2))
         return
+
+    today_str = now_ist.strftime("%Y-%m-%d")
+    _log_rf_signals(today_str, new_signals, df)
 
     # Group by signal type
     strong_ce = [s for s, t in new_signals.items() if t == "STRONG CE"]
