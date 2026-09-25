@@ -121,7 +121,7 @@ def _thin_border() -> Border:
 
 
 def _write_signals_sheet(ws, signals: list, date_str: str) -> None:
-    ws.title = "Signals"
+    ws.title = "All Signals"
     ws.sheet_properties.tabColor = "00D4AA"
 
     headers = ["Time", "Symbol", "Signal", "Spot Price", "ATM Strike"]
@@ -224,15 +224,61 @@ def _write_trades_sheet(ws, trades: list) -> None:
     return total_pnl
 
 
+def _write_kite_signals_sheet(ws, trades: list) -> None:
+    ws.title = "Kite Signals"
+    ws.sheet_properties.tabColor = "FFC107"
+
+    headers = [
+        "#", "Entry Time", "Symbol", "Direction", "Tradingsymbol",
+        "Strike", "Qty", "Entry ₹", "SL ₹", "Target ₹", "Order ID", "GTT ID",
+    ]
+    ws.append(headers)
+    for col, h in enumerate(headers, 1):
+        cell = ws.cell(1, col)
+        cell.font      = Font(bold=True, color=_WHITE, name="Calibri", size=11)
+        cell.fill      = _hdr_fill(_HEADER)
+        cell.alignment = Alignment(horizontal="center")
+        cell.border    = _thin_border()
+
+    for t in trades:
+        row_data = [
+            t.get("id", ""),
+            t.get("entry_time", ""),
+            t.get("symbol", ""),
+            t.get("direction", ""),
+            t.get("tradingsymbol", ""),
+            t.get("strike", ""),
+            t.get("qty", ""),
+            t.get("entry_premium", ""),
+            t.get("stop_premium", ""),
+            t.get("target_premium", ""),
+            t.get("order_id", ""),
+            t.get("gtt_id", ""),
+        ]
+        ws.append(row_data)
+        row_num = ws.max_row
+        for col in range(1, 13):
+            ws.cell(row_num, col).border    = _thin_border()
+            ws.cell(row_num, col).alignment = Alignment(horizontal="center")
+
+    for col_cells in ws.columns:
+        length = max(len(str(c.value or "")) for c in col_cells) + 4
+        ws.column_dimensions[get_column_letter(col_cells[0].column)].width = length
+
+    ws.freeze_panes = "A2"
+
+
 def _build_excel(log: dict) -> bytes:
     wb = openpyxl.Workbook()
     wb.remove(wb.active)
 
-    ws_trades  = wb.create_sheet("Trades")
-    ws_signals = wb.create_sheet("Signals")
+    ws_trades      = wb.create_sheet("Trades")
+    ws_kite        = wb.create_sheet("Kite Signals")
+    ws_all_signals = wb.create_sheet("All Signals")
 
     total_pnl = _write_trades_sheet(ws_trades, log.get("trades", []))
-    _write_signals_sheet(ws_signals, log.get("signals", []), log["date"])
+    _write_kite_signals_sheet(ws_kite, log.get("trades", []))
+    _write_signals_sheet(ws_all_signals, log.get("signals", []), log["date"])
 
     buf = io.BytesIO()
     wb.save(buf)
