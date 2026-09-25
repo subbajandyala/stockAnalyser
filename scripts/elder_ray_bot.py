@@ -207,6 +207,71 @@ def _save_state(state_file: str, state: dict) -> None:
     pathlib.Path(state_file).write_text(json.dumps(state, indent=2))
 
 
+# ── Daily trade log ───────────────────────────────────────────────────────────
+
+def _trade_log_path(date_str: str) -> pathlib.Path:
+    return pathlib.Path(f"/tmp/er_trade_log_{date_str}.json")
+
+
+def _load_trade_log(date_str: str) -> dict:
+    p = _trade_log_path(date_str)
+    try:
+        return json.loads(p.read_text()) if p.exists() else {"date": date_str, "signals": [], "trades": []}
+    except Exception:
+        return {"date": date_str, "signals": [], "trades": []}
+
+
+def _save_trade_log(date_str: str, log: dict) -> None:
+    _trade_log_path(date_str).write_text(json.dumps(log, indent=2))
+
+
+def _log_signal(date_str: str, symbol: str, signal: str, spot: float, atm: int) -> None:
+    log = _load_trade_log(date_str)
+    log["signals"].append({
+        "time":   datetime.datetime.now(_IST).strftime("%H:%M"),
+        "symbol": symbol, "signal": signal,
+        "spot":   round(spot, 0), "atm": atm,
+    })
+    _save_trade_log(date_str, log)
+
+
+def _log_entry(date_str: str, symbol: str, direction: str, trade: dict) -> None:
+    log = _load_trade_log(date_str)
+    log["trades"].append({
+        "id":              len(log["trades"]) + 1,
+        "entry_time":      datetime.datetime.now(_IST).strftime("%H:%M"),
+        "symbol":          symbol,
+        "direction":       direction,
+        "tradingsymbol":   trade.get("tradingsymbol", ""),
+        "strike":          trade.get("strike", 0),
+        "qty":             trade.get("qty", 0),
+        "entry_premium":   trade.get("entry_price", 0),
+        "target_premium":  trade.get("target", 0),
+        "stop_premium":    trade.get("sl", 0),
+        "exit_time":       None,
+        "exit_premium":    None,
+        "exit_reason":     None,
+        "pnl_pts":         None,
+        "pnl_inr":         None,
+    })
+    _save_trade_log(date_str, log)
+
+
+def _log_exit(date_str: str, tradingsymbol: str, exit_premium: float,
+               exit_reason: str, lot_size: int) -> None:
+    log = _load_trade_log(date_str)
+    for t in reversed(log["trades"]):
+        if t.get("tradingsymbol") == tradingsymbol and t.get("exit_time") is None:
+            t["exit_time"]    = datetime.datetime.now(_IST).strftime("%H:%M")
+            t["exit_premium"] = round(exit_premium, 1)
+            t["exit_reason"]  = exit_reason
+            pnl_pts           = round(exit_premium - t["entry_premium"], 1)
+            t["pnl_pts"]      = pnl_pts
+            t["pnl_inr"]      = round(pnl_pts * t["qty"], 0)
+            break
+    _save_trade_log(date_str, log)
+
+
 # ── Single scan (GitHub Actions / --once mode) ────────────────────────────────────────────
 
 def scan_once(symbols: list[str], strong_only: bool, state_file: str) -> None:
@@ -270,6 +335,9 @@ def scan_once(symbols: list[str], strong_only: bool, state_file: str) -> None:
         print(f"\n{'='*55}\n{message}\n{'='*55}\n")
         notify(f"Elder Ray: {signal} — {symbol}", message, tg_token, tg_chat, ntfy_topic)
         state[symbol] = signal
+        step = INDEX_CONFIG.get(symbol, {}).get("strike_step", 50)
+        atm  = int(result.get("atm", round(result["price"] / step) * step))
+        _log_signal(today_str, symbol, signal, result["price"], atm)
         if symbol in _SCALP_SYMBOLS:
             new_scalp_alerts[symbol] = result
 
@@ -349,6 +417,10 @@ def scan_once(symbols: list[str], strong_only: bool, state_file: str) -> None:
                 if ntfy_topic:
                     send_ntfy(title, body, ntfy_topic,
                               priority="urgent" if reason == "target" else "high")
+
+                # Log the exit
+                from screener.kite_order import LOT_SIZE as _LOT
+                _log_exit(today_str, scalp_ts, cur, reason, _LOT.get(sym, 65))
 
                 # Clear full position state so Pass 4 can re-enter fresh
                 for _k in (f"{sym}:gtt_id", f"{sym}:trade", f"{sym}:entry_time",
@@ -594,6 +666,7 @@ def scan_once(symbols: list[str], strong_only: bool, state_file: str) -> None:
                     state[f"{sym}:entry_time"]        = now_ist.isoformat()
                     state[f"{sym}:entry_direction"]   = new_dir
                     state[f"{sym}:entry_price"]       = trade.get("entry_price", 0)
+                    _log_entry(today_str, sym, new_dir, trade)
 
             # ── Fresh entries with conflict detection + capital split ─────────
             if tradeable:
@@ -652,6 +725,7 @@ def scan_once(symbols: list[str], strong_only: bool, state_file: str) -> None:
                             state[f"{sym}:entry_time"]        = now_ist.isoformat()
                             state[f"{sym}:entry_direction"]   = direction
                             state[f"{sym}:entry_price"]       = trade.get("entry_price", 0)
+                            _log_entry(today_str, sym, direction, trade)
 
     _save_state(state_file, state)
     print("State saved.")
