@@ -298,52 +298,70 @@ def _build_excel(log: dict) -> bytes:
     return buf.getvalue(), total_pnl
 
 
-# ── Delivery: ntfy attachment (works over HTTPS, no SMTP needed) ──────────────
+# ── Delivery: SendGrid email (HTTPS API, not blocked by DigitalOcean) ─────────
 
+import base64 as _base64
 import requests as _requests
 
 
-def _ntfy_topic() -> str:
+def _sendgrid_key() -> str:
     p = pathlib.Path.home() / ".kite_creds.json"
     try:
         c = json.loads(p.read_text()) if p.exists() else {}
     except Exception:
         c = {}
-    return os.getenv("NTFY_TOPIC") or c.get("ntfy_topic", "")
+    return os.getenv("SENDGRID_API_KEY") or c.get("sendgrid_api_key", "")
 
 
-def _send_ntfy_report(
-    topic: str,
+def _send_email_sendgrid(
+    sg_key: str,
+    from_addr: str,
+    to_addr: str,
     date_str: str,
     excel_bytes: bytes,
     total_pnl: float,
     n_signals: int,
     n_trades: int,
 ) -> bool:
-    if not topic:
-        print("  No ntfy topic configured")
+    if not sg_key:
+        print("  No SendGrid API key configured")
         return False
-    sign     = "+" if total_pnl >= 0 else ""
-    title    = f"EOD Report {date_str} | P&L {sign}₹{total_pnl:,.0f} | {n_trades} trades"
-    filename = f"elder_ray_{date_str}.xlsx"
+    sign    = "+" if total_pnl >= 0 else ""
+    subject = f"Elder Ray EOD {date_str} | P&L {sign}₹{total_pnl:,.0f} | {n_trades} trades"
+    body    = (
+        f"Elder Ray EOD Report — {date_str}\n\n"
+        f"Signals fired : {n_signals}\n"
+        f"Trades        : {n_trades}\n"
+        f"Total P&L     : {sign}₹{total_pnl:,.0f}\n\n"
+        f"See the attached Excel for full details.\n\n"
+        f"— Elder Ray Bot"
+    )
+    payload = {
+        "personalizations": [{"to": [{"email": to_addr}]}],
+        "from":    {"email": from_addr},
+        "subject": subject,
+        "content": [{"type": "text/plain", "value": body}],
+        "attachments": [{
+            "content":  _base64.b64encode(excel_bytes).decode(),
+            "type":     "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            "filename": f"elder_ray_{date_str}.xlsx",
+        }],
+    }
     try:
         r = _requests.post(
-            f"https://ntfy.sh/{topic}",
-            data=excel_bytes,
+            "https://api.sendgrid.com/v3/mail/send",
             headers={
-                "Title":        title.encode("utf-8"),
-                "Filename":     filename,
-                "Tags":         "bar_chart",
-                "Priority":     "default",
-                "Content-Type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                "Authorization": f"Bearer {sg_key}",
+                "Content-Type":  "application/json",
             },
+            json=payload,
             timeout=30,
         )
-        if not r.ok:
-            print(f"  ntfy HTTP {r.status_code}: {r.text[:200]}")
-        return r.ok
+        if r.status_code not in (200, 202):
+            print(f"  SendGrid HTTP {r.status_code}: {r.text[:300]}")
+        return r.status_code in (200, 202)
     except Exception as e:
-        print(f"  ntfy attachment failed: {e}")
+        print(f"  SendGrid request failed: {e}")
         return False
 
 
@@ -357,7 +375,9 @@ if __name__ == "__main__":
     creds        = _creds()
     api_key      = creds["api_key"]
     access_token = creds["access_token"]
-    topic        = _ntfy_topic()
+    sg_key       = _sendgrid_key()
+    report_to    = creds.get("report_to", "subba.jandyala@gmail.com")
+    from_addr    = creds.get("sendgrid_from", report_to)
 
     log = _load_log(date_str)
     print(f"  Signals : {len(log['signals'])}")
@@ -374,8 +394,9 @@ if __name__ == "__main__":
 
     sign = "+" if total_pnl >= 0 else ""
     print(f"  Total P&L: {sign}₹{total_pnl:,.0f}")
-    print(f"  Sending via ntfy ({topic})...")
+    print(f"  Sending email via SendGrid to {report_to}...")
 
-    ok = _send_ntfy_report(topic, date_str, excel_bytes, total_pnl,
-                           len(log["signals"]), len(log["trades"]))
-    print(f"  ntfy: {'✅ sent' if ok else '❌ failed'}")
+    ok = _send_email_sendgrid(sg_key, from_addr, report_to, date_str,
+                              excel_bytes, total_pnl,
+                              len(log["signals"]), len(log["trades"]))
+    print(f"  Email: {'✅ sent' if ok else '❌ failed'}")
