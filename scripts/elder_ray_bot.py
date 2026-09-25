@@ -273,8 +273,8 @@ def scan_once(symbols: list[str], strong_only: bool, state_file: str) -> None:
         if symbol in _SCALP_SYMBOLS:
             new_scalp_alerts[symbol] = result
 
-    # ── Pass 3: scalp monitoring (notification-only, 10 pts NIFTY / 20 pts SENSEX) ──
-    if ntfy_topic and _access_token:
+    # ── Pass 3: scalp monitoring — auto-exit at 10 pts NIFTY / 20 pts SENSEX ──
+    if _access_token:
         try:
             _kite_s = _KC(api_key=_api_key)
             _kite_s.set_access_token(_access_token)
@@ -298,7 +298,68 @@ def scan_once(symbols: list[str], strong_only: bool, state_file: str) -> None:
                     stp = _SCALP_STOPS.get(sym, 7)
                     print(f"  [SCALP] {sym} {direction} locked @ ₹{ltp:.1f}  target +{tgt}  stop -{stp}")
 
-            # 3b — monitor open scalp positions
+            # 3b — monitor open scalp positions → auto-exit when target / stop / EOD hit
+            def _scalp_exit(sym: str, scalp_dir: str, scalp_entry: float,
+                            cur: float, gain: float, reason: str) -> bool:
+                """Auto-exit the position. Returns True on success."""
+                gtt_id   = state.get(f"{sym}:gtt_id")
+                exit_res = _exit_pos(sym, _api_key, _access_token, gtt_id)
+                if "error" in exit_res:
+                    print(f"  [SCALP] EXIT FAILED ({reason}): {exit_res['error']}")
+                    if ntfy_topic:
+                        send_ntfy(
+                            f"⚠️ EXIT FAILED: {sym} {scalp_dir}",
+                            f"Could not auto-exit ({reason}):\n{exit_res['error']}\n\nPlease exit manually!",
+                            ntfy_topic, priority="urgent",
+                        )
+                    return False
+
+                exits     = exit_res.get("exits", [])
+                ts_label  = exits[0]["tradingsymbol"] if exits else sym
+                print(f"  [SCALP] AUTO-EXITED {ts_label} | {reason} | P&L {gain:+.1f} pts")
+
+                if reason == "target":
+                    title = f"✅ BOOKED: {sym} {scalp_dir} +{gain:.0f} pts"
+                    body  = (
+                        f"Scalp target hit — position closed!\n\n"
+                        f"{ts_label}\n"
+                        f"Entry  : ₹{scalp_entry:.1f}\n"
+                        f"Exit   : ₹{cur:.1f}\n"
+                        f"Profit : +{gain:.0f} pts\n\n"
+                        f"Watching for next signal to re-enter..."
+                    )
+                elif reason == "stop":
+                    title = f"🛑 STOPPED: {sym} {scalp_dir} {gain:.0f} pts"
+                    body  = (
+                        f"Stop loss hit — position closed!\n\n"
+                        f"{ts_label}\n"
+                        f"Entry  : ₹{scalp_entry:.1f}\n"
+                        f"Exit   : ₹{cur:.1f}\n"
+                        f"Loss   : {gain:.0f} pts"
+                    )
+                else:
+                    title = f"⏰ EOD CLOSED: {sym} {scalp_dir} {gain:+.0f} pts"
+                    body  = (
+                        f"2:00 PM EOD exit — position closed!\n\n"
+                        f"{ts_label}\n"
+                        f"Entry  : ₹{scalp_entry:.1f}\n"
+                        f"Exit   : ₹{cur:.1f}\n"
+                        f"P&L    : {gain:+.0f} pts"
+                    )
+                if ntfy_topic:
+                    send_ntfy(title, body, ntfy_topic,
+                              priority="urgent" if reason == "target" else "high")
+
+                # Clear full position state so Pass 4 can re-enter fresh
+                for _k in (f"{sym}:gtt_id", f"{sym}:trade", f"{sym}:entry_time",
+                           f"{sym}:entry_direction", f"{sym}:entry_price",
+                           f"{sym}:last_trade_signal", f"{sym}:exit_time",
+                           f"{sym}:scalp_ts", f"{sym}:scalp_entry",
+                           f"{sym}:scalp_dir"):
+                    state.pop(_k, None)
+                state[f"{sym}:scalp_state"] = "booked"
+                return True
+
             for sym in _SCALP_SYMBOLS:
                 scalp_state  = state.get(f"{sym}:scalp_state")
                 scalp_ts     = state.get(f"{sym}:scalp_ts", "")
@@ -314,78 +375,19 @@ def scan_once(symbols: list[str], strong_only: bool, state_file: str) -> None:
                         print(f"  [SCALP] {sym} {scalp_dir}: ₹{scalp_entry} → ₹{cur} ({gain:+.1f} pts)")
 
                         if gain >= tgt:
-                            send_ntfy(
-                                f"🎯 BOOK NOW: {sym} {scalp_dir} +{gain:.0f} pts",
-                                (
-                                    f"Target hit!\n\n"
-                                    f"{sym} {scalp_dir}\n"
-                                    f"Entry  : ₹{scalp_entry:.1f}\n"
-                                    f"Now    : ₹{cur:.1f}\n"
-                                    f"Gain   : +{gain:.0f} pts\n\n"
-                                    f"Book your position now!"
-                                ),
-                                ntfy_topic, priority="urgent",
-                            )
-                            state[f"{sym}:scalp_state"] = "booked"
-
+                            _scalp_exit(sym, scalp_dir, scalp_entry, cur, gain, "target")
                         elif gain <= -stp:
-                            send_ntfy(
-                                f"🛑 STOP HIT: {sym} {scalp_dir} {gain:.0f} pts",
-                                (
-                                    f"Stop loss hit!\n\n"
-                                    f"{sym} {scalp_dir}\n"
-                                    f"Entry  : ₹{scalp_entry:.1f}\n"
-                                    f"Now    : ₹{cur:.1f}\n"
-                                    f"Loss   : {gain:.0f} pts\n\n"
-                                    f"Exit position now!"
-                                ),
-                                ntfy_topic, priority="urgent",
-                            )
-                            for _k in (f"{sym}:scalp_ts", f"{sym}:scalp_entry",
-                                       f"{sym}:scalp_dir", f"{sym}:scalp_state"):
-                                state.pop(_k, None)
-
+                            _scalp_exit(sym, scalp_dir, scalp_entry, cur, gain, "stop")
                         elif now_ist.time() >= _SCALP_EOD_CLOSE:
-                            send_ntfy(
-                                f"⏰ EOD EXIT: {sym} {scalp_dir} {gain:+.0f} pts",
-                                (
-                                    f"2:00 PM — close before theta accelerates\n\n"
-                                    f"{sym} {scalp_dir}\n"
-                                    f"Entry  : ₹{scalp_entry:.1f}\n"
-                                    f"Now    : ₹{cur:.1f}\n"
-                                    f"P&L    : {gain:+.0f} pts"
-                                ),
-                                ntfy_topic, priority="high",
-                            )
-                            for _k in (f"{sym}:scalp_ts", f"{sym}:scalp_entry",
-                                       f"{sym}:scalp_dir", f"{sym}:scalp_state"):
-                                state.pop(_k, None)
+                            _scalp_exit(sym, scalp_dir, scalp_entry, cur, gain, "eod")
 
                 elif scalp_state == "booked":
-                    # Wait for next STRONG signal → re-enter
+                    # Pass 4 (auto-trade) handles re-entry via fresh signal detection.
+                    # Here we just reset scalp_state when a new strong signal confirms
+                    # so the next entry locks in a fresh premium.
                     res = scan_results.get(sym, {})
                     if "STRONG" in res.get("signal", ""):
-                        direction = "CE" if res["signal"].endswith("CE") else "PE"
-                        step      = INDEX_CONFIG.get(sym, {}).get("strike_step", 50)
-                        atm       = int(res.get("atm", round(res["price"] / step) * step))
-                        ts, ltp   = _resolve_ltp(_kite_s, sym, atm, direction)
-                        if ts and ltp > 0:
-                            send_ntfy(
-                                f"🔄 RE-ENTER: {sym} {direction} ₹{ltp:.0f}",
-                                (
-                                    f"Strong signal confirmed — re-enter!\n\n"
-                                    f"{sym} {direction}\n"
-                                    f"Signal : {res['signal']}\n"
-                                    f"Premium: ₹{ltp:.1f}\n"
-                                    f"Target : ₹{ltp + tgt:.1f} (+{tgt} pts)\n"
-                                    f"Stop   : ₹{ltp - stp:.1f} (-{stp} pts)"
-                                ),
-                                ntfy_topic, priority="high",
-                            )
-                            state[f"{sym}:scalp_ts"]    = ts
-                            state[f"{sym}:scalp_entry"] = ltp
-                            state[f"{sym}:scalp_dir"]   = direction
-                            state[f"{sym}:scalp_state"] = "watching"
+                        state.pop(f"{sym}:scalp_state", None)
 
     # ── Pass 4: auto-trade ────────────────────────────────────────────────────
     if _AUTO_TRADE:
