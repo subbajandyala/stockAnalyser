@@ -356,3 +356,31 @@ def place_order_for_signal(
         "target":        target_price,
         "gtt_id":        gtt_id,
     }
+
+
+def resolve_and_fetch_ltp(
+    kite: KiteConnect, symbol: str, strike: int, opt_type: str
+) -> tuple[str, float]:
+    """Resolve the nearest-expiry tradingsymbol and return (ts, ltp). ('', 0.0) on error."""
+    exchange = _EXCHANGE.get(symbol, "NFO")
+    ts = _resolve_tradingsymbol(kite, symbol, strike, opt_type)
+    if not ts:
+        return "", 0.0
+    try:
+        q   = kite.ltp([f"{exchange}:{ts}"])
+        ltp = float(q.get(f"{exchange}:{ts}", {}).get("last_price", 0.0))
+        return ts, ltp
+    except Exception as e:
+        _LOG.warning(f"LTP fetch failed for {ts}: {e}")
+        return ts, 0.0
+
+
+def fetch_option_ltp(kite: KiteConnect, symbol: str, ts: str) -> float:
+    """Fetch current LTP for a known option tradingsymbol. Returns 0.0 on error."""
+    exchange = _EXCHANGE.get(symbol, "NFO")
+    try:
+        q = kite.ltp([f"{exchange}:{ts}"])
+        return float(q.get(f"{exchange}:{ts}", {}).get("last_price", 0.0))
+    except Exception as e:
+        _LOG.warning(f"LTP fetch failed for {ts}: {e}")
+        return 0.0

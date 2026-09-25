@@ -37,10 +37,12 @@ from kiteconnect import KiteConnect as _KC
 
 from screener.elder_ray import run_elder_ray_signal, INDEX_CONFIG
 from screener.kite_order import (
-    place_order_for_signal as _place_order,
-    has_open_position     as _has_pos,
-    position_pnl_pct      as _pnl_pct,
-    exit_position         as _exit_pos,
+    place_order_for_signal  as _place_order,
+    has_open_position       as _has_pos,
+    position_pnl_pct        as _pnl_pct,
+    exit_position           as _exit_pos,
+    resolve_and_fetch_ltp   as _resolve_ltp,
+    fetch_option_ltp        as _option_ltp,
 )
 
 _AUTO_TRADE   = os.environ.get("KITE_AUTO_TRADE", "0") == "1"
@@ -58,6 +60,12 @@ NO_ENTRY_AFTER   = datetime.time(14, 30)   # no new orders after this time
 _CONTRA_MIN_MINUTES = 30    # ignore contra signal within 30 min of entry
 _PROFIT_BOOK_PCT    =  0.15  # book profit and go flat when position is up >= 15% on contra signal
 _REVERSAL_LOSS_PCT  = -0.20  # only reverse (exit + re-enter) when position is losing > 20%
+
+# Scalp notification targets (premium points)
+_SCALP_TARGETS   = {"NIFTY": 10, "SENSEX": 20}
+_SCALP_STOPS     = {"NIFTY": 7,  "SENSEX": 14}
+_SCALP_EOD_CLOSE = datetime.time(14, 0)
+_SCALP_SYMBOLS   = {"NIFTY", "SENSEX"}
 
 
 # ── Credentials ───────────────────────────────────────────────────────────────
@@ -206,15 +214,15 @@ def scan_once(symbols: list[str], strong_only: bool, state_file: str) -> None:
     ntfy_topic        = _ntfy_topic()
     watch = {"STRONG BUY CE", "STRONG BUY PE"} if strong_only else ALERT_SIGNALS
 
-    # Kite creds for auto-trade (already validated by elder_ray module, reuse here)
-    _local = _load_local_creds()
-    _api_key      = os.getenv("KITE_API_KEY")      or _local.get("api_key", "plz6ik09bgb62mey")
-    _access_token = os.getenv("KITE_ACCESS_TOKEN") or _local.get("access_token", "")
-
     state = _load_state(state_file)
 
     now_ist   = datetime.datetime.now(_IST)
     today_str = now_ist.strftime("%Y-%m-%d")
+
+    # Kite creds (used by both scalp monitoring and auto-trade)
+    _local        = _load_local_creds()
+    _api_key      = os.getenv("KITE_API_KEY")      or _local.get("api_key", "plz6ik09bgb62mey")
+    _access_token = os.getenv("KITE_ACCESS_TOKEN") or _local.get("access_token", "")
 
     # Reset all state at the start of each new trading day
     if state.get("date") != today_str:
@@ -247,6 +255,7 @@ def scan_once(symbols: list[str], strong_only: bool, state_file: str) -> None:
         print(f"  {marker} {symbol:12s} | {signal:16s} | CE:{sce} PE:{spe} | ₹{price:,.0f}")
 
     # ── Pass 2: notifications ─────────────────────────────────────────────────
+    new_scalp_alerts: dict = {}   # sym → result for symbols where a NEW alert just fired
     for symbol, result in scan_results.items():
         signal      = result.get("signal", "WAIT")
         prev_signal = state.get(symbol)
@@ -261,14 +270,130 @@ def scan_once(symbols: list[str], strong_only: bool, state_file: str) -> None:
         print(f"\n{'='*55}\n{message}\n{'='*55}\n")
         notify(f"Elder Ray: {signal} — {symbol}", message, tg_token, tg_chat, ntfy_topic)
         state[symbol] = signal
+        if symbol in _SCALP_SYMBOLS:
+            new_scalp_alerts[symbol] = result
 
-    # ── Pass 3: auto-trade ────────────────────────────────────────────────────
+    # ── Pass 3: scalp monitoring (notification-only, 10 pts NIFTY / 20 pts SENSEX) ──
+    if ntfy_topic and _access_token:
+        try:
+            _kite_s = _KC(api_key=_api_key)
+            _kite_s.set_access_token(_access_token)
+        except Exception as _e:
+            _kite_s = None
+            print(f"  [SCALP] Kite client error: {_e}")
+
+        if _kite_s:
+            # 3a — lock entry premium for any newly fired strong signals
+            for sym, res in new_scalp_alerts.items():
+                direction = "CE" if res["signal"].endswith("CE") else "PE"
+                step      = INDEX_CONFIG.get(sym, {}).get("strike_step", 50)
+                atm       = int(res.get("atm", round(res["price"] / step) * step))
+                ts, ltp   = _resolve_ltp(_kite_s, sym, atm, direction)
+                if ts and ltp > 0:
+                    state[f"{sym}:scalp_ts"]    = ts
+                    state[f"{sym}:scalp_entry"] = ltp
+                    state[f"{sym}:scalp_dir"]   = direction
+                    state[f"{sym}:scalp_state"] = "watching"
+                    tgt = _SCALP_TARGETS.get(sym, 10)
+                    stp = _SCALP_STOPS.get(sym, 7)
+                    print(f"  [SCALP] {sym} {direction} locked @ ₹{ltp:.1f}  target +{tgt}  stop -{stp}")
+
+            # 3b — monitor open scalp positions
+            for sym in _SCALP_SYMBOLS:
+                scalp_state  = state.get(f"{sym}:scalp_state")
+                scalp_ts     = state.get(f"{sym}:scalp_ts", "")
+                scalp_entry  = float(state.get(f"{sym}:scalp_entry", 0))
+                scalp_dir    = state.get(f"{sym}:scalp_dir", "")
+                tgt          = _SCALP_TARGETS.get(sym, 10)
+                stp          = _SCALP_STOPS.get(sym, 7)
+
+                if scalp_state == "watching" and scalp_ts and scalp_entry > 0:
+                    cur = _option_ltp(_kite_s, sym, scalp_ts)
+                    if cur > 0:
+                        gain = round(cur - scalp_entry, 1)
+                        print(f"  [SCALP] {sym} {scalp_dir}: ₹{scalp_entry} → ₹{cur} ({gain:+.1f} pts)")
+
+                        if gain >= tgt:
+                            send_ntfy(
+                                f"🎯 BOOK NOW: {sym} {scalp_dir} +{gain:.0f} pts",
+                                (
+                                    f"Target hit!\n\n"
+                                    f"{sym} {scalp_dir}\n"
+                                    f"Entry  : ₹{scalp_entry:.1f}\n"
+                                    f"Now    : ₹{cur:.1f}\n"
+                                    f"Gain   : +{gain:.0f} pts\n\n"
+                                    f"Book your position now!"
+                                ),
+                                ntfy_topic, priority="urgent",
+                            )
+                            state[f"{sym}:scalp_state"] = "booked"
+
+                        elif gain <= -stp:
+                            send_ntfy(
+                                f"🛑 STOP HIT: {sym} {scalp_dir} {gain:.0f} pts",
+                                (
+                                    f"Stop loss hit!\n\n"
+                                    f"{sym} {scalp_dir}\n"
+                                    f"Entry  : ₹{scalp_entry:.1f}\n"
+                                    f"Now    : ₹{cur:.1f}\n"
+                                    f"Loss   : {gain:.0f} pts\n\n"
+                                    f"Exit position now!"
+                                ),
+                                ntfy_topic, priority="urgent",
+                            )
+                            for _k in (f"{sym}:scalp_ts", f"{sym}:scalp_entry",
+                                       f"{sym}:scalp_dir", f"{sym}:scalp_state"):
+                                state.pop(_k, None)
+
+                        elif now_ist.time() >= _SCALP_EOD_CLOSE:
+                            send_ntfy(
+                                f"⏰ EOD EXIT: {sym} {scalp_dir} {gain:+.0f} pts",
+                                (
+                                    f"2:00 PM — close before theta accelerates\n\n"
+                                    f"{sym} {scalp_dir}\n"
+                                    f"Entry  : ₹{scalp_entry:.1f}\n"
+                                    f"Now    : ₹{cur:.1f}\n"
+                                    f"P&L    : {gain:+.0f} pts"
+                                ),
+                                ntfy_topic, priority="high",
+                            )
+                            for _k in (f"{sym}:scalp_ts", f"{sym}:scalp_entry",
+                                       f"{sym}:scalp_dir", f"{sym}:scalp_state"):
+                                state.pop(_k, None)
+
+                elif scalp_state == "booked":
+                    # Wait for next STRONG signal → re-enter
+                    res = scan_results.get(sym, {})
+                    if "STRONG" in res.get("signal", ""):
+                        direction = "CE" if res["signal"].endswith("CE") else "PE"
+                        step      = INDEX_CONFIG.get(sym, {}).get("strike_step", 50)
+                        atm       = int(res.get("atm", round(res["price"] / step) * step))
+                        ts, ltp   = _resolve_ltp(_kite_s, sym, atm, direction)
+                        if ts and ltp > 0:
+                            send_ntfy(
+                                f"🔄 RE-ENTER: {sym} {direction} ₹{ltp:.0f}",
+                                (
+                                    f"Strong signal confirmed — re-enter!\n\n"
+                                    f"{sym} {direction}\n"
+                                    f"Signal : {res['signal']}\n"
+                                    f"Premium: ₹{ltp:.1f}\n"
+                                    f"Target : ₹{ltp + tgt:.1f} (+{tgt} pts)\n"
+                                    f"Stop   : ₹{ltp - stp:.1f} (-{stp} pts)"
+                                ),
+                                ntfy_topic, priority="high",
+                            )
+                            state[f"{sym}:scalp_ts"]    = ts
+                            state[f"{sym}:scalp_entry"] = ltp
+                            state[f"{sym}:scalp_dir"]   = direction
+                            state[f"{sym}:scalp_state"] = "watching"
+
+    # ── Pass 4: auto-trade ────────────────────────────────────────────────────
     if _AUTO_TRADE:
         if now_ist.time() >= NO_ENTRY_AFTER:
             print(f"  [AUTO-TRADE] Past {NO_ENTRY_AFTER.strftime('%H:%M')} IST cutoff — no new orders")
         else:
             _kite = _KC(api_key=_api_key)
-            _kite.set_access_token(_access_token)
+            _kite.set_access_token(_access_token)  # creds already loaded above
 
             # ── Detect closed positions and unlock re-entry after 30 min ─────
             for sym in list(_TRADE_SYMBOLS):
