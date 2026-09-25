@@ -216,9 +216,9 @@ def _trade_log_path(date_str: str) -> pathlib.Path:
 def _load_trade_log(date_str: str) -> dict:
     p = _trade_log_path(date_str)
     try:
-        return json.loads(p.read_text()) if p.exists() else {"date": date_str, "signals": [], "trades": []}
+        return json.loads(p.read_text()) if p.exists() else {"date": date_str, "signals": [], "kite_signals": [], "trades": []}
     except Exception:
-        return {"date": date_str, "signals": [], "trades": []}
+        return {"date": date_str, "signals": [], "kite_signals": [], "trades": []}
 
 
 def _save_trade_log(date_str: str, log: dict) -> None:
@@ -254,6 +254,37 @@ def _log_entry(date_str: str, symbol: str, direction: str, trade: dict) -> None:
         "pnl_pts":         None,
         "pnl_inr":         None,
     })
+    _save_trade_log(date_str, log)
+
+
+def _log_kite_attempt(
+    date_str: str, symbol: str, direction: str, signal: str,
+    spot: float, trade: dict,
+) -> None:
+    log = _load_trade_log(date_str)
+    log.setdefault("kite_signals", [])
+    entry: dict = {
+        "id":        len(log["kite_signals"]) + 1,
+        "time":      datetime.datetime.now(_IST).strftime("%H:%M"),
+        "symbol":    symbol,
+        "direction": direction,
+        "signal":    signal,
+        "spot":      round(spot, 0),
+    }
+    if "error" in trade:
+        entry["status"] = "failed"
+        entry["error"]  = trade["error"]
+    else:
+        entry["status"]        = "placed"
+        entry["tradingsymbol"] = trade.get("tradingsymbol", "")
+        entry["strike"]        = trade.get("strike", 0)
+        entry["qty"]           = trade.get("qty", 0)
+        entry["entry_premium"] = trade.get("entry_price", 0)
+        entry["sl"]            = trade.get("sl", 0)
+        entry["target"]        = trade.get("target", 0)
+        entry["order_id"]      = trade.get("order_id", "")
+        entry["gtt_id"]        = trade.get("gtt_id", "")
+    log["kite_signals"].append(entry)
     _save_trade_log(date_str, log)
 
 
@@ -672,6 +703,7 @@ def scan_once(symbols: list[str], strong_only: bool, state_file: str) -> None:
 
                 spot  = res.get("price", 0)
                 trade = _place_order(sym, new_dir, spot, _api_key, _access_token, 1.0)
+                _log_kite_attempt(today_str, sym, new_dir, res["signal"], spot, trade)
                 if "error" in trade:
                     print(f"  [AUTO-TRADE] {sym}: reversal re-entry FAILED — {trade['error']}")
                     if ntfy_topic:
@@ -725,6 +757,7 @@ def scan_once(symbols: list[str], strong_only: bool, state_file: str) -> None:
                         spot      = res.get("price", 0)
                         print(f"  [AUTO-TRADE] {sym} {direction} @ spot {spot:.0f} ({fraction:.0%} capital)")
                         trade = _place_order(sym, direction, spot, _api_key, _access_token, fraction)
+                        _log_kite_attempt(today_str, sym, direction, res["signal"], spot, trade)
                         if "error" in trade:
                             error_msg = trade["error"]
                             print(f"  [AUTO-TRADE] SKIPPED — {error_msg}")

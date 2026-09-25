@@ -224,13 +224,14 @@ def _write_trades_sheet(ws, trades: list) -> None:
     return total_pnl
 
 
-def _write_kite_signals_sheet(ws, trades: list) -> None:
+def _write_kite_signals_sheet(ws, kite_signals: list) -> None:
     ws.title = "Kite Signals"
     ws.sheet_properties.tabColor = "FFC107"
 
     headers = [
-        "#", "Entry Time", "Symbol", "Direction", "Tradingsymbol",
-        "Strike", "Qty", "Entry ₹", "SL ₹", "Target ₹", "Order ID", "GTT ID",
+        "#", "Time", "Symbol", "Direction", "Signal", "Spot",
+        "Status", "Tradingsymbol", "Strike", "Qty",
+        "Entry ₹", "SL ₹", "Target ₹", "Order ID", "GTT ID", "Error",
     ]
     ws.append(headers)
     for col, h in enumerate(headers, 1):
@@ -240,24 +241,36 @@ def _write_kite_signals_sheet(ws, trades: list) -> None:
         cell.alignment = Alignment(horizontal="center")
         cell.border    = _thin_border()
 
-    for t in trades:
+    for k in kite_signals:
+        placed = k.get("status") == "placed"
         row_data = [
-            t.get("id", ""),
-            t.get("entry_time", ""),
-            t.get("symbol", ""),
-            t.get("direction", ""),
-            t.get("tradingsymbol", ""),
-            t.get("strike", ""),
-            t.get("qty", ""),
-            t.get("entry_premium", ""),
-            t.get("stop_premium", ""),
-            t.get("target_premium", ""),
-            t.get("order_id", ""),
-            t.get("gtt_id", ""),
+            k.get("id", ""),
+            k.get("time", ""),
+            k.get("symbol", ""),
+            k.get("direction", ""),
+            k.get("signal", ""),
+            k.get("spot", ""),
+            k.get("status", ""),
+            k.get("tradingsymbol", "—") if placed else "—",
+            k.get("strike", "—")        if placed else "—",
+            k.get("qty", "—")           if placed else "—",
+            k.get("entry_premium", "—") if placed else "—",
+            k.get("sl", "—")            if placed else "—",
+            k.get("target", "—")        if placed else "—",
+            k.get("order_id", "—")      if placed else "—",
+            k.get("gtt_id", "—")        if placed else "—",
+            k.get("error", "")          if not placed else "",
         ]
         ws.append(row_data)
         row_num = ws.max_row
-        for col in range(1, 13):
+        status_cell = ws.cell(row_num, 7)
+        if placed:
+            status_cell.fill = _hdr_fill("FF1A3A2A")
+            status_cell.font = Font(color=_TEAL, bold=True, name="Calibri")
+        else:
+            status_cell.fill = _hdr_fill("FF3A1A1A")
+            status_cell.font = Font(color="FFFF6B6B", bold=True, name="Calibri")
+        for col in range(1, 17):
             ws.cell(row_num, col).border    = _thin_border()
             ws.cell(row_num, col).alignment = Alignment(horizontal="center")
 
@@ -277,7 +290,7 @@ def _build_excel(log: dict) -> bytes:
     ws_all_signals = wb.create_sheet("All Signals")
 
     total_pnl = _write_trades_sheet(ws_trades, log.get("trades", []))
-    _write_kite_signals_sheet(ws_kite, log.get("trades", []))
+    _write_kite_signals_sheet(ws_kite, log.get("kite_signals", []))
     _write_signals_sheet(ws_all_signals, log.get("signals", []), log["date"])
 
     buf = io.BytesIO()
