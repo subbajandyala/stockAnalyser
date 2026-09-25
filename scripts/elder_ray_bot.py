@@ -582,8 +582,8 @@ def scan_once(symbols: list[str], strong_only: bool, state_file: str) -> None:
                                 f"Strike  : {trade['strike']}\n"
                                 f"Qty     : {trade['qty']}\n"
                                 f"Entry   : Rs.{trade['entry_price']}\n"
-                                f"SL      : Rs.{trade['sl']} (-30%)\n"
-                                f"Target  : Rs.{trade['target']} (+60%)\n"
+                                f"SL      : Rs.{trade['sl']} (scalp stop)\n"
+                                f"Target  : Rs.{trade['target']} (scalp target)\n"
                                 f"GTT ID  : {trade.get('gtt_id', 'N/A')}"
                             ),
                             ntfy_topic,
@@ -639,8 +639,8 @@ def scan_once(symbols: list[str], strong_only: bool, state_file: str) -> None:
                                         f"Strike  : {trade['strike']}\n"
                                         f"Qty     : {trade['qty']} ({fraction:.0%} capital)\n"
                                         f"Entry   : Rs.{trade['entry_price']}\n"
-                                        f"SL      : Rs.{trade['sl']} (-30%)\n"
-                                        f"Target  : Rs.{trade['target']} (+60%)\n"
+                                        f"SL      : Rs.{trade['sl']} (scalp stop)\n"
+                                        f"Target  : Rs.{trade['target']} (scalp target)\n"
                                         f"GTT ID  : {trade.get('gtt_id', 'N/A')}\n"
                                         f"Order ID: {trade['order_id']}"
                                     ),
@@ -805,8 +805,8 @@ if __name__ == "__main__":
                         f"Strike  : {trade['strike']}\n"
                         f"Qty     : {trade['qty']}\n"
                         f"Entry   : Rs.{trade.get('entry_price', 0)}\n"
-                        f"SL      : Rs.{trade.get('sl', 0)} (-30%)\n"
-                        f"Target  : Rs.{trade.get('target', 0)} (+60%)\n"
+                        f"SL      : Rs.{trade.get('sl', 0)} (scalp stop)\n"
+                        f"Target  : Rs.{trade.get('target', 0)} (scalp target)\n"
                         f"GTT ID  : {trade.get('gtt_id', 'N/A')}\n"
                         f"Order ID: {trade['order_id']}"
                     ),

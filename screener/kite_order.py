@@ -43,8 +43,9 @@ _STRIKE_STEP = {
     "SENSEX": 100,
 }
 
-SL_PCT     = 0.30   # stop loss  = entry - 30%
-TARGET_PCT = 0.60   # target     = entry + 60%
+# Scalp targets in premium points (GTT levels)
+_SCALP_TARGET_PTS = {"NIFTY": 10, "SENSEX": 20}
+_SCALP_STOP_PTS   = {"NIFTY":  7, "SENSEX": 14}
 
 
 # ── Internal helpers ───────────────────────────────────────────────────
@@ -311,9 +312,11 @@ def place_order_for_signal(
             "error":         "Order placed but fill price unavailable — GTT not set",
         }
 
-    # 6. SL and target levels
-    sl_price     = round(entry_price * (1 - SL_PCT), 1)
-    target_price = round(entry_price * (1 + TARGET_PCT), 1)
+    # 6. SL and target — points-based for scalping
+    tgt_pts  = _SCALP_TARGET_PTS.get(symbol, 10)
+    stop_pts = _SCALP_STOP_PTS.get(symbol, 7)
+    sl_price     = round(entry_price - stop_pts, 1)
+    target_price = round(entry_price + tgt_pts, 1)
 
     # 7. GTT two-leg (OCO): [sl_trigger, target_trigger]
     gtt_id = None
