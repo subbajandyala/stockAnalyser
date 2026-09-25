@@ -298,69 +298,53 @@ def _build_excel(log: dict) -> bytes:
     return buf.getvalue(), total_pnl
 
 
-# ── Delivery: Brevo email (HTTPS API, not blocked by DigitalOcean) ─────────────
+# ── Delivery: ntfy attachment ──────────────────────────────────────────────────
 
-import base64 as _base64
 import requests as _requests
 
 
-def _brevo_key() -> str:
+def _eod_topic() -> str:
     p = pathlib.Path.home() / ".kite_creds.json"
     try:
         c = json.loads(p.read_text()) if p.exists() else {}
     except Exception:
         c = {}
-    return os.getenv("BREVO_API_KEY") or c.get("brevo_api_key", "")
+    # dedicated EOD topic; falls back to main ntfy_topic if not set
+    return os.getenv("EOD_NTFY_TOPIC") or c.get("eod_ntfy_topic") or c.get("ntfy_topic", "")
 
 
-def _send_email_brevo(
-    api_key: str,
-    from_addr: str,
-    to_addr: str,
+def _send_ntfy_report(
+    topic: str,
     date_str: str,
     excel_bytes: bytes,
     total_pnl: float,
     n_signals: int,
     n_trades: int,
 ) -> bool:
-    if not api_key:
-        print("  No Brevo API key configured")
+    if not topic:
+        print("  No EOD ntfy topic configured")
         return False
-    sign    = "+" if total_pnl >= 0 else ""
-    subject = f"Elder Ray EOD {date_str} | P&L {sign}₹{total_pnl:,.0f} | {n_trades} trades"
-    body    = (
-        f"Elder Ray EOD Report — {date_str}\n\n"
-        f"Signals fired : {n_signals}\n"
-        f"Trades        : {n_trades}\n"
-        f"Total P&L     : {sign}₹{total_pnl:,.0f}\n\n"
-        f"See the attached Excel for full details.\n\n"
-        f"— Elder Ray Bot"
-    )
-    payload = {
-        "sender":      {"email": from_addr, "name": "Elder Ray Bot"},
-        "to":          [{"email": to_addr}],
-        "subject":     subject,
-        "textContent": body,
-        "attachment":  [{
-            "content": _base64.b64encode(excel_bytes).decode(),
-            "name":    f"elder_ray_{date_str}.xlsx",
-        }],
-    }
+    sign     = "+" if total_pnl >= 0 else ""
+    title    = f"EOD Report {date_str} | P&L {sign}₹{total_pnl:,.0f} | {n_trades} trades"
+    filename = f"elder_ray_{date_str}.xlsx"
     try:
         r = _requests.post(
-            "https://api.brevo.com/v3/smtp/email",
+            f"https://ntfy.sh/{topic}",
+            data=excel_bytes,
             headers={
-                "api-key":      api_key,
-                "Content-Type": "application/json",
+                "Title":        title.encode("utf-8"),
+                "Filename":     filename,
+                "Tags":         "bar_chart",
+                "Priority":     "default",
+                "Content-Type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             },
-            json=payload,
             timeout=30,
         )
-        if r.status_code not in (200, 201):
-            print(f"  Brevo HTTP {r.status_code}: {r.text[:300]}")
-        return r.status_code in (200, 201)
+        if not r.ok:
+            print(f"  ntfy HTTP {r.status_code}: {r.text[:200]}")
+        return r.ok
     except Exception as e:
-        print(f"  Brevo request failed: {e}")
+        print(f"  ntfy failed: {e}")
         return False
 
 
@@ -374,9 +358,7 @@ if __name__ == "__main__":
     creds        = _creds()
     api_key      = creds["api_key"]
     access_token = creds["access_token"]
-    brevo_key    = _brevo_key()
-    report_to    = creds.get("report_to", "subba.jandyala@gmail.com")
-    from_addr    = creds.get("brevo_from", report_to)
+    topic        = _eod_topic()
 
     log = _load_log(date_str)
     print(f"  Signals : {len(log['signals'])}")
@@ -393,9 +375,8 @@ if __name__ == "__main__":
 
     sign = "+" if total_pnl >= 0 else ""
     print(f"  Total P&L: {sign}₹{total_pnl:,.0f}")
-    print(f"  Sending email via Brevo to {report_to}...")
+    print(f"  Sending via ntfy topic '{topic}'...")
 
-    ok = _send_email_brevo(brevo_key, from_addr, report_to, date_str,
-                           excel_bytes, total_pnl,
+    ok = _send_ntfy_report(topic, date_str, excel_bytes, total_pnl,
                            len(log["signals"]), len(log["trades"]))
-    print(f"  Email: {'✅ sent' if ok else '❌ failed'}")
+    print(f"  ntfy: {'✅ sent' if ok else '❌ failed'}")
