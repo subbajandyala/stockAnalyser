@@ -90,10 +90,15 @@ def _load_rf_log(date_str: str) -> dict:
         return {"date": date_str, "signals": []}
 
 
-def _log_rf_signals(date_str: str, new_signals: dict, df) -> None:
+def _log_rf_signals(date_str: str, signals: dict, df) -> None:
     log  = _load_rf_log(date_str)
     now  = datetime.datetime.now(_IST).strftime("%H:%M")
-    for sym, trade in new_signals.items():
+    # track already-logged (symbol, signal) pairs to avoid duplicates
+    already = {(e["symbol"], e["signal"]) for e in log["signals"]}
+    added = False
+    for sym, trade in signals.items():
+        if (sym, trade) in already:
+            continue
         row = df[df["symbol"] == sym]
         if row.empty:
             continue
@@ -105,7 +110,9 @@ def _log_rf_signals(date_str: str, new_signals: dict, df) -> None:
             "chg_pct": round(float(row.get("chg_pct", 0)), 2),
             "flags":   ", ".join(row.get("flags", [])) if isinstance(row.get("flags"), list) else str(row.get("flags", "")),
         })
-    _rf_log_path(date_str).write_text(json.dumps(log, indent=2))
+        added = True
+    if added:
+        _rf_log_path(date_str).write_text(json.dumps(log, indent=2))
 
 
 def scan_once(state_file: str) -> None:
@@ -157,14 +164,16 @@ def scan_once(state_file: str) -> None:
         if prev_state.get(sym) != trade
     }
 
+    today_str = now_ist.strftime("%Y-%m-%d")
+
     if not new_signals:
         print("  No new signals since last scan.")
-        # Still save state
+        _log_rf_signals(today_str, current, df)
         pathlib.Path(state_file).write_text(json.dumps(current, indent=2))
         return
-
-    today_str = now_ist.strftime("%Y-%m-%d")
-    _log_rf_signals(today_str, new_signals, df)
+    # log all current strong signals (dedup inside); catches signals that
+    # existed before the bot restarted with new code
+    _log_rf_signals(today_str, current, df)
 
     # Group by signal type
     strong_ce = [s for s, t in new_signals.items() if t == "STRONG CE"]
