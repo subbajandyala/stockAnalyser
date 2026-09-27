@@ -44,6 +44,7 @@ from screener.kite_order import (
     resolve_and_fetch_ltp   as _resolve_ltp,
     fetch_option_ltp        as _option_ltp,
 )
+from screener.cpr import load_cpr_for_symbol, cpr_confirms as _cpr_confirms
 
 _AUTO_TRADE   = os.environ.get("KITE_AUTO_TRADE", "0") == "1"
 _TRADE_SYMBOLS = {"NIFTY", "SENSEX"}   # BANKNIFTY excluded
@@ -242,6 +243,7 @@ def _log_entry(date_str: str, symbol: str, direction: str, trade: dict) -> None:
         "entry_time":      datetime.datetime.now(_IST).strftime("%H:%M"),
         "symbol":          symbol,
         "direction":       direction,
+        "trade_mode":      trade.get("trade_mode", "scalp"),
         "tradingsymbol":   trade.get("tradingsymbol", ""),
         "strike":          trade.get("strike", 0),
         "qty":             trade.get("qty", 0),
@@ -276,6 +278,7 @@ def _log_kite_attempt(
         entry["error"]  = trade["error"]
     else:
         entry["status"]        = "placed"
+        entry["trade_mode"]    = trade.get("trade_mode", "scalp")
         entry["tradingsymbol"] = trade.get("tradingsymbol", "")
         entry["strike"]        = trade.get("strike", 0)
         entry["qty"]           = trade.get("qty", 0)
@@ -303,6 +306,14 @@ def _log_exit(date_str: str, tradingsymbol: str, exit_premium: float,
     _save_trade_log(date_str, log)
 
 
+def _trade_mode(state: dict, sym: str, direction: str, spot: float) -> str:
+    """Return 'ride' if CPR confirms the signal, else 'scalp'."""
+    cpr = state.get(f"{sym}:cpr")
+    if not cpr:
+        return "scalp"
+    return "ride" if _cpr_confirms(spot, cpr, direction) else "scalp"
+
+
 # ── Single scan (GitHub Actions / --once mode) ────────────────────────────────────────────
 
 def scan_once(symbols: list[str], strong_only: bool, state_file: str) -> None:
@@ -324,6 +335,25 @@ def scan_once(symbols: list[str], strong_only: bool, state_file: str) -> None:
     if state.get("date") != today_str:
         state = {"date": today_str}
         print(f"[{now_ist.strftime('%H:%M:%S IST')}] New trading day — state reset")
+
+    # ── CPR: compute once per day per trade symbol ────────────────────────────
+    if _AUTO_TRADE and _api_key and _access_token:
+        from kiteconnect import KiteConnect as _KC2
+        _kite_cpr = _KC2(api_key=_api_key)
+        _kite_cpr.set_access_token(_access_token)
+        for _sym in _TRADE_SYMBOLS:
+            _cpr_key = f"{_sym}:cpr"
+            if _cpr_key not in state:
+                _cpr = load_cpr_for_symbol(_kite_cpr, _sym)
+                if _cpr:
+                    state[_cpr_key] = _cpr
+                    _narrow = "NARROW" if _cpr["is_narrow"] else "WIDE"
+                    print(
+                        f"  CPR {_sym}: TC={_cpr['tc']} BC={_cpr['bc']}"
+                        f"  width={_cpr['width_pct']}%  [{_narrow}]"
+                    )
+                else:
+                    print(f"  CPR {_sym}: fetch failed — will trade as scalp")
 
     print(f"[{now_ist.strftime('%H:%M:%S IST')}] Elder Ray scan — {', '.join(symbols)}")
 
@@ -702,8 +732,10 @@ def scan_once(symbols: list[str], strong_only: bool, state_file: str) -> None:
                     state.pop(k, None)
 
                 spot  = res.get("price", 0)
-                trade = _place_order(sym, new_dir, spot, _api_key, _access_token, 1.0)
+                mode  = _trade_mode(state, sym, new_dir, spot)
+                trade = _place_order(sym, new_dir, spot, _api_key, _access_token, 1.0, mode)
                 _log_kite_attempt(today_str, sym, new_dir, res["signal"], spot, trade)
+                print(f"  [AUTO-TRADE] {sym}: trade_mode={mode}")
                 if "error" in trade:
                     print(f"  [AUTO-TRADE] {sym}: reversal re-entry FAILED — {trade['error']}")
                     if ntfy_topic:
@@ -755,8 +787,9 @@ def scan_once(symbols: list[str], strong_only: bool, state_file: str) -> None:
                     for sym, res in tradeable.items():
                         direction = directions[sym]
                         spot      = res.get("price", 0)
-                        print(f"  [AUTO-TRADE] {sym} {direction} @ spot {spot:.0f} ({fraction:.0%} capital)")
-                        trade = _place_order(sym, direction, spot, _api_key, _access_token, fraction)
+                        mode      = _trade_mode(state, sym, direction, spot)
+                        print(f"  [AUTO-TRADE] {sym} {direction} @ spot {spot:.0f} ({fraction:.0%} capital) [{mode}]")
+                        trade = _place_order(sym, direction, spot, _api_key, _access_token, fraction, mode)
                         _log_kite_attempt(today_str, sym, direction, res["signal"], spot, trade)
                         if "error" in trade:
                             error_msg = trade["error"]

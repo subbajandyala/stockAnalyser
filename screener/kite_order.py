@@ -47,6 +47,10 @@ _STRIKE_STEP = {
 _SCALP_TARGET_PTS = {"NIFTY": 10, "SENSEX": 20}
 _SCALP_STOP_PTS   = {"NIFTY":  7, "SENSEX": 14}
 
+# Ride targets — percentage of entry premium (CPR-confirmed trades)
+_RIDE_TARGET_PCT = 0.60   # +60%
+_RIDE_STOP_PCT   = 0.30   # -30%
+
 
 # ── Internal helpers ───────────────────────────────────────────────────
 
@@ -234,6 +238,7 @@ def place_order_for_signal(
     api_key: str,
     access_token: str,
     capital_fraction: float = 1.0,
+    trade_mode: str = "scalp",
 ) -> dict:
     """
     Place ATM option order + GTT for the given signal.
@@ -312,11 +317,15 @@ def place_order_for_signal(
             "error":         "Order placed but fill price unavailable — GTT not set",
         }
 
-    # 6. SL and target — points-based for scalping
-    tgt_pts  = _SCALP_TARGET_PTS.get(symbol, 10)
-    stop_pts = _SCALP_STOP_PTS.get(symbol, 7)
-    sl_price     = round(entry_price - stop_pts, 1)
-    target_price = round(entry_price + tgt_pts, 1)
+    # 6. SL and target — scalp (points) or ride (% of premium)
+    if trade_mode == "ride":
+        sl_price     = round(entry_price * (1 - _RIDE_STOP_PCT), 1)
+        target_price = round(entry_price * (1 + _RIDE_TARGET_PCT), 1)
+    else:
+        tgt_pts      = _SCALP_TARGET_PTS.get(symbol, 10)
+        stop_pts     = _SCALP_STOP_PTS.get(symbol, 7)
+        sl_price     = round(entry_price - stop_pts, 1)
+        target_price = round(entry_price + tgt_pts, 1)
 
     # 7. GTT two-leg (OCO): [sl_trigger, target_trigger]
     gtt_id = None
@@ -358,6 +367,7 @@ def place_order_for_signal(
         "sl":            sl_price,
         "target":        target_price,
         "gtt_id":        gtt_id,
+        "trade_mode":    trade_mode,
     }
 
 
