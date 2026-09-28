@@ -51,7 +51,7 @@ _TRADE_SYMBOLS = {"NIFTY", "SENSEX"}   # BANKNIFTY excluded
 
 _IST = datetime.timezone(datetime.timedelta(hours=5, minutes=30))
 
-DEFAULT_SYMBOLS  = ["NIFTY", "BANKNIFTY", "SENSEX", "FINNIFTY"]
+DEFAULT_SYMBOLS  = ["NIFTY", "BANKNIFTY", "SENSEX"]
 ALERT_SIGNALS    = {"STRONG BUY CE", "BUY CE", "STRONG BUY PE", "BUY PE"}
 MARKET_OPEN      = datetime.time(9, 15)
 MARKET_CLOSE     = datetime.time(15, 30)
