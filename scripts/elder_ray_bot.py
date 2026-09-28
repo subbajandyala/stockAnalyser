@@ -568,42 +568,19 @@ def scan_once(symbols: list[str], strong_only: bool, state_file: str) -> None:
             _kite = _KC(api_key=_api_key)
             _kite.set_access_token(_access_token)  # creds already loaded above
 
-            # ── Detect closed positions and unlock re-entry after 5 min ──────
-            _REENTRY_COOLDOWN = 5  # minutes
+            # ── Detect closed positions and unlock re-entry immediately ────────
             for sym in list(_TRADE_SYMBOLS):
                 if not state.get(f"{sym}:entry_direction"):
                     continue  # no trade recorded today for this symbol
                 if _has_pos(_kite, sym):
                     continue  # position still open, nothing to do
 
-                # Position is gone (manual exit or GTT triggered)
-                exit_time_str = state.get(f"{sym}:exit_time")
-                if not exit_time_str:
-                    # First scan after position closed — clear signal block immediately
-                    # so the same signal can re-fire after the short cooldown
-                    state[f"{sym}:exit_time"] = now_ist.isoformat()
-                    state.pop(f"{sym}:last_trade_signal", None)
-                    print(f"  [AUTO-TRADE] {sym}: position closed — {_REENTRY_COOLDOWN}min cooldown before re-entry")
-                    if ntfy_topic:
-                        send_ntfy(f"Position closed: {sym}", f"{_REENTRY_COOLDOWN}min pause then re-entry on next signal.", ntfy_topic, priority="default")
-                    continue
-
-                # Check if cooldown has passed
-                try:
-                    exit_time = datetime.datetime.fromisoformat(exit_time_str)
-                    minutes_since_exit = (now_ist - exit_time).total_seconds() / 60
-                except Exception:
-                    minutes_since_exit = 9999
-
-                if minutes_since_exit < _REENTRY_COOLDOWN:
-                    remaining = int(_REENTRY_COOLDOWN - minutes_since_exit)
-                    print(f"  [AUTO-TRADE] {sym}: cooldown after exit — {remaining}min remaining")
-                    continue
-
-                # Cooldown passed — clear all blocks, allow fresh re-entry
-                print(f"  [AUTO-TRADE] {sym}: cooldown complete — re-entry unlocked")
-                for k in (f"{sym}:entry_direction", f"{sym}:entry_price",
-                          f"{sym}:gtt_id", f"{sym}:trade", f"{sym}:exit_time"):
+                # Position is gone — clear all blocks immediately, re-entry on next signal
+                print(f"  [AUTO-TRADE] {sym}: position closed — re-entry unlocked immediately")
+                if ntfy_topic:
+                    send_ntfy(f"Position closed: {sym}", "Position closed. Will re-enter on next signal.", ntfy_topic, priority="default")
+                for k in (f"{sym}:last_trade_signal", f"{sym}:entry_direction",
+                          f"{sym}:entry_price", f"{sym}:gtt_id", f"{sym}:trade", f"{sym}:exit_time"):
                     state.pop(k, None)
 
             tradeable       = {}  # sym → res  (no open position, fresh entry)
