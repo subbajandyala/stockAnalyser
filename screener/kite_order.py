@@ -137,13 +137,24 @@ def _fill_price(kite: KiteConnect, order_id: str, exchange: str, ts: str) -> flo
 
 # ── Public API ───────────────────────────────────────────────────────────────
 
-def has_open_position(kite: KiteConnect, symbol: str) -> bool:
-    """True if any net option position for this symbol is non-zero."""
+def has_open_position(kite: KiteConnect, symbol: str, only_ts: str | None = None) -> bool:
+    """True if the bot's option position for this symbol is non-zero.
+
+    If only_ts is given, checks only that specific tradingsymbol (the contract
+    the bot placed). Otherwise falls back to any position starting with symbol.
+    """
     try:
         for pos in kite.positions().get("net", []):
-            ts = pos.get("tradingsymbol", "")
-            if ts.startswith(symbol) and int(pos.get("quantity", 0)) != 0:
-                return True
+            ts  = pos.get("tradingsymbol", "")
+            qty = int(pos.get("quantity", 0))
+            if qty == 0:
+                continue
+            if only_ts:
+                if ts == only_ts:
+                    return True
+            else:
+                if ts.startswith(symbol):
+                    return True
     except Exception as e:
         _LOG.warning(f"Position check failed: {e}")
     return False
@@ -164,13 +175,17 @@ def position_pnl_pct(kite: KiteConnect, symbol: str) -> float | None:
     return None
 
 
-def exit_position(symbol: str, api_key: str, access_token: str, gtt_id: int | None = None) -> dict:
+def exit_position(symbol: str, api_key: str, access_token: str,
+                  gtt_id: int | None = None, only_ts: str | None = None) -> dict:
     """
-    Exit all open NRML option positions for symbol.
+    Exit the bot's open NRML option position for symbol.
+
+    If only_ts is given, exits only that specific tradingsymbol (the exact
+    contract the bot placed). This prevents touching any manual positions.
 
     Steps:
       1. Cancel GTT (if gtt_id given) so it doesn't fire after exit.
-      2. Place a LIMIT SELL at LTP × 0.99 (rounded to 0.05) for each open lot.
+      2. Place a LIMIT SELL at LTP × 0.99 (rounded to 0.05).
 
     Returns {"exits": [...]} on success, {"error": "..."} on failure.
     """
@@ -180,7 +195,7 @@ def exit_position(symbol: str, api_key: str, access_token: str, gtt_id: int | No
 
     kite = _kite_client(api_key, access_token)
 
-    # Step 1: cancel GTT to avoid double-sell after manual exit
+    # Step 1: cancel GTT to avoid double-sell after exit
     if gtt_id:
         try:
             kite.delete_gtt(gtt_id)
@@ -198,7 +213,13 @@ def exit_position(symbol: str, api_key: str, access_token: str, gtt_id: int | No
     for pos in net:
         ts  = pos.get("tradingsymbol", "")
         qty = int(pos.get("quantity", 0))
-        if not ts.startswith(symbol) or qty == 0:
+        if qty == 0:
+            continue
+        # Only exit the bot's specific contract if known; else fall back to prefix match
+        if only_ts:
+            if ts != only_ts:
+                continue
+        elif not ts.startswith(symbol):
             continue
 
         # Fetch LTP for limit price

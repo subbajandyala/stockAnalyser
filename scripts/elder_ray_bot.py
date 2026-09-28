@@ -432,7 +432,8 @@ def scan_once(symbols: list[str], strong_only: bool, state_file: str) -> None:
                             cur: float, gain: float, reason: str) -> bool:
                 """Auto-exit the position. Returns True on success."""
                 gtt_id   = state.get(f"{sym}:gtt_id")
-                exit_res = _exit_pos(sym, _api_key, _access_token, gtt_id)
+                bot_ts   = state.get(f"{sym}:ts") or None
+                exit_res = _exit_pos(sym, _api_key, _access_token, gtt_id, only_ts=bot_ts)
                 if "error" in exit_res:
                     print(f"  [SCALP] EXIT FAILED ({reason}): {exit_res['error']}")
                     if ntfy_topic:
@@ -572,15 +573,16 @@ def scan_once(symbols: list[str], strong_only: bool, state_file: str) -> None:
             for sym in list(_TRADE_SYMBOLS):
                 if not state.get(f"{sym}:entry_direction"):
                     continue  # no trade recorded today for this symbol
-                if _has_pos(_kite, sym):
-                    continue  # position still open, nothing to do
+                bot_ts = state.get(f"{sym}:ts") or None
+                if _has_pos(_kite, sym, only_ts=bot_ts):
+                    continue  # bot's position still open, nothing to do
 
-                # Position is gone — clear all blocks immediately, re-entry on next signal
+                # Bot's position is gone — clear all blocks immediately, re-entry on next signal
                 print(f"  [AUTO-TRADE] {sym}: position closed — re-entry unlocked immediately")
                 if ntfy_topic:
                     send_ntfy(f"Position closed: {sym}", "Position closed. Will re-enter on next signal.", ntfy_topic, priority="default")
                 for k in (f"{sym}:last_trade_signal", f"{sym}:entry_direction",
-                          f"{sym}:entry_price", f"{sym}:gtt_id", f"{sym}:trade", f"{sym}:exit_time"):
+                          f"{sym}:entry_price", f"{sym}:gtt_id", f"{sym}:trade", f"{sym}:ts", f"{sym}:exit_time"):
                     state.pop(k, None)
 
             tradeable       = {}  # sym → res  (no open position, fresh entry)
@@ -595,8 +597,9 @@ def scan_once(symbols: list[str], strong_only: bool, state_file: str) -> None:
 
                 new_dir = "CE" if res["signal"].endswith("CE") else "PE"
 
-                if not _has_pos(_kite, sym):
-                    # No open position — skip if we already attempted this signal today
+                bot_ts = state.get(f"{sym}:ts") or None
+                if not _has_pos(_kite, sym, only_ts=bot_ts):
+                    # No bot position open — skip if already attempted this signal today
                     if res["signal"] == state.get(f"{sym}:last_trade_signal"):
                         print(f"       {sym}: already attempted today — skipping")
                         continue
@@ -660,8 +663,9 @@ def scan_once(symbols: list[str], strong_only: bool, state_file: str) -> None:
             for sym, res in profit_bookings.items():
                 old_dir = state.get(f"{sym}:entry_direction", "?")
                 gtt_id  = state.get(f"{sym}:gtt_id")
+                bot_ts  = state.get(f"{sym}:ts") or None
 
-                exit_res = _exit_pos(sym, _api_key, _access_token, gtt_id)
+                exit_res = _exit_pos(sym, _api_key, _access_token, gtt_id, only_ts=bot_ts)
                 if "error" in exit_res:
                     print(f"  [AUTO-TRADE] {sym}: PROFIT-BOOK EXIT FAILED — {exit_res['error']}")
                     if ntfy_topic:
@@ -696,8 +700,9 @@ def scan_once(symbols: list[str], strong_only: bool, state_file: str) -> None:
                 new_dir  = "CE" if res["signal"].endswith("CE") else "PE"
                 old_dir  = state.get(f"{sym}:entry_direction", "?")
                 gtt_id   = state.get(f"{sym}:gtt_id")
+                bot_ts   = state.get(f"{sym}:ts") or None
 
-                exit_res = _exit_pos(sym, _api_key, _access_token, gtt_id)
+                exit_res = _exit_pos(sym, _api_key, _access_token, gtt_id, only_ts=bot_ts)
                 if "error" in exit_res:
                     print(f"  [AUTO-TRADE] {sym}: EXIT FAILED — {exit_res['error']} — not flipping")
                     if ntfy_topic:
@@ -804,6 +809,7 @@ def scan_once(symbols: list[str], strong_only: bool, state_file: str) -> None:
                                     ntfy_topic,
                                 )
                             state[f"{sym}:trade"]             = trade["order_id"]
+                            state[f"{sym}:ts"]                = trade.get("tradingsymbol", "")
                             state[f"{sym}:last_trade_signal"] = res["signal"]
                             state[f"{sym}:gtt_id"]            = trade.get("gtt_id")
                             state[f"{sym}:entry_time"]        = now_ist.isoformat()
