@@ -507,7 +507,9 @@ def scan_once(symbols: list[str], strong_only: bool, state_file: str) -> None:
                         gain = round(cur - scalp_entry, 1)
                         print(f"  [SCALP] {sym} {scalp_dir}: ₹{scalp_entry} → ₹{cur} ({gain:+.1f} pts)")
 
-                        has_pos = _has_pos(_kite_s, sym)
+                        # Only auto-exit if BOT placed the position; never touch manual trades
+                        bot_placed = bool(state.get(f"{sym}:trade"))
+                        has_pos = _has_pos(_kite_s, sym) if bot_placed else False
 
                         if gain >= tgt:
                             if has_pos:
