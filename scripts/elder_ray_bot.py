@@ -608,11 +608,10 @@ def scan_once(symbols: list[str], strong_only: bool, state_file: str) -> None:
             for sym, res in scan_results.items():
                 if sym not in _TRADE_SYMBOLS:
                     continue
-                sig = res.get("signal", "")
-                if not (sig.endswith("CE") or sig.endswith("PE")):
+                if "STRONG" not in res.get("signal", ""):
                     continue
 
-                new_dir = "CE" if sig.endswith("CE") else "PE"
+                new_dir = "CE" if res["signal"].endswith("CE") else "PE"
 
                 if not _has_pos(_kite, sym):
                     # No open position — skip if we already attempted this signal today
