@@ -485,11 +485,11 @@ def scan_once(symbols: list[str], strong_only: bool, state_file: str) -> None:
                 _log_exit(today_str, scalp_ts, cur, reason, _LOT.get(sym, 65))
 
                 # Clear full position state so Pass 4 can re-enter fresh
-                for _k in (f"{sym}:gtt_id", f"{sym}:trade", f"{sym}:entry_time",
-                           f"{sym}:entry_direction", f"{sym}:entry_price",
-                           f"{sym}:last_trade_signal", f"{sym}:exit_time",
-                           f"{sym}:scalp_ts", f"{sym}:scalp_entry",
-                           f"{sym}:scalp_dir"):
+                for _k in (f"{sym}:gtt_id", f"{sym}:trade", f"{sym}:ts",
+                           f"{sym}:entry_time", f"{sym}:entry_direction",
+                           f"{sym}:entry_price", f"{sym}:last_trade_signal",
+                           f"{sym}:exit_time", f"{sym}:scalp_ts",
+                           f"{sym}:scalp_entry", f"{sym}:scalp_dir"):
                     state.pop(_k, None)
                 state[f"{sym}:scalp_state"] = "booked"
                 return True
@@ -510,7 +510,8 @@ def scan_once(symbols: list[str], strong_only: bool, state_file: str) -> None:
 
                         # Only auto-exit if BOT placed the position; never touch manual trades
                         bot_placed = bool(state.get(f"{sym}:trade"))
-                        has_pos = _has_pos(_kite_s, sym) if bot_placed else False
+                        bot_ts     = state.get(f"{sym}:ts") or None
+                        has_pos    = _has_pos(_kite_s, sym, only_ts=bot_ts) if bot_placed else False
 
                         if gain >= tgt:
                             if has_pos:
