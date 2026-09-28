@@ -608,7 +608,7 @@ def scan_once(symbols: list[str], strong_only: bool, state_file: str) -> None:
             for sym, res in scan_results.items():
                 if sym not in _TRADE_SYMBOLS:
                     continue
-                if res.get("signal", "") not in ALERT_SIGNALS:
+                if "STRONG" not in res.get("signal", ""):
                     continue
 
                 new_dir = "CE" if res["signal"].endswith("CE") else "PE"
