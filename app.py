@@ -595,7 +595,7 @@ _NAV = [
     ("smart_alerts_pro", "⚡ Alerts Pro"),
     ("gamma_blast",      "💥 Gamma Blast"),
     ("elder_ray",        "🎯 Elder Ray"),
-    ("late_session",     "🌅 Late Session"),
+    ("late_session",     "🌅 CAS"),
     ("rpci",             "📈 RPCI"),
     ("red_flag",         "🚨 Red Flag"),
     ("open_low",         "🚀 Open=Low"),
@@ -6176,7 +6176,7 @@ def page_late_session():
 
     st.markdown(
         f'<div class="lhb-header">'
-        f'<span class="lhb-title">🌅 Late Session Blaster</span>'
+        f'<span class="lhb-title">🌅 CAS</span>'
         f'{_badge}{_cas_badge}'
         f'</div>'
         f'<div style="color:#6e7681;font-size:.8rem;margin-bottom:10px;">'
@@ -6500,7 +6500,7 @@ def page_late_session():
                 _fig_ls.add_vrect(
                     x0=str(_late_start_dt), x1=str(_d5.index[-1]),
                     fillcolor="rgba(0,212,170,0.05)", line_width=0,
-                    annotation_text="Late Session", annotation_position="top left",
+                    annotation_text="CAS", annotation_position="top left",
                     annotation_font=dict(size=10, color="#00d4aa"),
                 )
 
