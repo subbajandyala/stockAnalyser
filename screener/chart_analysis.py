@@ -442,6 +442,174 @@ def build_summary(df: pd.DataFrame, events: list) -> dict:
     }
 
 
+# ── Trade Verdict ─────────────────────────────────────────────────────────────
+
+def generate_verdict(df: pd.DataFrame, events: list, obs: list,
+                     fvgs: list, summary: dict) -> dict:
+    last   = df.iloc[-1]
+    close  = float(last["Close"])
+    ema20  = float(last.get("EMA20",  0) or 0)
+    ema50  = float(last.get("EMA50",  0) or 0)
+    ema200 = float(last.get("EMA200", 0) or 0)
+    rsi    = float(last.get("RSI",   50) or 50)
+    adx    = float(last.get("ADX",    0) or 0)
+    di_pos = float(last.get("DI_pos", 0) or 0)
+    di_neg = float(last.get("DI_neg", 0) or 0)
+    vwap   = float(last.get("VWAP",   0) or 0)
+    if np.isnan(vwap): vwap = 0
+
+    score   = 0
+    reasons = []
+
+    # Recent structure (last 3 events carry the most weight)
+    recent_types = [e["type"] for e in events[-8:]] if events else []
+    last3_types  = recent_types[-3:] if recent_types else []
+    has_bull = any(t in ("BOS_UP",   "CHOCH_UP")   for t in last3_types)
+    has_bear = any(t in ("BOS_DOWN", "CHOCH_DOWN")  for t in last3_types)
+    last_ev  = recent_types[-1] if recent_types else ""
+
+    if has_bull and not has_bear:
+        score += 2
+        reasons.append({"text": f"Bullish structure — {last_ev.replace('_',' ')}", "ok": True})
+    elif has_bear and not has_bull:
+        score -= 2
+        reasons.append({"text": f"Bearish structure — {last_ev.replace('_',' ')}", "ok": False})
+    else:
+        reasons.append({"text": "Mixed / unclear structure", "ok": None})
+
+    # EMA alignment
+    if ema20 > ema50 > ema200 and close > ema20:
+        score += 2
+        reasons.append({"text": "EMA aligned bullish (20 > 50 > 200, price above all)", "ok": True})
+    elif ema20 < ema50 < ema200 and close < ema20:
+        score -= 2
+        reasons.append({"text": "EMA aligned bearish (20 < 50 < 200, price below all)", "ok": False})
+    elif ema20 > ema50 and close > ema50:
+        score += 1
+        reasons.append({"text": "EMA20 > EMA50, price above EMA50", "ok": True})
+    elif ema20 < ema50 and close < ema50:
+        score -= 1
+        reasons.append({"text": "EMA20 < EMA50, price below EMA50", "ok": False})
+    else:
+        reasons.append({"text": "EMA alignment mixed", "ok": None})
+
+    # VWAP
+    if vwap > 0:
+        if close > vwap * 1.001:
+            score += 1
+            reasons.append({"text": f"Above VWAP ({vwap:,.0f}) — bulls in control", "ok": True})
+        elif close < vwap * 0.999:
+            score -= 1
+            reasons.append({"text": f"Below VWAP ({vwap:,.0f}) — bears in control", "ok": False})
+        else:
+            reasons.append({"text": "At VWAP — neutral zone", "ok": None})
+
+    # RSI
+    if np.isnan(rsi): rsi = 50
+    if rsi > 70:
+        score -= 1
+        reasons.append({"text": f"RSI {rsi:.0f} — overbought, potential fall", "ok": False})
+    elif rsi < 30:
+        score += 1
+        reasons.append({"text": f"RSI {rsi:.0f} — oversold, watch for bounce", "ok": None})
+    elif 35 <= rsi <= 60:
+        score += 1
+        reasons.append({"text": f"RSI {rsi:.0f} — healthy zone, room to move", "ok": True})
+    else:
+        reasons.append({"text": f"RSI {rsi:.0f} — neutral", "ok": None})
+
+    # ADX + DI
+    if np.isnan(adx): adx = 0
+    if adx > 25:
+        if di_pos > di_neg:
+            score += 1
+            reasons.append({"text": f"ADX {adx:.0f} — strong uptrend (DI+ dominant)", "ok": True})
+        else:
+            score -= 1
+            reasons.append({"text": f"ADX {adx:.0f} — strong downtrend (DI− dominant)", "ok": False})
+    elif adx < 20:
+        reasons.append({"text": f"ADX {adx:.0f} — choppy / no trend", "ok": None})
+    else:
+        reasons.append({"text": f"ADX {adx:.0f} — trend forming", "ok": None})
+
+    # Order Block proximity
+    b_obs = [o for o in obs if o["type"] == "bullish"]
+    s_obs = [o for o in obs if o["type"] == "bearish"]
+    near_bull_ob = any(o["bottom"] * 0.997 <= close <= o["top"] * 1.005 for o in b_obs)
+    near_bear_ob = any(o["bottom"] * 0.995 <= close <= o["top"] * 1.003 for o in s_obs)
+    if near_bull_ob:
+        score += 1
+        reasons.append({"text": "Price at Bullish Order Block — institutional buy zone", "ok": True})
+    if near_bear_ob:
+        score -= 1
+        reasons.append({"text": "Price at Bearish Order Block — institutional sell zone", "ok": False})
+
+    # Verdict
+    if score >= 5:
+        verdict, v_col = "STRONG BUY",  "#00d4aa"
+    elif score >= 3:
+        verdict, v_col = "BUY",         "#3fb950"
+    elif score <= -5:
+        verdict, v_col = "STRONG SELL", "#f85149"
+    elif score <= -3:
+        verdict, v_col = "SELL",        "#f0883e"
+    else:
+        verdict, v_col = "WAIT",        "#8b949e"
+
+    confidence = min(100, max(0, int((abs(score) / 7) * 100)))
+
+    # Entry / SL / Targets
+    sl_vals = df["Low"][df["swing_low"]].values
+    sh_vals = df["High"][df["swing_high"]].values
+    entry_zone = stop_loss = rr = None
+    targets: list[float] = []
+
+    if verdict in ("BUY", "STRONG BUY"):
+        if b_obs:
+            ob = b_obs[-1]
+            entry_zone = (round(ob["bottom"], 1), round(ob["top"], 1))
+            stop_loss  = round(ob["bottom"] * 0.998, 1)
+        elif len(sl_vals):
+            stop_loss  = round(float(sl_vals[-1]), 1)
+            entry_zone = (round(close * 0.9995, 1), round(close * 1.0005, 1))
+        else:
+            stop_loss  = round(close * 0.995, 1)
+            entry_zone = (round(close, 1), round(close, 1))
+        t1 = round(float(sh_vals[-1]), 1) if len(sh_vals) else round(close * 1.005, 1)
+        t2 = round(float(max(sh_vals[-2:]) if len(sh_vals) >= 2 else t1 * 1.005), 1)
+        targets = [t1, t2]
+        if stop_loss and entry_zone:
+            risk   = entry_zone[1] - stop_loss
+            reward = t1 - entry_zone[1]
+            rr = round(reward / risk, 1) if risk > 0 else None
+
+    elif verdict in ("SELL", "STRONG SELL"):
+        if s_obs:
+            ob = s_obs[-1]
+            entry_zone = (round(ob["bottom"], 1), round(ob["top"], 1))
+            stop_loss  = round(ob["top"] * 1.002, 1)
+        elif len(sh_vals):
+            stop_loss  = round(float(sh_vals[-1]), 1)
+            entry_zone = (round(close * 0.9995, 1), round(close * 1.0005, 1))
+        else:
+            stop_loss  = round(close * 1.005, 1)
+            entry_zone = (round(close, 1), round(close, 1))
+        t1 = round(float(sl_vals[-1]), 1) if len(sl_vals) else round(close * 0.995, 1)
+        t2 = round(float(min(sl_vals[-2:]) if len(sl_vals) >= 2 else t1 * 0.995), 1)
+        targets = [t1, t2]
+        if stop_loss and entry_zone:
+            risk   = stop_loss - entry_zone[0]
+            reward = entry_zone[0] - t1
+            rr = round(reward / risk, 1) if risk > 0 else None
+
+    return {
+        "verdict": verdict, "color": v_col, "score": score,
+        "confidence": confidence, "reasons": reasons,
+        "entry_zone": entry_zone, "stop_loss": stop_loss,
+        "targets": targets, "rr": rr,
+    }
+
+
 # ── Main entry point ──────────────────────────────────────────────────────────
 
 def analyze_chart(symbol: str, interval: str,
@@ -468,9 +636,11 @@ def analyze_chart(symbol: str, interval: str,
     fvgs     = detect_fvg(df)
     df       = generate_signals(df, obs, evts)
     summary  = build_summary(df, evts)
+    verdict  = generate_verdict(df, evts, obs, fvgs, summary)
 
     return {
         "df": df, "events": evts, "obs": obs, "fvgs": fvgs,
-        "summary": summary, "symbol": display_name, "interval": interval,
+        "summary": summary, "verdict": verdict,
+        "symbol": display_name, "interval": interval,
         "error": None,
     }
