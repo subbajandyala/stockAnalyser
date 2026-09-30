@@ -78,6 +78,7 @@ from screener.oi_buildup_history import (
     get_expiries       as _oih_get_expiries,
     ALL_INSTRUMENTS    as _OIH_ALL_INSTRUMENTS,
 )
+from screener.chart_analysis import analyze_chart as _analyze_chart, INTERVAL_CFG as _CA_INTERVAL_CFG
 from plotly.subplots import make_subplots
 
 try:
@@ -605,6 +606,7 @@ _NAV = [
     ("fii_compass",      "🌊 FII Compass"),
     ("smart_money",      "🧠 Smart Money"),
     ("promoter_pulse",   "💰 Promoter Pulse"),
+    ("chart_analysis",   "📐 Chart Analysis"),
 ]
 _NAV_KEYS   = [k for k, _ in _NAV]
 _NAV_LABELS = {k: lbl for k, lbl in _NAV}
@@ -8498,6 +8500,370 @@ Entry: near ATM · Stop loss: 30-40% of premium · Target: 2x-3x
         unsafe_allow_html=True)
 
 
+def page_chart_analysis():
+    _ca_api  = st.session_state.get("kite_api_key",      _get_secret("KITE_API_KEY", ""))
+    _ca_tok  = st.session_state.get("kite_access_token", "")
+    _ca_ok   = bool(_ca_api and _ca_tok)
+
+    st.markdown("""
+<div style="margin-bottom:6px;">
+  <div style="font-size:1.25rem;font-weight:900;color:#fff;letter-spacing:-0.5px;">📐 Chart Analysis</div>
+  <div style="font-size:0.78rem;color:#6e7681;margin-top:2px;">SMC · Order Blocks · FVG · BOS/CHoCH · EMA · VWAP · RSI · ADX</div>
+</div>""", unsafe_allow_html=True)
+
+    if not _ca_ok:
+        st.warning("⚡ Connect Zerodha Kite to enable Chart Analysis. Live price data is fetched via Kite Connect.")
+        return
+
+    # ── Controls ──────────────────────────────────────────────────────────────
+    _cc1, _cc2, _cc3 = st.columns([3, 1.4, 1])
+    with _cc1:
+        _ca_sym = st.text_input(
+            "Symbol", value=st.session_state.get("ca_symbol", "NIFTY"),
+            placeholder="NIFTY / SENSEX / RELIANCE / NIFTY25000CE…",
+            key="ca_sym_input", label_visibility="collapsed",
+        ).upper().strip()
+    with _cc2:
+        _ca_tf = st.selectbox(
+            "Timeframe",
+            options=list(_CA_INTERVAL_CFG.keys()),
+            format_func=lambda k: _CA_INTERVAL_CFG[k]["label"],
+            index=list(_CA_INTERVAL_CFG.keys()).index(
+                st.session_state.get("ca_tf", "1D")
+            ),
+            key="ca_tf_sel", label_visibility="collapsed",
+        )
+    with _cc3:
+        _ca_run = st.button("📊 Analyse", key="ca_run_btn", use_container_width=True)
+
+    if _ca_run:
+        st.session_state["ca_symbol"] = _ca_sym
+        st.session_state["ca_tf"]     = _ca_tf
+        with st.spinner(f"Loading {_ca_sym} {_CA_INTERVAL_CFG[_ca_tf]['label']}…"):
+            _ca_res = _analyze_chart(_ca_sym, _ca_tf, _ca_api, _ca_tok)
+        st.session_state["ca_result"] = _ca_res
+        st.session_state["ca_ts"] = datetime.datetime.now(
+            datetime.timezone(datetime.timedelta(hours=5, minutes=30))
+        ).strftime("%I:%M:%S %p IST")
+
+    _ca_res = st.session_state.get("ca_result")
+    _ca_ts  = st.session_state.get("ca_ts", "")
+
+    if _ca_res is None:
+        st.markdown(
+            '<div style="color:#6e7681;font-size:0.85rem;margin-top:16px;">'
+            'Enter a symbol and click <b>📊 Analyse</b>. Supports indices (NIFTY, BANKNIFTY, SENSEX), '
+            'NSE equities (RELIANCE, INFY…) and options/futures (NIFTY25000CE, BANKNIFTY50000PE…).</div>',
+            unsafe_allow_html=True)
+        return
+
+    if _ca_ts:
+        st.caption(f"Last analysed: {_ca_ts}")
+
+    _ca_err = _ca_res.get("error")
+    if _ca_err:
+        st.error(f"Error: {_ca_err}")
+        return
+
+    _df       = _ca_res["df"]
+    _events   = _ca_res["events"]
+    _obs      = _ca_res["obs"]
+    _fvgs     = _ca_res["fvgs"]
+    _summary  = _ca_res["summary"]
+    _sym_disp = _ca_res["symbol"]
+    _tf_disp  = _CA_INTERVAL_CFG[_ca_res["interval"]]["label"]
+
+    # ── Summary card ──────────────────────────────────────────────────────────
+    _trend_col = {"Bullish": "#00d4aa", "Mildly Bullish": "#3fb950",
+                  "Sideways": "#8b949e", "Mildly Bearish": "#f0883e",
+                  "Bearish": "#f85149"}.get(_summary["trend"], "#8b949e")
+    _bias_col  = {"BUY": "#00d4aa", "SELL": "#f85149", "NEUTRAL": "#8b949e"}.get(
+        _summary["bias"], "#8b949e")
+    _struct_col = ("#00d4aa" if "UP" in _summary["structure"]
+                   else "#f85149" if "DOWN" in _summary["structure"]
+                   else "#8b949e")
+
+    st.markdown(f"""
+<div style="background:#1a1e2a;border:1px solid #2a2e39;border-radius:12px;
+            padding:14px 18px;margin-bottom:14px;">
+  <div style="font-size:0.65rem;font-weight:700;color:#8b949e;letter-spacing:1.2px;
+              text-transform:uppercase;margin-bottom:10px;">{_sym_disp} · {_tf_disp}</div>
+  <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(110px,1fr));gap:10px;">
+    <div style="text-align:center;">
+      <div style="font-size:0.6rem;color:#6e7681;text-transform:uppercase;letter-spacing:0.8px;">Trend</div>
+      <div style="font-size:0.95rem;font-weight:800;color:{_trend_col};">{_summary["trend"]}</div>
+    </div>
+    <div style="text-align:center;">
+      <div style="font-size:0.6rem;color:#6e7681;text-transform:uppercase;letter-spacing:0.8px;">Structure</div>
+      <div style="font-size:0.85rem;font-weight:700;color:{_struct_col};">{_summary["structure"]}</div>
+    </div>
+    <div style="text-align:center;">
+      <div style="font-size:0.6rem;color:#6e7681;text-transform:uppercase;letter-spacing:0.8px;">Bias</div>
+      <div style="font-size:1.1rem;font-weight:900;color:{_bias_col};">{_summary["bias"]}</div>
+    </div>
+    <div style="text-align:center;">
+      <div style="font-size:0.6rem;color:#6e7681;text-transform:uppercase;letter-spacing:0.8px;">Close</div>
+      <div style="font-size:0.95rem;font-weight:700;color:#e6edf3;">{_summary["close"]:,}</div>
+    </div>
+    <div style="text-align:center;">
+      <div style="font-size:0.6rem;color:#6e7681;text-transform:uppercase;letter-spacing:0.8px;">RSI 14</div>
+      <div style="font-size:0.95rem;font-weight:700;
+                  color:{"#f85149" if _summary["rsi"]>70 else "#f0883e" if _summary["rsi"]<30 else "#e6edf3"};">
+        {_summary["rsi"]}</div>
+    </div>
+    <div style="text-align:center;">
+      <div style="font-size:0.6rem;color:#6e7681;text-transform:uppercase;letter-spacing:0.8px;">ADX 14</div>
+      <div style="font-size:0.95rem;font-weight:700;
+                  color:{"#00d4aa" if _summary["adx"]>25 else "#8b949e"};">{_summary["adx"]}</div>
+    </div>
+    <div style="text-align:center;">
+      <div style="font-size:0.6rem;color:#6e7681;text-transform:uppercase;letter-spacing:0.8px;">VWAP</div>
+      <div style="font-size:0.85rem;font-weight:700;color:#8b949e;">{_summary["vwap"]:,}</div>
+    </div>
+    <div style="text-align:center;">
+      <div style="font-size:0.6rem;color:#6e7681;text-transform:uppercase;letter-spacing:0.8px;">Support</div>
+      <div style="font-size:0.85rem;font-weight:700;color:#3fb950;">{_summary["support"]:,}</div>
+    </div>
+    <div style="text-align:center;">
+      <div style="font-size:0.6rem;color:#6e7681;text-transform:uppercase;letter-spacing:0.8px;">Resistance</div>
+      <div style="font-size:0.85rem;font-weight:700;color:#f85149;">{_summary["resistance"]:,}</div>
+    </div>
+  </div>
+</div>""", unsafe_allow_html=True)
+
+    # ── Plotly 4-row chart ────────────────────────────────────────────────────
+    _fig = make_subplots(
+        rows=4, cols=1,
+        row_heights=[0.65, 0.15, 0.10, 0.10],
+        shared_xaxes=True,
+        vertical_spacing=0.02,
+        subplot_titles=("", "Volume", "RSI 14", "ADX 14"),
+    )
+
+    _xs  = _df.index
+    _xs_str = [str(x) for x in _xs]  # convert for shapes
+
+    # Row 1 — Candlestick
+    _fig.add_trace(go.Candlestick(
+        x=_xs, open=_df["Open"], high=_df["High"],
+        low=_df["Low"], close=_df["Close"],
+        name=_sym_disp,
+        increasing_line_color="#00d4aa", decreasing_line_color="#f85149",
+        increasing_fillcolor="#00d4aa",  decreasing_fillcolor="#f85149",
+        line_width=1,
+    ), row=1, col=1)
+
+    # EMAs
+    for _ema_col, _ema_color, _ema_width in [
+        ("EMA20",  "#f0883e", 1.2),
+        ("EMA50",  "#79c0ff", 1.2),
+        ("EMA200", "#bc8cff", 1.5),
+    ]:
+        if _ema_col in _df.columns:
+            _fig.add_trace(go.Scatter(
+                x=_xs, y=_df[_ema_col], name=_ema_col,
+                line=dict(color=_ema_color, width=_ema_width),
+                hoverinfo="skip",
+            ), row=1, col=1)
+
+    # VWAP
+    if "VWAP" in _df.columns:
+        _fig.add_trace(go.Scatter(
+            x=_xs, y=_df["VWAP"], name="VWAP",
+            line=dict(color="#ff79c6", width=1.2, dash="dot"),
+            hoverinfo="skip",
+        ), row=1, col=1)
+
+    # Swing high/low markers
+    _sh_idx = _df.index[_df["swing_high"]]
+    _sl_idx = _df.index[_df["swing_low"]]
+    if len(_sh_idx):
+        _fig.add_trace(go.Scatter(
+            x=_sh_idx, y=_df.loc[_sh_idx, "High"] * 1.0015,
+            mode="markers", name="Swing High",
+            marker=dict(symbol="triangle-down", size=7, color="#f0883e"),
+            hovertemplate="Swing High: %{y:.1f}<extra></extra>",
+        ), row=1, col=1)
+    if len(_sl_idx):
+        _fig.add_trace(go.Scatter(
+            x=_sl_idx, y=_df.loc[_sl_idx, "Low"] * 0.9985,
+            mode="markers", name="Swing Low",
+            marker=dict(symbol="triangle-up", size=7, color="#3fb950"),
+            hovertemplate="Swing Low: %{y:.1f}<extra></extra>",
+        ), row=1, col=1)
+
+    # Buy / Sell signal arrows
+    _buy_idx  = _df.index[_df["buy_signal"]]
+    _sell_idx = _df.index[_df["sell_signal"]]
+    if len(_buy_idx):
+        _fig.add_trace(go.Scatter(
+            x=_buy_idx, y=_df.loc[_buy_idx, "Low"] * 0.997,
+            mode="markers+text", name="BUY",
+            marker=dict(symbol="triangle-up", size=14, color="#00d4aa"),
+            text=["▲"] * len(_buy_idx),
+            textposition="bottom center",
+            textfont=dict(color="#00d4aa", size=11),
+            hovertemplate="BUY signal: %{x}<extra></extra>",
+        ), row=1, col=1)
+    if len(_sell_idx):
+        _fig.add_trace(go.Scatter(
+            x=_sell_idx, y=_df.loc[_sell_idx, "High"] * 1.003,
+            mode="markers+text", name="SELL",
+            marker=dict(symbol="triangle-down", size=14, color="#f85149"),
+            text=["▼"] * len(_sell_idx),
+            textposition="top center",
+            textfont=dict(color="#f85149", size=11),
+            hovertemplate="SELL signal: %{x}<extra></extra>",
+        ), row=1, col=1)
+
+    # BOS / CHoCH annotations (vertical dashed lines + labels)
+    _anno_shapes = []
+    _annotations = []
+    for _ev in _events[-12:]:  # last 12 events only
+        _ev_type = _ev["type"]
+        _ev_x    = _ev["index"]
+        _ev_col  = "#00d4aa" if "UP" in _ev_type else "#f85149"
+        _ev_lbl  = _ev_type.replace("_", " ")
+        _anno_shapes.append(dict(
+            type="line", xref="x", yref="paper",
+            x0=_ev_x, x1=_ev_x, y0=0, y1=1,
+            line=dict(color=_ev_col, width=0.8, dash="dot"),
+            layer="below",
+        ))
+        _annotations.append(dict(
+            xref="x", yref="paper",
+            x=_ev_x, y=0.98,
+            text=_ev_lbl,
+            showarrow=False,
+            font=dict(size=8, color=_ev_col),
+            textangle=-90,
+            xanchor="left",
+        ))
+
+    # Order Block rectangles
+    _ob_shapes = []
+    _x_max = _df.index[-1]
+    for _ob in _obs:
+        _ob_col = "rgba(0,212,170,0.15)" if _ob["type"] == "bullish" else "rgba(248,81,73,0.15)"
+        _ob_border = "#00d4aa" if _ob["type"] == "bullish" else "#f85149"
+        _ob_shapes.append(dict(
+            type="rect", xref="x", yref="y",
+            x0=_ob["index"], x1=_x_max,
+            y0=_ob["bottom"], y1=_ob["top"],
+            fillcolor=_ob_col,
+            line=dict(color=_ob_border, width=0.8),
+            layer="below",
+        ))
+
+    # FVG rectangles
+    _fvg_shapes = []
+    for _fvg in _fvgs:
+        _fvg_col    = "rgba(121,192,255,0.12)" if _fvg["type"] == "bullish" else "rgba(240,136,62,0.12)"
+        _fvg_border = "rgba(121,192,255,0.4)"  if _fvg["type"] == "bullish" else "rgba(240,136,62,0.4)"
+        _fvg_shapes.append(dict(
+            type="rect", xref="x", yref="y",
+            x0=_fvg["index"], x1=_x_max,
+            y0=_fvg["bottom"], y1=_fvg["top"],
+            fillcolor=_fvg_col,
+            line=dict(color=_fvg_border, width=0.6, dash="dot"),
+            layer="below",
+        ))
+
+    _fig.update_layout(shapes=_anno_shapes + _ob_shapes + _fvg_shapes)
+    for _a in _annotations:
+        _fig.add_annotation(**_a)
+
+    # Row 2 — Volume
+    _vol_colors = ["#00d4aa" if c >= o else "#f85149"
+                   for c, o in zip(_df["Close"], _df["Open"])]
+    _fig.add_trace(go.Bar(
+        x=_xs, y=_df["Volume"], name="Volume",
+        marker_color=_vol_colors, showlegend=False,
+    ), row=2, col=1)
+    if "VolAvg" in _df.columns:
+        _fig.add_trace(go.Scatter(
+            x=_xs, y=_df["VolAvg"], name="Vol Avg",
+            line=dict(color="#f0883e", width=1.2, dash="dot"),
+            hoverinfo="skip", showlegend=False,
+        ), row=2, col=1)
+
+    # Row 3 — RSI
+    if "RSI" in _df.columns:
+        _fig.add_trace(go.Scatter(
+            x=_xs, y=_df["RSI"], name="RSI",
+            line=dict(color="#bc8cff", width=1.4),
+            hovertemplate="RSI: %{y:.1f}<extra></extra>",
+        ), row=3, col=1)
+        for _lvl, _col in [(70, "rgba(248,81,73,0.35)"), (30, "rgba(0,212,170,0.35)")]:
+            _fig.add_hline(y=_lvl, line_width=0.8, line_dash="dot",
+                           line_color=_col, row=3, col=1)
+
+    # Row 4 — ADX + DI+/DI-
+    if "ADX" in _df.columns:
+        _fig.add_trace(go.Scatter(
+            x=_xs, y=_df["ADX"], name="ADX",
+            line=dict(color="#ffd700", width=1.4),
+        ), row=4, col=1)
+    if "DI_pos" in _df.columns:
+        _fig.add_trace(go.Scatter(
+            x=_xs, y=_df["DI_pos"], name="DI+",
+            line=dict(color="#00d4aa", width=1, dash="dot"),
+        ), row=4, col=1)
+    if "DI_neg" in _df.columns:
+        _fig.add_trace(go.Scatter(
+            x=_xs, y=_df["DI_neg"], name="DI−",
+            line=dict(color="#f85149", width=1, dash="dot"),
+        ), row=4, col=1)
+    _fig.add_hline(y=25, line_width=0.7, line_dash="dot",
+                   line_color="rgba(255,215,0,0.4)", row=4, col=1)
+
+    # Chart layout
+    _fig.update_layout(
+        height=820,
+        paper_bgcolor="#131722",
+        plot_bgcolor="#131722",
+        font=dict(family="Inter, sans-serif", color="#8b949e", size=11),
+        margin=dict(l=8, r=8, t=28, b=8),
+        legend=dict(
+            orientation="h", yanchor="bottom", y=1.01,
+            xanchor="left", x=0,
+            bgcolor="rgba(0,0,0,0)", font=dict(size=10),
+        ),
+        xaxis_rangeslider_visible=False,
+        xaxis4=dict(showticklabels=True),
+        hoverlabel=dict(bgcolor="#1e222d", font_size=12),
+    )
+    for _row_n in range(1, 5):
+        _fig.update_xaxes(
+            showgrid=True, gridcolor="#1e222d", gridwidth=0.5,
+            zeroline=False, row=_row_n, col=1,
+        )
+        _fig.update_yaxes(
+            showgrid=True, gridcolor="#1e222d", gridwidth=0.5,
+            zeroline=False, row=_row_n, col=1,
+        )
+
+    st.plotly_chart(_fig, use_container_width=True, config={"displayModeBar": True})
+
+    # ── Legend ────────────────────────────────────────────────────────────────
+    st.markdown("""
+<div style="display:flex;flex-wrap:wrap;gap:10px;margin-top:4px;font-size:0.72rem;color:#6e7681;">
+  <span><span style="color:#00d4aa;font-size:1rem;">■</span> Bullish Order Block</span>
+  <span><span style="color:#f85149;font-size:1rem;">■</span> Bearish Order Block</span>
+  <span><span style="color:#79c0ff;font-size:1rem;">■</span> Bullish FVG</span>
+  <span><span style="color:#f0883e;font-size:1rem;">■</span> Bearish FVG</span>
+  <span><span style="color:#f0883e;">▼</span> Swing High</span>
+  <span><span style="color:#3fb950;">▲</span> Swing Low</span>
+  <span><span style="color:#00d4aa;font-size:1.1rem;font-weight:900;">▲</span> BUY Signal</span>
+  <span><span style="color:#f85149;font-size:1.1rem;font-weight:900;">▼</span> SELL Signal</span>
+  <span>Dashed vertical lines = BOS / CHoCH events</span>
+</div>
+<div style="margin-top:6px;font-size:0.68rem;color:#484f58;padding:6px 10px;
+            border:1px solid #2a2e39;border-radius:6px;">
+  ⚠️ SMC signals are educational. Not financial advice. Always use stop losses.
+</div>""", unsafe_allow_html=True)
+
+
 # ── Page routing (URL-driven via ?page=) ──────────────────────────────────────
 {
     "smart_alerts_pro": page_smart_alerts_pro,
@@ -8513,4 +8879,5 @@ Entry: near ATM · Stop loss: 30-40% of premium · Target: 2x-3x
     "fii_compass":      page_fii_compass,
     "smart_money":      page_smart_money_options,
     "promoter_pulse":   page_promoter_pulse,
+    "chart_analysis":   page_chart_analysis,
 }.get(_cur_page, page_smart_alerts_pro)()
