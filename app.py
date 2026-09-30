@@ -8618,7 +8618,7 @@ def page_chart_analysis():
     </div>
     <div style="text-align:center;">
       <div style="font-size:0.6rem;color:#6e7681;text-transform:uppercase;letter-spacing:0.8px;">VWAP</div>
-      <div style="font-size:0.85rem;font-weight:700;color:#8b949e;">{_summary["vwap"]:,}</div>
+      <div style="font-size:0.85rem;font-weight:700;color:#8b949e;">{"—" if not _summary["vwap"] else f"{_summary['vwap']:,}"}</div>
     </div>
     <div style="text-align:center;">
       <div style="font-size:0.6rem;color:#6e7681;text-transform:uppercase;letter-spacing:0.8px;">Support</div>
