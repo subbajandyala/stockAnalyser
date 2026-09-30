@@ -5244,6 +5244,7 @@ def page_red_flag():
     if _rf_clear_btn:
         st.session_state.pop("rf_result", None)
         st.session_state.pop("rf_scanned_at", None)
+        st.session_state.pop("rf_timestamps", None)
         st.rerun()
 
     _rf_should_scan = _rf_scan_btn or _rf_auto_trigger
@@ -5268,6 +5269,19 @@ def page_red_flag():
             st.session_state["rf_scanned_at"] = datetime.datetime.now(
                 datetime.timezone(datetime.timedelta(hours=5, minutes=30))
             )
+            # Track first_seen / last_seen per symbol across scans this session
+            _now_hhmm     = st.session_state["rf_scanned_at"].strftime("%H:%M")
+            _rf_ts        = st.session_state.get("rf_timestamps", {})
+            _flagged_syms = set(
+                _rf_df[_rf_df["flag_count"] > 0]["symbol"].tolist()
+            ) if "flag_count" in _rf_df.columns else set()
+            _rf_ts = {s: v for s, v in _rf_ts.items() if s in _flagged_syms}
+            for _sym in _flagged_syms:
+                if _sym in _rf_ts:
+                    _rf_ts[_sym]["last_seen"] = _now_hhmm
+                else:
+                    _rf_ts[_sym] = {"first_seen": _now_hhmm, "last_seen": _now_hhmm}
+            st.session_state["rf_timestamps"] = _rf_ts
         except Exception as _rf_e:
             st.error(f"Scan error: {_rf_e}")
 
@@ -5321,9 +5335,11 @@ def page_red_flag():
                 '<th>#</th><th>Symbol</th><th>Price</th><th>Chg%</th>'
                 '<th>Vol Ratio</th>' + _th_pcr +
                 '<th>Trade</th>'
+                '<th>First</th><th>Last</th>'
                 '<th>Flags</th>'
                 '</tr></thead><tbody>'
             )
+            _rf_ts = st.session_state.get("rf_timestamps", {})
 
             for _ri, _rrow in _display_df.head(150).iterrows():
                 _rank    = int(_ri) + 1
@@ -5369,6 +5385,16 @@ def page_red_flag():
                 }.get(_trade, "rf-trade-watch")
                 _trade_td = f'<span class="{_trade_css}">{_trade}</span>'
 
+                _ts_entry  = _rf_ts.get(_sym, {})
+                _first_str = _ts_entry.get("first_seen", "—")
+                _last_str  = _ts_entry.get("last_seen",  "—")
+                _ts_style  = "color:#6e7681;font-size:0.75rem;"
+                _last_cell = (
+                    f"<td style='{_ts_style}'>{_last_str}</td>"
+                    if _last_str != _first_str else
+                    f"<td style='{_ts_style}'>—</td>"
+                )
+
                 _tbl_html += (
                     f'<tr>'
                     f'<td class="rf-neutral" style="font-size:0.75rem;">{_rank}</td>'
@@ -5378,6 +5404,8 @@ def page_red_flag():
                     f'<td>{_vr_str}</td>'
                     + _pcr_td +
                     f'<td>{_trade_td}</td>'
+                    f'<td style="{_ts_style}">{_first_str}</td>'
+                    + _last_cell +
                     f'<td class="{_fc_cls}" style="font-size:0.75rem;padding-right:6px;">{_fc}</td>'
                     f'<td>{_chips}</td>'
                     f'</tr>'
