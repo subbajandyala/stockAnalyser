@@ -5389,11 +5389,7 @@ def page_red_flag():
                 _first_str = _ts_entry.get("first_seen", "—")
                 _last_str  = _ts_entry.get("last_seen",  "—")
                 _ts_style  = "color:#6e7681;font-size:0.75rem;"
-                _last_cell = (
-                    f"<td style='{_ts_style}'>{_last_str}</td>"
-                    if _last_str != _first_str else
-                    f"<td style='{_ts_style}'>—</td>"
-                )
+                _last_cell = f"<td style='{_ts_style}'>{_last_str}</td>"
 
                 _tbl_html += (
                     f'<tr>'
