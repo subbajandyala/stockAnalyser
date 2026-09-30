@@ -8537,11 +8537,19 @@ def page_chart_analysis():
         _ca_run = st.button("📊 Analyse", key="ca_run_btn", use_container_width=True)
 
     if _ca_run:
+        import concurrent.futures as _cf
         st.session_state["ca_symbol"] = _ca_sym
         st.session_state["ca_tf"]     = _ca_tf
-        with st.spinner(f"Loading {_ca_sym} {_CA_INTERVAL_CFG[_ca_tf]['label']}…"):
-            _ca_res = _analyze_chart(_ca_sym, _ca_tf, _ca_api, _ca_tok)
-        st.session_state["ca_result"] = _ca_res
+        _MTF_KEYS = ["5m", "15m", "1H", "1D"]
+        with st.spinner(f"Analysing {_ca_sym} across all timeframes…"):
+            # Fetch selected TF + 4 standard MTF timeframes in parallel
+            _all_keys = list(dict.fromkeys([_ca_tf] + _MTF_KEYS))
+            def _fetch_tf(k):
+                return k, _analyze_chart(_ca_sym, k, _ca_api, _ca_tok)
+            with _cf.ThreadPoolExecutor(max_workers=5) as _pool:
+                _tf_results = dict(_pool.map(lambda k: _fetch_tf(k), _all_keys))
+        st.session_state["ca_result"]     = _tf_results[_ca_tf]
+        st.session_state["ca_mtf_results"] = {k: _tf_results[k] for k in _MTF_KEYS}
         st.session_state["ca_ts"] = datetime.datetime.now(
             datetime.timezone(datetime.timedelta(hours=5, minutes=30))
         ).strftime("%I:%M:%S %p IST")
@@ -8663,6 +8671,141 @@ def page_chart_analysis():
       <div style="font-size:0.85rem;font-weight:700;color:#f85149;">{_summary["resistance"]:,}</div>
     </div>
   </div>
+</div>""", unsafe_allow_html=True)
+
+    # ── Trade Verdict Card ────────────────────────────────────────────────────
+    _verdict = _ca_res.get("verdict", {})
+    if _verdict:
+        _vd       = _verdict["verdict"]
+        _vc       = _verdict["color"]
+        _vconf    = _verdict["confidence"]
+        _vreasons = _verdict["reasons"]
+        _vez      = _verdict["entry_zone"]
+        _vsl      = _verdict["stop_loss"]
+        _vtgt     = _verdict["targets"]
+        _vrr      = _verdict["rr"]
+
+        _vd_icon  = {"STRONG BUY": "⬆⬆", "BUY": "⬆", "WAIT": "⏸",
+                     "SELL": "⬇", "STRONG SELL": "⬇⬇"}.get(_vd, "⏸")
+        _vd_bg    = {"STRONG BUY": "rgba(0,212,170,0.12)", "BUY": "rgba(63,185,80,0.10)",
+                     "WAIT": "rgba(139,148,158,0.08)", "SELL": "rgba(240,136,62,0.10)",
+                     "STRONG SELL": "rgba(248,81,73,0.12)"}.get(_vd, "rgba(139,148,158,0.08)")
+
+        _reason_rows = ""
+        for _r in _vreasons:
+            _ico = "✅" if _r["ok"] is True else "❌" if _r["ok"] is False else "⚪"
+            _rc  = "#e6edf3" if _r["ok"] is True else "#8b949e" if _r["ok"] is None else "#8b949e"
+            _reason_rows += f'<div style="font-size:0.78rem;color:{_rc};margin:2px 0;">{_ico} {_r["text"]}</div>'
+
+        _trade_lines = ""
+        if _vez:
+            _trade_lines += f'<div style="display:flex;justify-content:space-between;padding:4px 0;border-top:1px solid #2a2e39;"><span style="color:#6e7681;font-size:0.75rem;">Entry Zone</span><span style="color:#e6edf3;font-size:0.8rem;font-weight:700;">{_vez[0]:,} – {_vez[1]:,}</span></div>'
+        if _vsl:
+            _trade_lines += f'<div style="display:flex;justify-content:space-between;padding:4px 0;"><span style="color:#6e7681;font-size:0.75rem;">Stop Loss</span><span style="color:#f85149;font-size:0.8rem;font-weight:700;">{_vsl:,}</span></div>'
+        if _vtgt:
+            for _ti, _tv in enumerate(_vtgt, 1):
+                _trade_lines += f'<div style="display:flex;justify-content:space-between;padding:4px 0;"><span style="color:#6e7681;font-size:0.75rem;">Target {_ti}</span><span style="color:#3fb950;font-size:0.8rem;font-weight:700;">{_tv:,}</span></div>'
+        if _vrr:
+            _trade_lines += f'<div style="display:flex;justify-content:space-between;padding:4px 0;border-top:1px solid #2a2e39;"><span style="color:#6e7681;font-size:0.75rem;">Risk : Reward</span><span style="color:#ffd700;font-size:0.8rem;font-weight:700;">1 : {_vrr}</span></div>'
+
+        st.markdown(f"""
+<div style="background:{_vd_bg};border:2px solid {_vc};border-radius:12px;
+            padding:16px 18px;margin-bottom:14px;">
+  <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;">
+    <div>
+      <span style="font-size:1.8rem;font-weight:900;color:{_vc};letter-spacing:-1px;">
+        {_vd_icon} {_vd}
+      </span>
+      <div style="font-size:0.65rem;color:#6e7681;letter-spacing:1px;text-transform:uppercase;margin-top:2px;">
+        Trade Signal · {_sym_disp} · {_tf_disp}
+      </div>
+    </div>
+    <div style="text-align:right;">
+      <div style="font-size:0.6rem;color:#6e7681;text-transform:uppercase;">Confidence</div>
+      <div style="font-size:1.4rem;font-weight:900;color:{_vc};">{_vconf}%</div>
+    </div>
+  </div>
+  <div style="display:grid;grid-template-columns:1fr{"" if not _trade_lines else " 1fr"};gap:16px;">
+    <div>{_reason_rows}</div>
+    {"<div>" + _trade_lines + "</div>" if _trade_lines else ""}
+  </div>
+</div>""", unsafe_allow_html=True)
+
+    # ── Multi-Timeframe Table ─────────────────────────────────────────────────
+    _mtf_data = st.session_state.get("ca_mtf_results", {})
+    if _mtf_data:
+        _MTF_DISPLAY = {"5m": "5 Min", "15m": "15 Min", "1H": "1 Hour", "1D": "Daily"}
+        _mtf_header = "".join(
+            f'<th style="padding:8px 12px;color:#8b949e;font-size:0.65rem;font-weight:700;'
+            f'text-transform:uppercase;letter-spacing:0.8px;text-align:center;">{h}</th>'
+            for h in ["Timeframe", "Trend", "Structure", "RSI", "ADX", "VWAP", "Verdict"]
+        )
+        _mtf_rows = ""
+        for _mk, _ml in _MTF_DISPLAY.items():
+            _mr = _mtf_data.get(_mk, {})
+            if _mr.get("error"):
+                _mtf_rows += f'<tr><td style="padding:7px 12px;color:#e6edf3;font-weight:700;">{_ml}</td><td colspan="6" style="color:#6e7681;font-size:0.75rem;padding:7px 12px;">Error: {_mr["error"][:40]}</td></tr>'
+                continue
+            _ms  = _mr.get("summary", {})
+            _mv  = _mr.get("verdict", {})
+            _mvd = _mv.get("verdict", "—")
+            _mvc = _mv.get("color",   "#8b949e")
+
+            _tc = {"Bullish": "#00d4aa", "Mildly Bullish": "#3fb950",
+                   "Sideways": "#8b949e", "Mildly Bearish": "#f0883e",
+                   "Bearish": "#f85149"}.get(_ms.get("trend",""), "#8b949e")
+            _sc = ("#00d4aa" if "UP"   in _ms.get("structure","")
+                   else "#f85149" if "DOWN" in _ms.get("structure","") else "#8b949e")
+
+            _rsi_v = _ms.get("rsi", 50)
+            _rsi_lbl2 = ("Overbought" if _rsi_v > 70 else "Oversold" if _rsi_v < 30
+                          else "Neutral" if 45 <= _rsi_v <= 55 else
+                          "Strong" if _rsi_v > 55 else "Weak")
+            _rsi_c2 = ("#f85149" if _rsi_v > 70 else "#f0883e" if _rsi_v < 30
+                        else "#00d4aa" if _rsi_v > 55 else "#8b949e")
+
+            _adx_v = _ms.get("adx", 0)
+            _adx_lbl2 = ("Choppy" if _adx_v < 20 else "Forming" if _adx_v < 25
+                          else "Strong" if _adx_v < 40 else "Very Strong")
+            _adx_c2 = "#8b949e" if _adx_v < 20 else "#f0883e" if _adx_v < 25 else "#00d4aa"
+
+            _vwap_v2  = _ms.get("vwap", 0)
+            _close_v2 = _ms.get("close", 0)
+            _vwap_lbl2 = ("—" if not _vwap_v2 else
+                           "Bullish" if _close_v2 > _vwap_v2 else "Bearish")
+            _vwap_c2   = ("#6e7681" if not _vwap_v2 else
+                           "#00d4aa" if _close_v2 > _vwap_v2 else "#f85149")
+
+            _is_cur = _mk == _ca_res.get("interval", "")
+            _row_bg = "rgba(0,212,170,0.06)" if _is_cur else "transparent"
+
+            _mtf_rows += f"""<tr style="background:{_row_bg};border-bottom:1px solid #1e222d;">
+  <td style="padding:7px 12px;color:#e6edf3;font-weight:{"900" if _is_cur else "600"};font-size:0.82rem;">{_ml}{"&nbsp;◀" if _is_cur else ""}</td>
+  <td style="padding:7px 12px;color:{_tc};font-size:0.78rem;font-weight:700;text-align:center;">{_ms.get("trend","—")}</td>
+  <td style="padding:7px 12px;color:{_sc};font-size:0.78rem;font-weight:700;text-align:center;">{_ms.get("structure","—")}</td>
+  <td style="padding:7px 12px;color:{_rsi_c2};font-size:0.78rem;font-weight:700;text-align:center;">{_rsi_lbl2}</td>
+  <td style="padding:7px 12px;color:{_adx_c2};font-size:0.78rem;font-weight:700;text-align:center;">{_adx_lbl2}</td>
+  <td style="padding:7px 12px;color:{_vwap_c2};font-size:0.78rem;font-weight:700;text-align:center;">{_vwap_lbl2}</td>
+  <td style="padding:7px 12px;text-align:center;">
+    <span style="background:{"rgba(0,212,170,0.15)" if "BUY" in _mvd else "rgba(248,81,73,0.15)" if "SELL" in _mvd else "rgba(139,148,158,0.12)"};
+                 color:{_mvc};font-size:0.75rem;font-weight:900;padding:3px 10px;border-radius:20px;
+                 border:1px solid {_mvc};">{_mvd}</span>
+  </td>
+</tr>"""
+
+        st.markdown(f"""
+<div style="background:#1a1e2a;border:1px solid #2a2e39;border-radius:12px;
+            overflow:hidden;margin-bottom:14px;">
+  <div style="padding:10px 16px;border-bottom:1px solid #2a2e39;">
+    <span style="font-size:0.65rem;font-weight:700;color:#8b949e;
+                 text-transform:uppercase;letter-spacing:1px;">
+      Multi-Timeframe View · {_sym_disp}
+    </span>
+  </div>
+  <table style="width:100%;border-collapse:collapse;">
+    <thead><tr style="border-bottom:1px solid #2a2e39;">{_mtf_header}</tr></thead>
+    <tbody>{_mtf_rows}</tbody>
+  </table>
 </div>""", unsafe_allow_html=True)
 
     # ── Plotly 4-row chart ────────────────────────────────────────────────────
