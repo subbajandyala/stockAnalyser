@@ -28,7 +28,10 @@ _INDEX_TOKENS: dict[str, int] = {
 }
 
 INTERVAL_CFG: dict[str, dict] = {
+    "1m":  {"kite": "minute",   "days": 2,   "label": "1 Min"},
+    "2m":  {"kite": "2minute",  "days": 3,   "label": "2 Min"},
     "5m":  {"kite": "5minute",  "days": 5,   "label": "5 Min"},
+    "10m": {"kite": "10minute", "days": 7,   "label": "10 Min"},
     "15m": {"kite": "15minute", "days": 15,  "label": "15 Min"},
     "1H":  {"kite": "60minute", "days": 60,  "label": "1 Hour"},
     "1D":  {"kite": "day",      "days": 500, "label": "Daily"},
