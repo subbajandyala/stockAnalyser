@@ -8531,12 +8531,49 @@ def page_chart_analysis():
                    else "#f85149" if "DOWN" in _summary["structure"]
                    else "#8b949e")
 
+    # RSI label
+    _rsi_v = _summary["rsi"]
+    if _rsi_v > 70:
+        _rsi_lbl, _rsi_col = "Overbought · Potential Fall", "#f85149"
+    elif _rsi_v < 30:
+        _rsi_lbl, _rsi_col = "Oversold · Potential Bounce", "#f0883e"
+    elif _rsi_v >= 55:
+        _rsi_lbl, _rsi_col = "Strengthening", "#3fb950"
+    elif _rsi_v <= 45:
+        _rsi_lbl, _rsi_col = "Weakening", "#8b949e"
+    else:
+        _rsi_lbl, _rsi_col = "Neutral", "#8b949e"
+
+    # ADX label — combine ADX strength with DI direction
+    _adx_v   = _summary["adx"]
+    _last_row = _df.iloc[-1]
+    _di_pos   = float(_last_row.get("DI_pos", 0) or 0)
+    _di_neg   = float(_last_row.get("DI_neg", 0) or 0)
+    if _adx_v < 20:
+        _adx_lbl, _adx_col = "Choppy / Sideways", "#8b949e"
+    elif _adx_v < 25:
+        _adx_lbl, _adx_col = ("Weak Uptrend" if _di_pos > _di_neg else "Weak Downtrend"), "#f0883e"
+    elif _adx_v < 40:
+        _adx_lbl, _adx_col = ("Strong Uptrend" if _di_pos > _di_neg else "Strong Downtrend"), "#00d4aa" if _di_pos > _di_neg else "#f85149"
+    else:
+        _adx_lbl, _adx_col = ("Very Strong Up" if _di_pos > _di_neg else "Very Strong Down"), "#00d4aa" if _di_pos > _di_neg else "#f85149"
+
+    # VWAP label
+    _vwap_v    = _summary["vwap"]
+    _close_v   = _summary["close"]
+    if not _vwap_v:
+        _vwap_lbl, _vwap_col = "—", "#6e7681"
+    elif _close_v > _vwap_v:
+        _vwap_lbl, _vwap_col = "Bullish · Above", "#00d4aa"
+    else:
+        _vwap_lbl, _vwap_col = "Bearish · Below", "#f85149"
+
     st.markdown(f"""
 <div style="background:#1a1e2a;border:1px solid #2a2e39;border-radius:12px;
             padding:14px 18px;margin-bottom:14px;">
   <div style="font-size:0.65rem;font-weight:700;color:#8b949e;letter-spacing:1.2px;
               text-transform:uppercase;margin-bottom:10px;">{_sym_disp} · {_tf_disp}</div>
-  <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(110px,1fr));gap:10px;">
+  <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:10px;">
     <div style="text-align:center;">
       <div style="font-size:0.6rem;color:#6e7681;text-transform:uppercase;letter-spacing:0.8px;">Trend</div>
       <div style="font-size:0.95rem;font-weight:800;color:{_trend_col};">{_summary["trend"]}</div>
@@ -8555,18 +8592,15 @@ def page_chart_analysis():
     </div>
     <div style="text-align:center;">
       <div style="font-size:0.6rem;color:#6e7681;text-transform:uppercase;letter-spacing:0.8px;">RSI 14</div>
-      <div style="font-size:0.95rem;font-weight:700;
-                  color:{"#f85149" if _summary["rsi"]>70 else "#f0883e" if _summary["rsi"]<30 else "#e6edf3"};">
-        {_summary["rsi"]}</div>
+      <div style="font-size:0.78rem;font-weight:700;color:{_rsi_col};">{_rsi_lbl}</div>
     </div>
     <div style="text-align:center;">
-      <div style="font-size:0.6rem;color:#6e7681;text-transform:uppercase;letter-spacing:0.8px;">ADX 14</div>
-      <div style="font-size:0.95rem;font-weight:700;
-                  color:{"#00d4aa" if _summary["adx"]>25 else "#8b949e"};">{_summary["adx"]}</div>
+      <div style="font-size:0.6rem;color:#6e7681;text-transform:uppercase;letter-spacing:0.8px;">ADX</div>
+      <div style="font-size:0.78rem;font-weight:700;color:{_adx_col};">{_adx_lbl}</div>
     </div>
     <div style="text-align:center;">
       <div style="font-size:0.6rem;color:#6e7681;text-transform:uppercase;letter-spacing:0.8px;">VWAP</div>
-      <div style="font-size:0.85rem;font-weight:700;color:#8b949e;">{"—" if not _summary["vwap"] else f"{_summary['vwap']:,}"}</div>
+      <div style="font-size:0.78rem;font-weight:700;color:{_vwap_col};">{_vwap_lbl}</div>
     </div>
     <div style="text-align:center;">
       <div style="font-size:0.6rem;color:#6e7681;text-transform:uppercase;letter-spacing:0.8px;">Support</div>
@@ -8664,106 +8698,165 @@ def page_chart_analysis():
             hovertemplate="SELL signal: %{x}<extra></extra>",
         ), row=1, col=1)
 
-    # BOS / CHoCH annotations (vertical dashed lines + labels)
+    # BOS / CHoCH annotations — solid thick lines, readable labels
     _anno_shapes = []
     _annotations = []
-    for _ev in _events[-12:]:  # last 12 events only
+    for _ev in _events[-12:]:
         _ev_type = _ev["type"]
         _ev_x    = _ev["index"]
         _ev_col  = "#00d4aa" if "UP" in _ev_type else "#f85149"
-        _ev_lbl  = _ev_type.replace("_", " ")
+        _is_choch = "CHOCH" in _ev_type
+        _ev_lbl  = ("↑ CHoCH" if _ev_type == "CHOCH_UP" else
+                    "↓ CHoCH" if _ev_type == "CHOCH_DOWN" else
+                    "↑ BOS"   if _ev_type == "BOS_UP"    else "↓ BOS")
         _anno_shapes.append(dict(
             type="line", xref="x", yref="paper",
             x0=_ev_x, x1=_ev_x, y0=0, y1=1,
-            line=dict(color=_ev_col, width=0.8, dash="dot"),
-            layer="below",
+            line=dict(color=_ev_col, width=1.8,
+                      dash="dashdot" if _is_choch else "dash"),
+            layer="above",
         ))
         _annotations.append(dict(
             xref="x", yref="paper",
-            x=_ev_x, y=0.98,
-            text=_ev_lbl,
+            x=_ev_x, y=0.97,
+            text=f"<b>{_ev_lbl}</b>",
             showarrow=False,
-            font=dict(size=8, color=_ev_col),
+            font=dict(size=9, color=_ev_col),
             textangle=-90,
             xanchor="left",
+            bgcolor="rgba(19,23,34,0.7)",
         ))
 
-    # Order Block rectangles
+    # Order Block rectangles — bold, clearly visible
     _ob_shapes = []
     _x_max = _df.index[-1]
     for _ob in _obs:
-        _ob_col = "rgba(0,212,170,0.15)" if _ob["type"] == "bullish" else "rgba(248,81,73,0.15)"
-        _ob_border = "#00d4aa" if _ob["type"] == "bullish" else "#f85149"
+        _ob_col    = "rgba(0,212,170,0.28)"  if _ob["type"] == "bullish" else "rgba(248,81,73,0.28)"
+        _ob_border = "#00d4aa"               if _ob["type"] == "bullish" else "#f85149"
+        _ob_label  = "OB ▲" if _ob["type"] == "bullish" else "OB ▼"
         _ob_shapes.append(dict(
             type="rect", xref="x", yref="y",
             x0=_ob["index"], x1=_x_max,
             y0=_ob["bottom"], y1=_ob["top"],
             fillcolor=_ob_col,
-            line=dict(color=_ob_border, width=0.8),
+            line=dict(color=_ob_border, width=2.0),
             layer="below",
         ))
+        _annotations.append(dict(
+            xref="x", yref="y",
+            x=_ob["index"], y=(_ob["top"] + _ob["bottom"]) / 2,
+            text=f"<b>{_ob_label}</b>",
+            showarrow=False,
+            font=dict(size=8, color=_ob_border),
+            xanchor="left",
+            bgcolor="rgba(19,23,34,0.6)",
+        ))
 
-    # FVG rectangles
+    # FVG rectangles — bold green / orange dotted borders
     _fvg_shapes = []
     for _fvg in _fvgs:
-        _fvg_col    = "rgba(121,192,255,0.12)" if _fvg["type"] == "bullish" else "rgba(240,136,62,0.12)"
-        _fvg_border = "rgba(121,192,255,0.4)"  if _fvg["type"] == "bullish" else "rgba(240,136,62,0.4)"
+        _fvg_col    = "rgba(0,212,170,0.18)"    if _fvg["type"] == "bullish" else "rgba(240,136,62,0.18)"
+        _fvg_border = "#00d4aa"                  if _fvg["type"] == "bullish" else "#f0883e"
+        _fvg_label  = "FVG ↑" if _fvg["type"] == "bullish" else "FVG ↓"
         _fvg_shapes.append(dict(
             type="rect", xref="x", yref="y",
             x0=_fvg["index"], x1=_x_max,
             y0=_fvg["bottom"], y1=_fvg["top"],
             fillcolor=_fvg_col,
-            line=dict(color=_fvg_border, width=0.6, dash="dot"),
+            line=dict(color=_fvg_border, width=1.8, dash="dot"),
             layer="below",
+        ))
+        _annotations.append(dict(
+            xref="x", yref="y",
+            x=_fvg["index"], y=(_fvg["top"] + _fvg["bottom"]) / 2,
+            text=f"<b>{_fvg_label}</b>",
+            showarrow=False,
+            font=dict(size=8, color=_fvg_border),
+            xanchor="left",
+            bgcolor="rgba(19,23,34,0.6)",
         ))
 
     _fig.update_layout(shapes=_anno_shapes + _ob_shapes + _fvg_shapes)
     for _a in _annotations:
         _fig.add_annotation(**_a)
 
-    # Row 2 — Volume
-    _vol_colors = ["#00d4aa" if c >= o else "#f85149"
-                   for c, o in zip(_df["Close"], _df["Open"])]
-    _fig.add_trace(go.Bar(
-        x=_xs, y=_df["Volume"], name="Volume",
-        marker_color=_vol_colors, showlegend=False,
-    ), row=2, col=1)
-    if "VolAvg" in _df.columns:
-        _fig.add_trace(go.Scatter(
-            x=_xs, y=_df["VolAvg"], name="Vol Avg",
-            line=dict(color="#f0883e", width=1.2, dash="dot"),
-            hoverinfo="skip", showlegend=False,
+    # Row 2 — Volume (hide panel for zero-volume instruments like NIFTY index)
+    _has_vol = _df["Volume"].sum() > 0
+    if _has_vol:
+        _vol_colors = ["#00d4aa" if c >= o else "#f85149"
+                       for c, o in zip(_df["Close"], _df["Open"])]
+        _fig.add_trace(go.Bar(
+            x=_xs, y=_df["Volume"], name="Volume",
+            marker_color=_vol_colors, showlegend=False,
         ), row=2, col=1)
+        if "VolAvg" in _df.columns:
+            _fig.add_trace(go.Scatter(
+                x=_xs, y=_df["VolAvg"], name="Vol Avg",
+                line=dict(color="#f0883e", width=1.4, dash="dot"),
+                hoverinfo="skip", showlegend=False,
+            ), row=2, col=1)
+    else:
+        _fig.add_annotation(
+            xref="x2", yref="paper", x=_xs[len(_xs)//2], y=0.155,
+            text="<i>Volume not available for index instruments</i>",
+            showarrow=False, font=dict(size=10, color="#484f58"),
+        )
 
-    # Row 3 — RSI
+    # Row 3 — RSI with readable zone labels
     if "RSI" in _df.columns:
         _fig.add_trace(go.Scatter(
             x=_xs, y=_df["RSI"], name="RSI",
-            line=dict(color="#bc8cff", width=1.4),
+            line=dict(color="#bc8cff", width=1.6),
             hovertemplate="RSI: %{y:.1f}<extra></extra>",
         ), row=3, col=1)
-        for _lvl, _col in [(70, "rgba(248,81,73,0.35)"), (30, "rgba(0,212,170,0.35)")]:
-            _fig.add_hline(y=_lvl, line_width=0.8, line_dash="dot",
-                           line_color=_col, row=3, col=1)
+        _fig.add_hline(y=70, line_width=1.2, line_dash="dot",
+                       line_color="rgba(248,81,73,0.6)", row=3, col=1,
+                       annotation_text="Overbought · Sell Setup",
+                       annotation_font=dict(size=8, color="#f85149"),
+                       annotation_position="top right")
+        _fig.add_hline(y=30, line_width=1.2, line_dash="dot",
+                       line_color="rgba(0,212,170,0.6)", row=3, col=1,
+                       annotation_text="Oversold · Buy Setup",
+                       annotation_font=dict(size=8, color="#00d4aa"),
+                       annotation_position="bottom right")
+        _fig.add_hline(y=50, line_width=0.6, line_dash="dot",
+                       line_color="rgba(139,148,158,0.3)", row=3, col=1)
 
-    # Row 4 — ADX + DI+/DI-
+    # Row 4 — ADX + DI+/DI- with state label
     if "ADX" in _df.columns:
         _fig.add_trace(go.Scatter(
             x=_xs, y=_df["ADX"], name="ADX",
-            line=dict(color="#ffd700", width=1.4),
+            line=dict(color="#ffd700", width=1.6),
+            hovertemplate="ADX: %{y:.1f}<extra></extra>",
         ), row=4, col=1)
     if "DI_pos" in _df.columns:
         _fig.add_trace(go.Scatter(
-            x=_xs, y=_df["DI_pos"], name="DI+",
-            line=dict(color="#00d4aa", width=1, dash="dot"),
+            x=_xs, y=_df["DI_pos"], name="DI+ (Bullish Force)",
+            line=dict(color="#00d4aa", width=1.2),
         ), row=4, col=1)
     if "DI_neg" in _df.columns:
         _fig.add_trace(go.Scatter(
-            x=_xs, y=_df["DI_neg"], name="DI−",
-            line=dict(color="#f85149", width=1, dash="dot"),
+            x=_xs, y=_df["DI_neg"], name="DI− (Bearish Force)",
+            line=dict(color="#f85149", width=1.2),
         ), row=4, col=1)
-    _fig.add_hline(y=25, line_width=0.7, line_dash="dot",
-                   line_color="rgba(255,215,0,0.4)", row=4, col=1)
+    _fig.add_hline(y=25, line_width=1.0, line_dash="dot",
+                   line_color="rgba(255,215,0,0.5)", row=4, col=1,
+                   annotation_text="Trend threshold",
+                   annotation_font=dict(size=8, color="#ffd700"),
+                   annotation_position="top right")
+    # ADX state badge in top-left of ADX panel
+    _fig.add_annotation(
+        xref="paper", yref="paper",
+        x=0.01, y=0.055,
+        text=f"<b>{_adx_lbl}</b>",
+        showarrow=False,
+        font=dict(size=9, color=_adx_col),
+        align="left",
+        bgcolor="rgba(19,23,34,0.8)",
+        bordercolor=_adx_col,
+        borderwidth=1,
+        borderpad=3,
+    )
 
     # Chart layout
     _fig.update_layout(
