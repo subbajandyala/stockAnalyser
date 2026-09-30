@@ -154,19 +154,29 @@ def _adx(df: pd.DataFrame, n: int = 14):
 
 def _vwap(df: pd.DataFrame, intraday: bool = True) -> pd.Series:
     tp  = (df["High"] + df["Low"] + df["Close"]) / 3
-    vol = df["Volume"].replace(0, np.nan)
+    # Indices (NIFTY, SENSEX, BANKNIFTY) have zero volume in Kite historical data.
+    # Fall back to cumulative / rolling typical price when volume is absent.
+    has_volume = df["Volume"].sum() > 0
     if intraday:
         vwap = pd.Series(np.nan, index=df.index)
         for _date, idxs in df.groupby(df.index.date).groups.items():
-            grp    = df.loc[idxs]
-            tp_g   = (grp["High"] + grp["Low"] + grp["Close"]) / 3
-            v_g    = grp["Volume"].replace(0, np.nan)
-            cumtp  = (tp_g * v_g).cumsum()
-            cumvol = v_g.cumsum()
-            vwap.loc[idxs] = (cumtp / cumvol).values
+            grp  = df.loc[idxs]
+            tp_g = (grp["High"] + grp["Low"] + grp["Close"]) / 3
+            if has_volume:
+                v_g    = grp["Volume"].replace(0, np.nan)
+                cumtp  = (tp_g * v_g).cumsum()
+                cumvol = v_g.cumsum()
+                vwap.loc[idxs] = (cumtp / cumvol).values
+            else:
+                # No volume: cumulative average of typical price (session-anchored)
+                vwap.loc[idxs] = tp_g.expanding().mean().values
         return vwap
     else:
-        return (tp * vol).rolling(20).sum() / vol.rolling(20).sum()
+        if has_volume:
+            vol = df["Volume"].replace(0, np.nan)
+            return (tp * vol).rolling(20).sum() / vol.rolling(20).sum()
+        else:
+            return tp.rolling(20).mean()
 
 
 def compute_indicators(df: pd.DataFrame, intraday: bool = True) -> pd.DataFrame:
@@ -393,7 +403,8 @@ def build_summary(df: pd.DataFrame, events: list) -> dict:
     ema200 = float(last.get("EMA200", 0) or 0)
     rsi    = round(float(last.get("RSI", 0) or 0), 1)
     adx    = round(float(last.get("ADX", 0) or 0), 1)
-    vwap   = round(float(last.get("VWAP", 0) or 0), 1)
+    _vwap_raw = last.get("VWAP", 0)
+    vwap      = 0 if (not _vwap_raw or (isinstance(_vwap_raw, float) and np.isnan(_vwap_raw))) else round(float(_vwap_raw), 1)
 
     if ema20 > ema50 > ema200 and close > ema20:
         trend = "Bullish"
