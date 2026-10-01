@@ -8621,6 +8621,47 @@ def page_chart_analysis():
   </div>
 </div>""", unsafe_allow_html=True)
 
+    # ── CPR Card ──────────────────────────────────────────────────────────────
+    _cpr = _ca_res.get("cpr", {})
+    if _cpr:
+        _cpr_pos_col = _cpr.get("pos_color", "#8b949e")
+        _cpr_cells   = ""
+        for _lbl, _val, _col in [
+            ("BC (Bottom)",  _cpr["bc"],    "#3fb950"),
+            ("Pivot",        _cpr["pivot"], "#e6edf3"),
+            ("TC (Top)",     _cpr["tc"],    "#f0883e"),
+            ("R1",           _cpr["r1"],    "#f85149"),
+            ("R2",           _cpr["r2"],    "#f85149"),
+            ("S1",           _cpr["s1"],    "#3fb950"),
+            ("S2",           _cpr["s2"],    "#3fb950"),
+        ]:
+            _cpr_cells += f"""<div style="text-align:center;">
+  <div style="font-size:0.58rem;color:#6e7681;text-transform:uppercase;letter-spacing:0.8px;">{_lbl}</div>
+  <div style="font-size:0.82rem;font-weight:700;color:{_col};">{_val:,}</div>
+</div>"""
+        st.markdown(f"""
+<div style="background:#1a1e2a;border:1px solid #2a2e39;border-radius:12px;
+            padding:12px 18px;margin-bottom:14px;">
+  <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px;flex-wrap:wrap;gap:8px;">
+    <div>
+      <span style="font-size:0.65rem;font-weight:700;color:#8b949e;letter-spacing:1px;text-transform:uppercase;">
+        CPR · {_cpr.get("period_label","")}
+      </span>
+    </div>
+    <div style="display:flex;gap:14px;align-items:center;flex-wrap:wrap;">
+      <span style="font-size:0.75rem;font-weight:700;color:{_cpr_pos_col};">
+        {_cpr.get("pos_label","")}
+      </span>
+      <span style="font-size:0.72rem;color:{"#ffd700" if _cpr.get("is_narrow") else "#8b949e"};">
+        {_cpr.get("width_label","")} &nbsp;({_cpr.get("width_pct",0):.3f}%)
+      </span>
+    </div>
+  </div>
+  <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(70px,1fr));gap:8px;">
+    {_cpr_cells}
+  </div>
+</div>""", unsafe_allow_html=True)
+
     # ── Trade Verdict Card ────────────────────────────────────────────────────
     _verdict = _ca_res.get("verdict", {})
     if _verdict:
@@ -8919,7 +8960,55 @@ def page_chart_analysis():
             bgcolor="rgba(19,23,34,0.6)",
         ))
 
-    _fig.update_layout(shapes=_anno_shapes + _ob_shapes + _fvg_shapes)
+    # CPR shapes: shaded band (BC–TC) + dotted lines for Pivot, R1, R2, S1, S2
+    _cpr_shapes = []
+    if _cpr:
+        _cpr_band_col = ("rgba(0,212,170,0.10)"  if _cpr.get("price_position") == "above" else
+                         "rgba(248,81,73,0.10)"   if _cpr.get("price_position") == "below" else
+                         "rgba(139,148,158,0.10)")
+        _cpr_shapes.append(dict(
+            type="rect", xref="paper", yref="y",
+            x0=0, x1=1,
+            y0=_cpr["bc"], y1=_cpr["tc"],
+            fillcolor=_cpr_band_col,
+            line=dict(color="#8b949e", width=1.2),
+            layer="below",
+        ))
+        for _lvl, _col, _dash, _lbl in [
+            (_cpr["pivot"], "#e6edf3", "dash",    "Pivot"),
+            (_cpr["r1"],    "#f85149", "dot",     "R1"),
+            (_cpr["r2"],    "#f85149", "dot",     "R2"),
+            (_cpr["s1"],    "#3fb950", "dot",     "S1"),
+            (_cpr["s2"],    "#3fb950", "dot",     "S2"),
+        ]:
+            _cpr_shapes.append(dict(
+                type="line", xref="paper", yref="y",
+                x0=0, x1=1, y0=_lvl, y1=_lvl,
+                line=dict(color=_col, width=1.0, dash=_dash),
+                layer="below",
+            ))
+            _annotations.append(dict(
+                xref="paper", yref="y",
+                x=1.0, y=_lvl,
+                text=f"<b>{_lbl} {_lvl:,}</b>",
+                showarrow=False,
+                font=dict(size=8, color=_col),
+                xanchor="left",
+                bgcolor="rgba(19,23,34,0.75)",
+            ))
+        # TC / BC labels
+        for _lvl, _lbl, _col in [(_cpr["tc"], "TC", "#f0883e"), (_cpr["bc"], "BC", "#3fb950")]:
+            _annotations.append(dict(
+                xref="paper", yref="y",
+                x=1.0, y=_lvl,
+                text=f"<b>{_lbl} {_lvl:,}</b>",
+                showarrow=False,
+                font=dict(size=8, color=_col),
+                xanchor="left",
+                bgcolor="rgba(19,23,34,0.75)",
+            ))
+
+    _fig.update_layout(shapes=_anno_shapes + _ob_shapes + _fvg_shapes + _cpr_shapes)
     for _a in _annotations:
         _fig.add_annotation(**_a)
 
