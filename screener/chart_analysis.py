@@ -640,7 +640,8 @@ def compute_cpr(df: pd.DataFrame, interval_key: str) -> dict:
             if len(unique_dates) < 2:
                 return {}
             prev_date = unique_dates[-2]
-            prev = df[pd.DatetimeIndex(df.index.date) == prev_date]
+            _dates = pd.array(df.index.date)
+            prev = df[_dates == prev_date]
             if prev.empty:
                 return {}
             h = float(prev["High"].max())
