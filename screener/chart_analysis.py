@@ -445,7 +445,7 @@ def build_summary(df: pd.DataFrame, events: list) -> dict:
 # ── Trade Verdict ─────────────────────────────────────────────────────────────
 
 def generate_verdict(df: pd.DataFrame, events: list, obs: list,
-                     fvgs: list, summary: dict) -> dict:
+                     fvgs: list, summary: dict, cpr: dict | None = None) -> dict:
     last   = df.iloc[-1]
     close  = float(last["Close"])
     ema20  = float(last.get("EMA20",  0) or 0)
@@ -544,6 +544,20 @@ def generate_verdict(df: pd.DataFrame, events: list, obs: list,
         score -= 1
         reasons.append({"text": "Price at Bearish Order Block — institutional sell zone", "ok": False})
 
+    # CPR position
+    if cpr:
+        _cp = cpr.get("price_position", "")
+        _tc = cpr.get("tc", 0)
+        _bc = cpr.get("bc", 0)
+        if _cp == "above":
+            score += 1
+            reasons.append({"text": f"Above CPR ({_bc:,.0f}–{_tc:,.0f}) — bullish day bias", "ok": True})
+        elif _cp == "below":
+            score -= 1
+            reasons.append({"text": f"Below CPR ({_bc:,.0f}–{_tc:,.0f}) — bearish day bias", "ok": False})
+        else:
+            reasons.append({"text": f"Inside CPR ({_bc:,.0f}–{_tc:,.0f}) — choppy/indecision", "ok": None})
+
     # Verdict
     if score >= 5:
         verdict, v_col = "STRONG BUY",  "#00d4aa"
@@ -610,6 +624,84 @@ def generate_verdict(df: pd.DataFrame, events: list, obs: list,
     }
 
 
+# ── CPR (Central Pivot Range) ─────────────────────────────────────────────────
+
+def compute_cpr(df: pd.DataFrame, interval_key: str) -> dict:
+    """
+    Compute CPR + standard pivots for the current period.
+    Intraday (1m-1H): previous day's H/L/C → today's CPR.
+    Daily (1D):       previous week's H/L/C → this week's CPR.
+    """
+    intraday = interval_key != "1D"
+
+    try:
+        if intraday:
+            unique_dates = sorted(set(df.index.date))
+            if len(unique_dates) < 2:
+                return {}
+            prev_date = unique_dates[-2]
+            prev = df[pd.DatetimeIndex(df.index.date) == prev_date]
+            if prev.empty:
+                return {}
+            h = float(prev["High"].max())
+            l = float(prev["Low"].min())
+            c = float(prev["Close"].iloc[-1])
+            period_lbl = "Daily CPR (prev day)"
+        else:
+            # Group by ISO year-week
+            _wk = df.index.to_series().apply(lambda x: (x.isocalendar()[0], x.isocalendar()[1]))
+            unique_weeks = sorted(_wk.unique())
+            if len(unique_weeks) < 2:
+                return {}
+            prev_week = unique_weeks[-2]
+            prev = df[_wk == prev_week]
+            if prev.empty:
+                return {}
+            h = float(prev["High"].max())
+            l = float(prev["Low"].min())
+            c = float(prev["Close"].iloc[-1])
+            period_lbl = "Weekly CPR (prev week)"
+    except Exception:
+        return {}
+
+    pivot = (h + l + c) / 3
+    bc    = (h + l) / 2
+    tc    = (pivot - bc) + pivot
+    if tc < bc:
+        tc, bc = bc, tc       # safety swap
+
+    r1 = 2 * pivot - l
+    r2 = pivot + (h - l)
+    r3 = h + 2 * (pivot - l)
+    s1 = 2 * pivot - h
+    s2 = pivot - (h - l)
+    s3 = l - 2 * (h - pivot)
+
+    width_pct = (tc - bc) / pivot * 100 if pivot > 0 else 0
+    # Narrow CPR (< 0.25%) signals a trending day; wide CPR signals range/chop
+    is_narrow = width_pct < 0.25
+
+    close = float(df["Close"].iloc[-1])
+    if close > tc:
+        price_pos, pos_col, pos_lbl = "above", "#00d4aa", "Above CPR → Bullish bias"
+    elif close < bc:
+        price_pos, pos_col, pos_lbl = "below", "#f85149", "Below CPR → Bearish bias"
+    else:
+        price_pos, pos_col, pos_lbl = "inside", "#8b949e", "Inside CPR → Choppy zone"
+
+    width_lbl = "Narrow → Trending day expected" if is_narrow else "Wide → Choppy day expected"
+
+    return {
+        "pivot": round(pivot, 1), "tc": round(tc, 1), "bc": round(bc, 1),
+        "r1": round(r1, 1), "r2": round(r2, 1), "r3": round(r3, 1),
+        "s1": round(s1, 1), "s2": round(s2, 1), "s3": round(s3, 1),
+        "width_pct": round(width_pct, 3), "is_narrow": is_narrow,
+        "price_position": price_pos, "pos_color": pos_col,
+        "pos_label": pos_lbl, "width_label": width_lbl,
+        "period_label": period_lbl,
+    }
+
+
 # ── Main entry point ──────────────────────────────────────────────────────────
 
 def analyze_chart(symbol: str, interval: str,
@@ -636,11 +728,12 @@ def analyze_chart(symbol: str, interval: str,
     fvgs     = detect_fvg(df)
     df       = generate_signals(df, obs, evts)
     summary  = build_summary(df, evts)
-    verdict  = generate_verdict(df, evts, obs, fvgs, summary)
+    cpr      = compute_cpr(df, interval)
+    verdict  = generate_verdict(df, evts, obs, fvgs, summary, cpr=cpr)
 
     return {
         "df": df, "events": evts, "obs": obs, "fvgs": fvgs,
-        "summary": summary, "verdict": verdict,
+        "summary": summary, "verdict": verdict, "cpr": cpr,
         "symbol": display_name, "interval": interval,
         "error": None,
     }
