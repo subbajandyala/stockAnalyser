@@ -124,7 +124,16 @@ def fetch_candles(token: int, interval_key: str,
         df = df.between_time("09:15", "15:35")
 
     # Keep enough candles: 750 guarantees ≥2 trading days for CPR even for 1m
-    return df.tail(750)
+    df = df.tail(750)
+
+    # Merge live Redis candles if ticker_daemon is running (no-op if not)
+    try:
+        from screener.live_ticks import merge_with_live
+        df = merge_with_live(df, token, interval_key)
+    except Exception:
+        pass
+
+    return df
 
 
 # ── Indicators ────────────────────────────────────────────────────────────────
