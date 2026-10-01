@@ -633,37 +633,36 @@ def compute_cpr(df: pd.DataFrame, interval_key: str) -> dict:
     Intraday (1m-1H): previous day's H/L/C → today's CPR.
     Daily (1D):       previous week's H/L/C → this week's CPR.
     """
-    intraday = interval_key != "1D"
-
-    try:
-        if intraday:
-            unique_dates = sorted(set(df.index.date))
-            if len(unique_dates) < 2:
-                return {}
-            prev_date = unique_dates[-2]
-            prev = df[[d == prev_date for d in df.index.date]]
-            if prev.empty:
-                return {}
-            h = float(prev["High"].max())
-            l = float(prev["Low"].min())
-            c = float(prev["Close"].iloc[-1])
-            period_lbl = "Daily CPR (prev day)"
-        else:
-            # Group by ISO year-week
-            _wk = df.index.to_series().apply(lambda x: (x.isocalendar()[0], x.isocalendar()[1]))
-            unique_weeks = sorted(_wk.unique())
-            if len(unique_weeks) < 2:
-                return {}
-            prev_week = unique_weeks[-2]
-            prev = df[_wk == prev_week]
-            if prev.empty:
-                return {}
-            h = float(prev["High"].max())
-            l = float(prev["Low"].min())
-            c = float(prev["Close"].iloc[-1])
-            period_lbl = "Weekly CPR (prev week)"
-    except Exception:
+    if df is None or df.empty:
         return {}
+
+    if interval_key == "1D":
+        # Group by ISO week number stored as integer column
+        iso = df.index.isocalendar()
+        df2 = df.copy()
+        df2["_yw"] = iso.year.astype(str) + "_" + iso.week.astype(str).str.zfill(2)
+        unique_yw = sorted(df2["_yw"].unique())
+        if len(unique_yw) < 2:
+            return {}
+        prev_yw = unique_yw[-2]
+        prev = df2[df2["_yw"] == prev_yw]
+        period_lbl = "Weekly CPR (prev week)"
+    else:
+        # Normalize each timestamp to midnight in its own timezone → comparable
+        day_col = df.index.normalize()           # DatetimeIndex of midnight values
+        unique_days = sorted(set(day_col))
+        if len(unique_days) < 2:
+            return {}
+        prev_day = unique_days[-2]
+        prev = df[day_col == prev_day]
+        period_lbl = "Daily CPR (prev day)"
+
+    if prev.empty:
+        return {}
+
+    h = float(prev["High"].max())
+    l = float(prev["Low"].min())
+    c = float(prev["Close"].iloc[-1])
 
     pivot = (h + l + c) / 3
     bc    = (h + l) / 2
