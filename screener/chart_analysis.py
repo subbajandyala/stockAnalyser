@@ -123,7 +123,8 @@ def fetch_candles(token: int, interval_key: str,
     if interval_key != "1D":
         df = df.between_time("09:15", "15:35")
 
-    return df.tail(300)   # keep last 300 candles for performance
+    # Keep enough candles: 750 guarantees ≥2 trading days for CPR even for 1m
+    return df.tail(750)
 
 
 # ── Indicators ────────────────────────────────────────────────────────────────
@@ -640,8 +641,7 @@ def compute_cpr(df: pd.DataFrame, interval_key: str) -> dict:
             if len(unique_dates) < 2:
                 return {}
             prev_date = unique_dates[-2]
-            _dates = pd.array(df.index.date)
-            prev = df[_dates == prev_date]
+            prev = df[[d == prev_date for d in df.index.date]]
             if prev.empty:
                 return {}
             h = float(prev["High"].max())
