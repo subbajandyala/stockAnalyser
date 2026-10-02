@@ -14,6 +14,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$SCRIPT_DIR"
 
 PYTHON="${PYTHON:-/root/venv/bin/python}"
+STREAMLIT="${STREAMLIT:-/root/venv/bin/streamlit}"
 
 echo "=== MarketPulse — Starting services ==="
 
@@ -33,7 +34,7 @@ sleep 3
 
 # ── Start Streamlit ─────────────────────────────────────────────────────────
 echo "Starting Streamlit on port 8501..."
-nohup streamlit run app.py \
+nohup "$STREAMLIT" run app.py \
     --server.port 8501 \
     --server.address 0.0.0.0 \
     --server.headless true \
