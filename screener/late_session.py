@@ -25,23 +25,24 @@ from typing import Optional
 
 import numpy as np
 import pandas as pd
-import yfinance as yf
+
+from screener.kite_data import fetch_ohlcv as _kite_ohlcv
 
 _IST = datetime.timezone(datetime.timedelta(hours=5, minutes=30))
 
 INDEX_CONFIG: dict[str, dict] = {
     "NIFTY": {
-        "yf": "^NSEI",    "step": 50,  "lot": 25,
+        "step": 50,  "lot": 25,
         "color": "#00d4aa", "cas": False,
         "label": "NIFTY 50",
     },
     "BANKNIFTY": {
-        "yf": "^NSEBANK", "step": 100, "lot": 15,
+        "step": 100, "lot": 15,
         "color": "#79c0ff", "cas": False,
         "label": "BANK NIFTY",
     },
     "SENSEX": {
-        "yf": "^BSESN",   "step": 100, "lot": 10,
+        "step": 100, "lot": 10,
         "color": "#ffa657", "cas": True,
         "label": "SENSEX",
     },
@@ -60,7 +61,7 @@ def _vwap_today(df: pd.DataFrame) -> float:
     try:
         idx = df.index
         if idx.tz is None:
-            idx = idx.tz_localize("UTC")
+            idx = idx.tz_localize(_IST)
         idx = idx.tz_convert(_IST)
         today = datetime.date.today()
         mask  = pd.Series(idx.date, index=df.index) == today
@@ -299,21 +300,15 @@ def apply_flip_guard(
 
 
 def fetch_data(index: str) -> dict:
-    """Download 5m and 1m data for the underlying index."""
+    """Fetch 5m and 1m data for the underlying index via Kite."""
     cfg = INDEX_CONFIG.get(index)
     if not cfg:
         return {"error": f"Unknown index: {index}"}
-    sym = cfg["yf"]
     try:
-        df_5m = yf.download(sym, period="1d", interval="5m",
-                            auto_adjust=True, progress=False)
-        df_1m = yf.download(sym, period="1d", interval="1m",
-                            auto_adjust=True, progress=False)
-        for df in (df_5m, df_1m):
-            if isinstance(df.columns, pd.MultiIndex):
-                df.columns = df.columns.get_level_values(0)
+        df_5m = _kite_ohlcv(index, interval="5minute", days=1)
+        df_1m = _kite_ohlcv(index, interval="minute",  days=1)
         if df_5m.empty or len(df_5m) < 6:
-            return {"error": f"No intraday data for {sym}. Market may be closed."}
+            return {"error": f"No intraday data for {index}. Market may be closed."}
         return {"df_5m": df_5m, "df_1m": df_1m, "error": None}
     except Exception as e:
         return {"error": str(e)}

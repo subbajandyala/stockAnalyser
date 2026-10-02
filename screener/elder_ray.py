@@ -29,8 +29,6 @@ from typing import Optional
 import numpy as np
 import pandas as pd
 import requests
-import yfinance as yf
-
 _KITE_BASE = "https://api.kite.trade"
 _IST       = datetime.timezone(datetime.timedelta(hours=5, minutes=30))
 
@@ -461,42 +459,21 @@ def fetch_elder_ray_data(symbol: str) -> dict:
     yf_sym = cfg["yf"]
 
     api_key, access_token = _kite_creds()
-    use_kite = bool(api_key and access_token)
     token_id = cfg.get("kite_token")
-
-    if use_kite:
-        print(f"  [{symbol}] Using Kite live data")
-    else:
-        print(f"  [{symbol}] Kite creds not set — falling back to yfinance")
 
     dfs: dict[str, pd.DataFrame] = {}
     errs: list[str] = []
 
-    kite_interval_map = {
-        "df_15m": ("15m",  "15minute"),
-        "df_5m":  ("5m",   "5minute"),
-        "df_1m":  ("1m",   "minute"),
-    }
-
-    for key, (yf_int, kite_int) in kite_interval_map.items():
-        yf_period = {"15m": "5d", "5m": "2d", "1m": "1d"}[yf_int]
+    for key, kite_int in [("df_15m", "15minute"), ("df_5m", "5minute"), ("df_1m", "minute")]:
         try:
-            if use_kite and token_id:
-                raw = _fetch_kite_candles(token_id, kite_int, api_key, access_token)
-            else:
-                raw = yf.download(yf_sym, period=yf_period, interval=yf_int,
-                                  auto_adjust=True, progress=False)
-                if isinstance(raw.columns, pd.MultiIndex):
-                    raw.columns = raw.columns.get_level_values(0)
-                raw = _mkt_hours_filter(raw)
-
+            raw = _fetch_kite_candles(token_id, kite_int, api_key, access_token)
             if raw.empty:
-                errs.append(f"No {yf_int} data")
+                errs.append(f"No {kite_int} data")
                 dfs[key] = pd.DataFrame()
             else:
                 dfs[key] = compute_elder_ray(raw)
         except Exception as e:
-            errs.append(f"{yf_int}: {e}")
+            errs.append(f"{kite_int}: {e}")
             dfs[key] = pd.DataFrame()
 
     return {**dfs, "symbol": symbol, "error": "; ".join(errs) if errs else None}

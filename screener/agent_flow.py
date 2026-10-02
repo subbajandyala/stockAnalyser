@@ -10,8 +10,7 @@ from typing import Optional
 
 import numpy as np
 import pandas as pd
-import yfinance as yf
-
+from screener.kite_data import fetch_ohlcv as _kite_ohlcv
 from screener.option_chain import (
     fetch_option_chain, get_expiries, parse_chain,
     atm_strike, calc_pcr, calc_max_pain,
@@ -19,40 +18,24 @@ from screener.option_chain import (
 
 _IST = datetime.timezone(datetime.timedelta(hours=5, minutes=30))
 
-_YF_SYMBOL = {
-    "NIFTY":      "^NSEI",
-    "BANKNIFTY":  "^NSEBANK",
-    "FINNIFTY":   "NIFTY_FIN_SERVICE.NS",
-    "MIDCPNIFTY": "NIFTY_MID_SELECT.NS",
-    "SENSEX":     "^BSESN",
-}
-_VIX_SYM = "^INDIAVIX"
-INSTRUMENTS = list(_YF_SYMBOL.keys())
+INSTRUMENTS = ["NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX"]
 
 
 # ── Data helpers ──────────────────────────────────────────────────────────────
 
 def _fetch_ohlcv(symbol: str) -> pd.DataFrame:
-    yf_sym = _YF_SYMBOL.get(symbol, "^NSEI")
-    df = yf.download(yf_sym, period="5d", interval="5m", auto_adjust=True, progress=False)
-    if isinstance(df.columns, pd.MultiIndex):
-        df.columns = df.columns.get_level_values(0)
+    df = _kite_ohlcv(symbol, interval="5minute", days=2)
     if df.empty:
         return df
-    idx = df.index
-    if idx.tz is None:
-        idx = idx.tz_localize("UTC")
     today = datetime.date.today()
-    mask = pd.Series(idx.tz_convert(_IST).date, index=df.index) == today
+    mask = df.index.date == today
     df_today = df[mask].copy()
     return df_today if len(df_today) >= 10 else df.tail(60).copy()
 
 
 def _fetch_vix() -> float:
     try:
-        df = yf.download(_VIX_SYM, period="2d", interval="5m", auto_adjust=True, progress=False)
-        if isinstance(df.columns, pd.MultiIndex):
-            df.columns = df.columns.get_level_values(0)
+        df = _kite_ohlcv("INDIAVIX", interval="day", days=5)
         if not df.empty:
             return round(float(df["Close"].dropna().iloc[-1]), 2)
     except Exception:

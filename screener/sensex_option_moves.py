@@ -16,10 +16,7 @@ from io import StringIO
 import numpy as np
 import pandas as pd
 import requests
-import yfinance as yf
-
 _KITE_BASE  = "https://api.kite.trade"
-_SENSEX_YF  = "^BSESN"
 _IST        = "Asia/Kolkata"
 
 # Known Kite instrument token for BSE SENSEX index (used for historical candles)
@@ -71,24 +68,6 @@ def _fetch_sensex_via_kite(date: datetime.date, api_key: str, access_token: str)
     return df.set_index("timestamp")
 
 
-def _fetch_sensex_via_yf(date: datetime.date) -> pd.DataFrame:
-    """5-min SENSEX candles via yfinance."""
-    start = date.strftime("%Y-%m-%d")
-    end   = (date + datetime.timedelta(days=1)).strftime("%Y-%m-%d")
-    df = yf.download(_SENSEX_YF, start=start, end=end, interval="5m",
-                     progress=False, auto_adjust=True)
-    if df.empty:
-        return df
-    # Flatten potential MultiIndex columns
-    if isinstance(df.columns, pd.MultiIndex):
-        df.columns = df.columns.get_level_values(0)
-    # Normalise to IST
-    if df.index.tz is None:
-        df.index = df.index.tz_localize("UTC")
-    df.index = df.index.tz_convert(_IST)
-    # Normalise column names to lowercase
-    df.columns = [c.lower() for c in df.columns]
-    return df
 
 
 def fetch_sensex_candles(date: datetime.date,
@@ -104,12 +83,6 @@ def fetch_sensex_candles(date: datetime.date,
                 return df, "Kite"
         except Exception:
             pass
-    try:
-        df = _fetch_sensex_via_yf(date)
-        if not df.empty:
-            return df, "yfinance"
-    except Exception:
-        pass
     return pd.DataFrame(), "none"
 
 

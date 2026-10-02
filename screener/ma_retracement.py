@@ -1,6 +1,6 @@
-import yfinance as yf
 import pandas as pd
 import numpy as np
+from screener.kite_data import fetch_ohlcv_yf_compat
 from screener.kite_hist import batch_quote_nse, patch_df_with_kite
 
 
@@ -31,8 +31,7 @@ def analyze_ma_retracement(
     kite_quote: dict | None = None,
 ) -> dict | None:
     try:
-        df = yf.download(nse_symbol, period=period, interval=interval,
-                         progress=False, auto_adjust=True)
+        df = fetch_ohlcv_yf_compat(nse_symbol, period=period, interval=interval)
         if df is None or len(df) < 30:
             return None
 

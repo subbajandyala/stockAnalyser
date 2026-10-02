@@ -1,6 +1,6 @@
-import yfinance as yf
 import pandas as pd
 import numpy as np
+from screener.kite_data import fetch_ohlcv_yf_compat
 from screener.kite_hist import batch_quote_nse, patch_df_with_kite
 
 
@@ -15,8 +15,7 @@ def _is_near(price: float, level: float, pct: float = 0.01) -> bool:
 def _monthly_cpr(nse_symbol: str) -> dict | None:
     """Fetch previous month's OHLC and compute monthly CPR."""
     try:
-        df = yf.download(nse_symbol, period="3mo", interval="1mo",
-                         progress=False, auto_adjust=True)
+        df = fetch_ohlcv_yf_compat(nse_symbol, period="3mo", interval="1mo")
         if df is None or len(df) < 2:
             return None
         # Use the second-to-last candle = completed previous month
@@ -44,8 +43,7 @@ def analyze_ma50_support(
     kite_quote: dict | None = None,
 ) -> dict | None:
     try:
-        df = yf.download(nse_symbol, period=period, interval=interval,
-                         progress=False, auto_adjust=True)
+        df = fetch_ohlcv_yf_compat(nse_symbol, period=period, interval=interval)
         if df is None or len(df) < 60:
             return None
 

@@ -11,7 +11,7 @@ from typing import Optional
 import numpy as np
 import pandas as pd
 import requests
-import yfinance as yf
+from screener.kite_data import fetch_ohlcv as _kite_ohlcv
 
 _KITE_BASE = "https://api.kite.trade"
 _IST = datetime.timezone(datetime.timedelta(hours=5, minutes=30))
@@ -270,15 +270,14 @@ def _sentiment_factor(sentiment: str) -> dict:
 # ── Gate helpers ───────────────────────────────────────────────────────────────
 
 def _fetch_vix() -> float:
-    """Fetch India VIX daily close. Returns 0.0 on failure."""
+    """Fetch India VIX daily close via Kite. Returns 0.0 on failure."""
     try:
-        df = yf.download("^INDIAVIX", period="5d", interval="1d",
-                         progress=False, auto_adjust=True)
-        if df.empty:
-            return 0.0
-        return float(df["Close"].squeeze().dropna().iloc[-1])
+        df = _kite_ohlcv("INDIAVIX", interval="day", days=5)
+        if not df.empty:
+            return float(df["Close"].dropna().iloc[-1])
     except Exception:
-        return 0.0
+        pass
+    return 0.0
 
 
 def _check_gates(ist_now: datetime.datetime, vix: float) -> dict:

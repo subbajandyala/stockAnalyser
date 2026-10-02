@@ -1,67 +1,38 @@
-import yfinance as yf
+"""
+Fundamental screener — price-action quality filter via Kite batch quotes.
+
+Kite does not provide fundamental ratios (ROE, OPM, P/E, D/E).
+This screener uses Kite /quote to apply price-based quality filters:
+  - Pulled back >20% from 52-week high (buying opportunity in a quality stock)
+  - LTP above zero and liquid (volume_traded > 0)
+"""
+
 import pandas as pd
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Callable
 
+from screener.kite_hist import batch_quote_nse, kite_hdrs
+import requests
 
-def _fetch_info(row: dict) -> dict | None:
-    """Fetch yfinance fundamentals for one stock and apply filters. Returns dict or None."""
-    try:
-        info = yf.Ticker(row["NSE_Symbol"]).info
+_KITE_BASE = "https://api.kite.trade"
 
-        price      = float(info.get("currentPrice") or info.get("regularMarketPrice") or 0)
-        mkt_cap    = float(info.get("marketCap") or 0)
-        roe        = info.get("returnOnEquity")
-        de         = info.get("debtToEquity")
-        opm        = info.get("operatingMargins")
-        pe         = info.get("trailingPE")
-        rev_gr     = info.get("revenueGrowth")
-        earn_gr    = info.get("earningsGrowth")
-        high_52w   = float(info.get("fiftyTwoWeekHigh") or price or 1)
 
-        # ── Hard filters ──────────────────────────────────────────────────────
-        if price <= 0:
-            return None
-        if mkt_cap < 10_000_000_000:           # < 1000 Cr (10B INR)
-            return None
-        if roe is None or float(roe) < 0.15:   # ROE < 15%
-            return None
-        if opm is None or float(opm) < 0.12:   # OPM < 12%
-            return None
-        if rev_gr is None or float(rev_gr) < 0.08:    # Revenue growth < 8%
-            return None
-        if earn_gr is None or float(earn_gr) < 0.08:  # Earnings growth < 8%
-            return None
-
-        # D/E: yfinance returns as percentage (50 = ratio 0.50), filter D/E < 0.5
-        if de is not None:
-            de_f = float(de)
-            if de_f > 50:
-                return None
-        else:
-            de_f = None
-
-        # Down from 52W high > 25% (pulled back, buying opportunity)
-        down_pct = (high_52w - price) / high_52w * 100 if high_52w > 0 else 0
-        if down_pct < 25:
-            return None
-
-        return {
-            "Symbol":        row["Symbol"],
-            "Company":       row["Company"],
-            "NSE_Symbol":    row["NSE_Symbol"],
-            "Price":         round(price, 2),
-            "Mkt Cap (Cr)":  round(mkt_cap / 1e7, 0),
-            "ROE %":         round(float(roe) * 100, 1),
-            "D/E":           round(de_f / 100, 2) if de_f is not None else None,
-            "OPM %":         round(float(opm) * 100, 1),
-            "Rev Growth %":  round(float(rev_gr) * 100, 1),
-            "Earn Growth %": round(float(earn_gr) * 100, 1),
-            "P/E":           round(float(pe), 1) if pe else None,
-            "↓ 52W High %":  round(down_pct, 1),
-        }
-    except Exception:
-        return None
+def _load_creds() -> tuple[str, str]:
+    import os
+    from pathlib import Path
+    env: dict[str, str] = {}
+    for p in [Path(__file__).parent.parent / ".env", Path(".env")]:
+        if p.exists():
+            for line in p.read_text(encoding="utf-8").splitlines():
+                line = line.strip()
+                if "=" in line and not line.startswith("#"):
+                    k, v = line.split("=", 1)
+                    env[k.strip()] = v.strip().strip('"').strip("'")
+            break
+    for k in ("KITE_API_KEY", "KITE_ACCESS_TOKEN"):
+        if k in os.environ:
+            env[k] = os.environ[k]
+    return env.get("KITE_API_KEY", ""), env.get("KITE_ACCESS_TOKEN", "")
 
 
 def fetch_fundamental_stocks(
@@ -70,28 +41,77 @@ def fetch_fundamental_stocks(
     progress_cb: Callable[[float], None] | None = None,
 ) -> pd.DataFrame:
     """
-    Screen NIFTY 500 stocks using yfinance fundamental data (parallel fetch).
-    Criteria applied: Market Cap >1000Cr, ROE >15%, D/E <0.5, OPM >12%,
-    Revenue & Earnings growth >8%, Down from 52W High >25%.
+    Screen NIFTY 500 stocks using Kite batch quotes.
+    Filters: pulled back >20% from 52W high, liquid (volume > 0).
     """
-    rows  = symbols_df.to_dict("records")
-    total = len(rows)
-    done  = 0
-    results: list[dict] = []
+    api_key, access_token = _load_creds()
+    if not api_key or not access_token:
+        return pd.DataFrame()
 
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        futures = {executor.submit(_fetch_info, r): r for r in rows}
-        for future in as_completed(futures):
-            done += 1
-            if progress_cb:
-                progress_cb(done / total)
-            result = future.result()
-            if result:
-                results.append(result)
+    plain_syms = list(symbols_df["Symbol"].str.upper())
+    total = len(plain_syms)
+
+    # Batch-fetch in chunks of 400
+    quotes: dict = {}
+    chunk_size = 400
+    done = 0
+    for i in range(0, total, chunk_size):
+        chunk = plain_syms[i : i + chunk_size]
+        try:
+            q = batch_quote_nse(api_key, access_token, chunk)
+            quotes.update(q)
+        except Exception:
+            pass
+        done += len(chunk)
+        if progress_cb:
+            progress_cb(done / total * 0.8)
+
+    results: list[dict] = []
+    sym_map = {r["Symbol"].upper(): r for _, r in symbols_df.iterrows()}
+
+    for sym, row in sym_map.items():
+        q = quotes.get(f"NSE:{sym}", {})
+        if not q:
+            continue
+
+        ltp        = float(q.get("last_price") or 0)
+        volume     = int(q.get("volume_traded") or 0)
+        week52high = float(q.get("week_52_high") or 0)
+        week52low  = float(q.get("week_52_low") or 0)
+        ohlc       = q.get("ohlc") or {}
+        day_open   = float(ohlc.get("open") or ltp)
+
+        if ltp <= 0 or volume <= 0:
+            continue
+        if week52high <= 0:
+            continue
+
+        down_pct = (week52high - ltp) / week52high * 100
+        if down_pct < 20:
+            continue
+
+        up_from_low = (ltp - week52low) / week52low * 100 if week52low > 0 else 0
+        change_day  = (ltp - day_open) / day_open * 100 if day_open > 0 else 0
+
+        results.append({
+            "Symbol":       sym,
+            "Company":      row["Company"],
+            "NSE_Symbol":   row["NSE_Symbol"],
+            "Price":        round(ltp, 2),
+            "↓ 52W High %": round(down_pct, 1),
+            "↑ 52W Low %":  round(up_from_low, 1),
+            "Day Change %": round(change_day, 2),
+            "52W High":     round(week52high, 2),
+            "52W Low":      round(week52low, 2),
+            "Volume":       volume,
+        })
+
+    if progress_cb:
+        progress_cb(1.0)
 
     if not results:
         return pd.DataFrame()
 
     df = pd.DataFrame(results)
-    df = df.sort_values("Mkt Cap (Cr)", ascending=False).reset_index(drop=True)
+    df = df.sort_values("↓ 52W High %", ascending=False).reset_index(drop=True)
     return df

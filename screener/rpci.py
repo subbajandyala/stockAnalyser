@@ -20,13 +20,13 @@ Label: ≥9 Strongly favourable, ≥7 Favourable, ≥5 Neutral, else Unfavourabl
 """
 
 import datetime
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Callable, Optional
 
 import numpy as np
 import pandas as pd
-import yfinance as yf
 
-_NIFTY_SYM = "^NSEI"
+from screener.kite_data import fetch_ohlcv as _kite_ohlcv
 
 CONDITIONS = [
     "Valuation",
@@ -259,15 +259,10 @@ def analyse_single(symbol: str) -> dict:
     Returns {"symbol", "conditions", "score", "total", "label",
              "momentum_hist", "close", "high", "low", "price", "error"}.
     """
-    nse_sym = f"{symbol}.NS"
     try:
-        daily  = yf.download(nse_sym, period="2y", interval="1d",  auto_adjust=True, progress=False)
-        weekly = yf.download(nse_sym, period="3y", interval="1wk", auto_adjust=True, progress=False)
-        nifty  = yf.download(_NIFTY_SYM, period="1y", interval="1d", auto_adjust=True, progress=False)
-
-        for df in (daily, weekly, nifty):
-            if isinstance(df.columns, pd.MultiIndex):
-                df.columns = df.columns.get_level_values(0)
+        daily  = _kite_ohlcv(symbol, interval="day",  days=730)
+        weekly = _kite_ohlcv(symbol, interval="week",  days=1095)
+        nifty  = _kite_ohlcv("NIFTY", interval="day", days=365)
 
         if daily.empty or len(daily) < 60:
             return {"error": f"Insufficient data for {symbol}"}
@@ -318,44 +313,45 @@ def run_rpci_scan(
         if progress_cb:
             progress_cb(msg, pct)
 
-    _p("Downloading 2y daily data for all symbols…", 5)
-    tickers = [f"{s}.NS" for s in symbols]
-
+    _p("Fetching NIFTY 50 benchmark…", 5)
     try:
-        raw = yf.download(
-            tickers, period="2y", interval="1d",
-            auto_adjust=True, progress=False, threads=True,
-        )
-    except Exception as e:
-        _p(f"Download failed: {e}", 0)
-        return pd.DataFrame()
-
-    _p("Downloading NIFTY 50 benchmark…", 45)
-    try:
-        nraw = yf.download(_NIFTY_SYM, period="1y", interval="1d", auto_adjust=True, progress=False)
-        if isinstance(nraw.columns, pd.MultiIndex):
-            nraw.columns = nraw.columns.get_level_values(0)
-        nifty_close = nraw["Close"].dropna()
+        nifty_close = _kite_ohlcv("NIFTY", interval="day", days=365)["Close"].dropna()
     except Exception:
         nifty_close = pd.Series(dtype=float)
 
+    _p("Fetching 2y daily data for all symbols…", 10)
+
+    def _fetch_one(sym: str):
+        try:
+            df = _kite_ohlcv(sym, interval="day", days=730)
+            return sym, df
+        except Exception:
+            return sym, pd.DataFrame()
+
+    stock_data: dict[str, pd.DataFrame] = {}
+    total = len(symbols)
+    with ThreadPoolExecutor(max_workers=20) as pool:
+        futs = {pool.submit(_fetch_one, sym): sym for sym in symbols}
+        for i, fut in enumerate(as_completed(futs)):
+            sym, df = fut.result()
+            if not df.empty:
+                stock_data[sym] = df
+            if i % 25 == 0:
+                _p(f"Fetched {i+1}/{total} stocks…", 10 + int(i / max(total, 1) * 40))
+
     _p("Computing 11 conditions per stock…", 50)
-    is_multi = isinstance(raw.columns, pd.MultiIndex)
     rows: list[dict] = []
 
-    for i, (sym, tick) in enumerate(zip(symbols, tickers)):
+    for i, sym in enumerate(symbols):
         try:
-            if is_multi:
-                cd_raw = raw["Close"]
-                cd = (cd_raw[tick] if tick in cd_raw.columns else pd.Series(dtype=float)).dropna()
-                hd = (raw["High"][tick]   if "High"   in raw and tick in raw["High"].columns   else cd).dropna()
-                ld = (raw["Low"][tick]    if "Low"    in raw and tick in raw["Low"].columns    else cd).dropna()
-                vd = (raw["Volume"][tick] if "Volume" in raw and tick in raw["Volume"].columns else pd.Series(dtype=float)).dropna()
-            else:
-                cd = raw["Close"].dropna()
-                hd = raw.get("High",   raw["Close"]).dropna()
-                ld = raw.get("Low",    raw["Close"]).dropna()
-                vd = raw.get("Volume", pd.Series(dtype=float)).dropna()
+            raw = stock_data.get(sym)
+            if raw is None or raw.empty:
+                continue
+
+            cd = raw["Close"].dropna()
+            hd = raw["High"].dropna()
+            ld = raw["Low"].dropna()
+            vd = raw["Volume"].dropna()
 
             if len(cd) < 60:
                 continue
@@ -365,7 +361,6 @@ def run_rpci_scan(
 
             price_now = float(cd.iloc[-1])
 
-            # Extra columns matching reference site
             chg_pct = 0.0
             if len(cd) >= 2:
                 chg_pct = round((price_now - float(cd.iloc[-2])) / float(cd.iloc[-2]) * 100, 2)
@@ -377,7 +372,7 @@ def run_rpci_scan(
                 vs_20dma = round((price_now - sma20_v) / sma20_v * 100, 2)
 
             vol_today = int(vd.iloc[-1]) if len(vd) > 0 else 0
-            vol_cr    = round(vol_today * price_now / 1e7, 2)   # value traded in crore
+            vol_cr    = round(vol_today * price_now / 1e7, 2)
 
             _sm  = (sector_map or {}).get(sym, {})
             row: dict = {
@@ -402,7 +397,7 @@ def run_rpci_scan(
             pass
 
         if i % 25 == 0:
-            _p(f"Processed {i + 1}/{len(symbols)} stocks…", 50 + int(i / max(len(symbols), 1) * 40))
+            _p(f"Processed {i + 1}/{total} stocks…", 50 + int(i / max(total, 1) * 40))
 
     _p("Sorting results…", 95)
     if not rows:

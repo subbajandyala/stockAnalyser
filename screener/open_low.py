@@ -12,7 +12,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Optional
 
 import pandas as pd
-import yfinance as yf
+from screener.kite_data import fetch_ohlcv as _kite_ohlcv
 
 _IST = datetime.timezone(datetime.timedelta(hours=5, minutes=30))
 TOLERANCE_PCT = 0.05   # Low must be within 0.05 % of Open
@@ -126,21 +126,12 @@ NIFTY100: list[tuple[str, str]] = [
 
 def _fetch_one(symbol: str, company: str) -> Optional[dict]:
     try:
-        df = yf.download(
-            f"{symbol}.NS", period="1d", interval="1m",
-            auto_adjust=True, progress=False,
-        )
-        if isinstance(df.columns, pd.MultiIndex):
-            df.columns = df.columns.get_level_values(0)
+        df = _kite_ohlcv(symbol, interval="minute", days=1)
         if df.empty or len(df) < 3:
             return None
 
-        idx = df.index
-        if idx.tz is None:
-            idx = idx.tz_localize("UTC")
         today = datetime.date.today()
-        mask = pd.Series(idx.tz_convert(_IST).date, index=df.index) == today
-        df_t = df[mask]
+        df_t = df[df.index.date == today]
         if len(df_t) < 3:
             return None
 

@@ -1,6 +1,6 @@
-import yfinance as yf
 import pandas as pd
 import numpy as np
+from screener.kite_data import fetch_ohlcv_yf_compat
 
 
 def _ema(series: pd.Series, period: int) -> pd.Series:
@@ -22,8 +22,7 @@ def analyze_stock(
     period: str = "1y",
 ) -> dict | None:
     try:
-        df = yf.download(nse_symbol, period=period, interval=interval,
-                         progress=False, auto_adjust=True)
+        df = fetch_ohlcv_yf_compat(nse_symbol, period=period, interval=interval)
         if df is None or len(df) < 30:
             return None
 
