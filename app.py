@@ -8540,15 +8540,21 @@ def page_chart_analysis():
         import concurrent.futures as _cf
         st.session_state["ca_symbol"] = _ca_sym
         st.session_state["ca_tf"]     = _ca_tf
-        _MTF_KEYS = ["5m", "15m", "1H", "1D"]
+        _MTF_KEYS_BASE = ["5m", "15m", "1H", "1D"]
+        # If selected TF isn't in the standard set, inject it (replaces 15m for intraday TFs)
+        if _ca_tf not in _MTF_KEYS_BASE:
+            _MTF_KEYS = [(_ca_tf if k == "15m" else k) for k in _MTF_KEYS_BASE]
+        else:
+            _MTF_KEYS = _MTF_KEYS_BASE
+        st.session_state["ca_mtf_keys"] = _MTF_KEYS
         with st.spinner(f"Analysing {_ca_sym} across all timeframes…"):
-            # Fetch selected TF + 4 standard MTF timeframes in parallel
+            # Fetch selected TF + MTF timeframes in parallel
             _all_keys = list(dict.fromkeys([_ca_tf] + _MTF_KEYS))
             def _fetch_tf(k):
                 return k, _analyze_chart(_ca_sym, k, _ca_api, _ca_tok)
             with _cf.ThreadPoolExecutor(max_workers=5) as _pool:
                 _tf_results = dict(_pool.map(lambda k: _fetch_tf(k), _all_keys))
-        st.session_state["ca_result"]     = _tf_results[_ca_tf]
+        st.session_state["ca_result"]      = _tf_results[_ca_tf]
         st.session_state["ca_mtf_results"] = {k: _tf_results[k] for k in _MTF_KEYS}
         st.session_state["ca_ts"] = datetime.datetime.now(
             datetime.timezone(datetime.timedelta(hours=5, minutes=30))
@@ -8775,7 +8781,8 @@ def page_chart_analysis():
     # ── Multi-Timeframe Table ─────────────────────────────────────────────────
     _mtf_data = st.session_state.get("ca_mtf_results", {})
     if _mtf_data:
-        _MTF_DISPLAY = {"5m": "5 Min", "15m": "15 Min", "1H": "1 Hour", "1D": "Daily"}
+        _saved_mtf_keys = st.session_state.get("ca_mtf_keys", ["5m", "15m", "1H", "1D"])
+        _MTF_DISPLAY = {k: _CA_INTERVAL_CFG[k]["label"] for k in _saved_mtf_keys}
         _mtf_header = "".join(
             f'<th style="padding:8px 12px;color:#8b949e;font-size:0.65rem;font-weight:700;'
             f'text-transform:uppercase;letter-spacing:0.8px;text-align:center;">{h}</th>'
