@@ -1,5 +1,4 @@
 streamlit>=1.28.0
-yfinance>=0.2.28
 pandas>=2.0.0
 feedparser>=6.0.10
 requests>=2.31.0
@@ -9,4 +8,5 @@ curl-cffi>=0.7.0
 undetected-chromedriver>=3.5.0
 streamlit-autorefresh>=1.0.0
 kiteconnect>=5.0.1
+pyotp>=2.8.0
 openpyxl>=3.1.0

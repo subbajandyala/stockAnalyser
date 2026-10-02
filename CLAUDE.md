@@ -1,6 +1,6 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+This file provides guidance to Claude Code when working with this repository.
 
 ## Running the app
 
@@ -11,56 +11,215 @@ pip install -r requirements.txt
 # Run locally
 streamlit run app.py
 
-# On Windows (Microsoft Store Python / when 'streamlit' isn't in PATH)
-python -m streamlit run app.py
+# Start everything on the droplet
+bash start_droplet.sh
+
+# Stop everything on the droplet
+bash stop_droplet.sh
 ```
 
-There are no tests or linters configured. The `test` file in the root is empty.
+No tests or linters are configured.
+
+---
 
 ## Architecture
 
-**MarketPulse** is a single-page Streamlit app (`app.py`) for screening NIFTY 500 stocks using live NSE/yfinance data. All screener logic lives in `screener/`.
+**MarketPulse** is a Streamlit trading dashboard running on a DigitalOcean droplet. It combines a live WebSocket tick feed, Kite historical OHLCV data, screener modules, and automated signal bots.
 
-### Data flow
+### Three-layer stack
 
-1. `screener/stocks.py` — fetches the NIFTY 500 symbol list from NSE archives CSV. Falls back to a hardcoded top-100 list if the fetch fails. Returns a DataFrame with columns `Symbol`, `Company`, `NSE_Symbol` (e.g. `RELIANCE.NS`).
-2. Each screener module pulls OHLCV data via `yfinance` using the `.NS`-suffixed symbol, runs its own signal logic, and returns a dict or DataFrame.
-3. `app.py` imports all screeners, renders a 5-tab Streamlit UI, and calls screeners on button click. Results are cached in `st.session_state` so they survive Streamlit reruns without re-fetching.
+```
+1. ticker_daemon.py   — KiteTicker WebSocket → Redis (live ticks + 1m candles)
+2. screener/          — OHLCV fetchers + signal logic (all Kite, no yfinance)
+3. app.py / scripts/  — Streamlit UI + background signal bots (ntfy + auto-order)
+```
 
-### Screener modules (`screener/`)
+---
+
+## Credentials & `.env`
+
+All credentials live ONLY in `/root/stockAnalyser/.env` on the droplet. Never commit to git.
+
+```
+KITE_API_KEY=...
+KITE_API_SECRET=...
+KITE_ACCESS_TOKEN=...       # refreshed daily by auto_token.py
+KITE_USER_ID=...
+KITE_PASSWORD=...
+KITE_TOTP_SECRET=...        # base32 TOTP secret from Kite Account Security page
+KITE_AUTO_TRADE=1           # set to 1 to enable live order execution
+NTFY_TOPIC=...              # ntfy.sh topic for push notifications
+```
+
+`~/.kite_creds.json` on the droplet holds `api_key`, `access_token`, and optionally `ntfy_agent_topic` / `telegram_bot_token` / `telegram_chat_id`.
+
+---
+
+## Daily automation (fully hands-free)
+
+### Token refresh — `auto_token.py`
+
+Runs at **8:00 AM IST** via cron (`/root/venv/bin/python`):
+1. Logs in via Kite `/api/login` with password
+2. Generates TOTP from `KITE_TOTP_SECRET` using pyotp
+3. Completes OAuth → `request_token` → `generate_session` → new `access_token`
+4. Updates `KITE_ACCESS_TOKEN` in `.env` via regex
+5. Restarts `ticker_daemon` and Streamlit via `start_droplet.sh`
+
+Cron entry:
+```
+30 2 * * * cd /root/stockAnalyser && /root/venv/bin/python auto_token.py >> token_refresh.log 2>&1
+```
+
+### Signal bots — `scripts/`
+
+| Script | Trigger | Notification |
+|---|---|---|
+| `agent_flow_bot.py` | cron every 5 min, 9:15–15:30, Mon–Fri | ntfy.sh push |
+| `elder_ray_bot.py` | cron (configurable) | Telegram |
+| `cpr_scan_bot.py` | cron | ntfy / Telegram |
+| `gamma_blast_bot.py` | cron | ntfy |
+| `red_flag_bot.py` | cron | ntfy |
+| `eod_report.py` | cron, 15:35 | ntfy |
+
+All bots support `--once` flag (single scan, exit) and `--state-file` for dedup.
+
+---
+
+## `ticker_daemon.py` — WebSocket supervisor
+
+- **Subprocess supervisor pattern** (Twisted reactor cannot restart in-process)
+- `main()` spawns itself as `--worker`; on crash, restarts after 5s
+- Subscribes tokens: `NIFTY=256265`, `BANKNIFTY=260105`, `SENSEX=265`
+- Writes to Redis: `tick:{token}` (TTL 600s), `candles:1m:{token}` (list, max 750), `ticker:status` (TTL 120s)
+- Credentials loaded from `.env` on the droplet
+
+---
+
+## `screener/kite_data.py` — Central OHLCV fetcher
+
+Replaces yfinance across all screeners. **Zero yfinance imports remain.**
+
+```python
+fetch_ohlcv(symbol, interval="day", days=365)         # → DataFrame[OHLCV]
+fetch_ohlcv_yf_compat(symbol, period="1y", interval="1d")  # drop-in for yf.download
+```
+
+- Instruments cached at `/tmp/kite_instr_nse.json` (refreshed every 24h)
+- `get_token(symbol)` checks `INDEX_TOKENS` first, then instruments cache
+- INDEX_TOKENS: NIFTY=256265, BANKNIFTY=260105, SENSEX=265, FINNIFTY=257801, MIDCPNIFTY=288009, INDIAVIX=264969
+- Kite interval names: `minute`, `3minute`, `5minute`, `10minute`, `15minute`, `30minute`, `60minute`, `day`, `week`, `month`
+- Returns IST-naive DatetimeIndex (already in IST — do NOT tz_localize UTC)
+
+---
+
+## `screener/kite_order.py` — Auto-execution
+
+- `place_order_for_signal(symbol, direction, spot, api_key, access_token)` — places ATM LIMIT BUY + GTT OCO
+- Only fires when `KITE_AUTO_TRADE=1`
+- Supported symbols: `NIFTY` (NFO, lot=65), `SENSEX` (BFO, lot=20)
+- Falls back to 1 lot if margin fetch fails (order always attempts to fire)
+- GTT: SL = entry − scalp_stop_pts, Target = entry + scalp_target_pts
+
+---
+
+## Screener modules (`screener/`)
 
 | File | What it finds |
 |---|---|
-| `technical.py` | `analyze_stock()` — uptrend + breakout readiness for a single symbol; signals: STRONG BUY / BUY / WATCH / SKIP |
-| `news.py` | `get_trending_stocks()` — matches RSS headlines against NIFTY 500 company names; calls `analyze_stock()` on matched stocks |
-| `ma_retracement.py` | `run_ma_retracement_scan()` — stocks retesting 20 EMA in an uptrend with CPR confluence |
-| `ma_crossover.py` | `run_crossover_scan()` — 20 EMA crossing above 50 EMA within the last 5 candles, confirmed over 2+ days |
-| `ma50_support.py` | `run_ma50_support_scan()` — stocks bouncing off 50 EMA in EMA20 > EMA50 > EMA200 alignment above monthly CPR |
-| `option_chain.py` | `fetch_option_chain()` — live NSE option chain; tries `undetected-chromedriver` first (requires local Chrome install), then `curl_cffi`. **Blocked on Streamlit Cloud** — only works locally. |
-| `fundamental.py` | `fetch_fundamental_stocks()` — scrapes Screener.in with a 16-condition quality filter (ROCE, ROE, D/E, OPM, Piotroski, promoter holding, etc.). Requires a free Screener.in account on first use. Returns a DataFrame with Screener.in columns + `NSE_Symbol` for charting. |
+| `kite_data.py` | Central Kite OHLCV fetcher (replaces yfinance) |
+| `kite_hist.py` | `batch_quote_nse()` — live Kite /quote batch |
+| `kite_order.py` | ATM option order placement + GTT |
+| `technical.py` | `analyze_stock()` — uptrend + breakout; STRONG BUY/BUY/WATCH/SKIP |
+| `ma_crossover.py` | EMA20 crossing EMA50, confirmed 2+ days |
+| `ma_retracement.py` | 20 EMA retest in uptrend with CPR confluence |
+| `ma50_support.py` | Bounce off 50 EMA in EMA20>EMA50>EMA200 alignment |
+| `cpr_retracement.py` | CPR-level retracements |
+| `technical.py` | Breakout readiness |
+| `agent_flow.py` | Multi-timeframe OI + momentum → CALL/PUT/NO TRADE |
+| `sensex_option_moves.py` | SENSEX intraday option move signals |
+| `open_low.py` | NIFTY100 Open=Low intraday momentum setups |
+| `elder_ray.py` | Elder Ray Bull/Bear Power multi-timeframe |
+| `smart_alerts.py` | Smart money alerts |
+| `smart_alerts_v2.py` | Smart money alerts v2 |
+| `fundamental.py` | 52W-high pullback >20% filter via batch_quote_nse |
+| `rpci.py` | RPCI 11-condition score; batch scan via ThreadPoolExecutor |
+| `late_session.py` | Last-hour signal engine (2:30–3:30 PM); NIFTY/BANKNIFTY/SENSEX |
+| `option_chain.py` | Live NSE option chain (blocked on cloud, works locally) |
+| `news.py` | RSS → NIFTY 500 company name match → analyze_stock |
+| `live_ticks.py` | Redis tick reader for WebSocket data |
 
-### `app.py` key sections
+---
 
-- **`TF_CONFIG`** — dict mapping timeframe keys (`"5m"`, `"15m"`, `"1H"`, `"1D"`, `"1W"`) to `interval`, `period`, and `market_hours` flag. All screener calls thread this through.
-- **`chart_modal`** — `@st.dialog` that renders a candlestick + volume + EMA 20/50 Plotly chart for any symbol. Triggered by clicking a row in any screener's `st.dataframe` (`on_select="rerun"`, `selection_mode="single-row"`).
-- **`_filter_market_hours()`** — filters intraday DataFrames to 09:15–15:30 IST for the 5m/15m/1H timeframes.
-- **Sidebar** — purely cosmetic HTML (`st.markdown(unsafe_allow_html=True)`); shows screener result counts from `st.session_state`.
-- **Scrolling ticker** — `@st.cache_data(ttl=300)` fetches NIFTY 50, BANKNIFTY, FINNIFTY, INDIA VIX daily closes and renders a CSS marquee.
+## `app.py` key sections
 
-### Styling
+- **`TF_CONFIG`** — maps timeframe keys (`"5m"`, `"15m"`, `"1H"`, `"1D"`, `"1W"`) to Kite interval + days
+- **`chart_modal`** — `@st.dialog` candlestick + EMA chart; triggered by row click
+- **`_filter_market_hours()`** — filters intraday DataFrames to 09:15–15:30 IST
+- **Sidebar** — cosmetic HTML; shows screener result counts from `st.session_state`
+- **Scrolling ticker** — `@st.cache_data(ttl=300)` CSS marquee with NIFTY/BANKNIFTY/VIX
 
-All CSS is injected once at the top of `app.py` via `st.markdown("""<style>...</style>""", unsafe_allow_html=True)`. Theme: `#0a0e1a` background, `#00d4aa` teal accent. The option chain table uses custom HTML (`st.markdown`) with `.oc-tbl` CSS classes rather than `st.dataframe`.
+---
 
-### NSE option chain — known constraint
+## Droplet operations
 
-NSE's API is protected by Akamai bot detection. `requests` and `curl_cffi` are blocked with HTTP 403/404. `undetected-chromedriver` (which patches Chrome's `navigator.webdriver` flag) works locally but requires Google Chrome installed. **Cloud deployments cannot fetch live option chain data.**
+```bash
+# Start everything
+bash start_droplet.sh
 
-### Deployment
+# Stop everything
+bash stop_droplet.sh
 
-- `packages.txt` is intentionally empty — Streamlit Cloud runs Debian Trixie where `libglib2.0-0` (bullseye) conflicts with the system's `libglib2.0-0t64`. Adding system packages breaks the deploy.
-- The GitHub Actions workflow (`static.yml`) deploys the repo to GitHub Pages (not the Streamlit app).
-- The Streamlit app is deployed separately via Streamlit Cloud, which reads `requirements.txt` and `packages.txt`.
+# View live logs
+tail -f ticker.log
+tail -f streamlit.log
+tail -f token_refresh.log
+tail -f agent_bot.log
 
-### Development branch
+# Force-kill stray processes
+pkill -9 -f ticker_daemon.py
+pkill -9 -f "streamlit run"
 
-Active development happens on `claude/website-auth-setup-fz7adz`. Push changes there, not to `main` directly.
+# Manual token refresh
+/root/venv/bin/python auto_token.py
+
+# Test ntfy notification
+/root/venv/bin/python scripts/agent_flow_bot.py --test-notify
+
+# Manual single scan
+/root/venv/bin/python scripts/agent_flow_bot.py NIFTY BANKNIFTY SENSEX --once
+```
+
+---
+
+## Data flow
+
+```
+Kite WebSocket
+    └─ ticker_daemon.py
+           └─ Redis: tick:{token}, candles:1m:{token}
+                  └─ live_ticks.py → app.py (live tab)
+
+Kite REST API
+    └─ kite_data.py (historical OHLCV)
+           └─ all screener modules
+                  └─ app.py (screener tabs)
+                  └─ scripts/*_bot.py (signal bots)
+                         └─ kite_order.py (auto-execute)
+                         └─ ntfy.sh / Telegram (push notification)
+```
+
+---
+
+## Known constraints
+
+- Kite provides no fundamental ratios (P/E, ROE, OPM, D/E) — `fundamental.py` uses 52W-high pullback as a proxy
+- NSE option chain (`option_chain.py`) needs undetected-chromedriver; blocked on cloud
+- `late_session.py` VWAP: Kite data is IST-naive — use `tz_localize(_IST)` not `tz_localize("UTC")`
+- Kite access token expires daily at midnight IST — `auto_token.py` handles this
+
+---
+
+## Development branch
+
+Active development: `claude/sensex-option-moves-analysis-ma3tr7`
