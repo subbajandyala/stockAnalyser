@@ -51,7 +51,7 @@ MIN_NOTIFY_SCORE = 3
 # Minimum score to auto-execute an order
 MIN_TRADE_SCORE  = 5
 
-_AUTO_TRADE = os.environ.get("KITE_AUTO_TRADE", "0") == "1"
+_AUTO_TRADE = os.environ.get("CHART_AUTO_TRADE", os.environ.get("KITE_AUTO_TRADE", "0")) == "1"
 
 
 # ── Credentials ───────────────────────────────────────────────────────────────

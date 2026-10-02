@@ -26,7 +26,7 @@ import requests
 from screener.agent_flow import run_agent_analysis, INSTRUMENTS
 from screener.kite_order import place_order_for_signal as _place_order
 
-_AUTO_TRADE = os.environ.get("KITE_AUTO_TRADE", "0") == "1"
+_AUTO_TRADE = False  # orders disabled — chart_bot.py is the sole order executor
 _TRADE_SYMBOLS = {"NIFTY", "SENSEX"}   # BANKNIFTY excluded
 
 _IST         = datetime.timezone(datetime.timedelta(hours=5, minutes=30))

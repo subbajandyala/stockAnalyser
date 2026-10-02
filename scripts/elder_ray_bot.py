@@ -46,7 +46,7 @@ from screener.kite_order import (
 )
 from screener.cpr import load_cpr_for_symbol, cpr_confirms as _cpr_confirms
 
-_AUTO_TRADE   = os.environ.get("KITE_AUTO_TRADE", "0") == "1"
+_AUTO_TRADE   = False  # orders disabled — chart_bot.py is the sole order executor
 _TRADE_SYMBOLS = {"NIFTY", "SENSEX"}   # BANKNIFTY excluded
 
 _IST = datetime.timezone(datetime.timedelta(hours=5, minutes=30))
