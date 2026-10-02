@@ -79,6 +79,7 @@ from screener.oi_buildup_history import (
     ALL_INSTRUMENTS    as _OIH_ALL_INSTRUMENTS,
 )
 from screener.chart_analysis import analyze_chart as _analyze_chart, INTERVAL_CFG as _CA_INTERVAL_CFG
+from screener.cpr_adx import analyze_cpr_adx as _cpr_adx_analyze, NIFTY50_FNO as _CPR_ADX_SYMBOLS
 from plotly.subplots import make_subplots
 
 try:
@@ -607,6 +608,7 @@ _NAV = [
     ("smart_money",      "🧠 Smart Money"),
     ("promoter_pulse",   "💰 Promoter Pulse"),
     ("chart_analysis",   "📐 Chart Analysis"),
+    ("cpr_adx",          "📊 CPR + ADX"),
 ]
 _NAV_KEYS   = [k for k, _ in _NAV]
 _NAV_LABELS = {k: lbl for k, lbl in _NAV}
@@ -9196,7 +9198,133 @@ def page_chart_analysis():
 </div>""", unsafe_allow_html=True)
 
 
-# ── Page routing (URL-driven via ?page=) ──────────────────────────────────────
+# ── PAGE: CPR + ADX ──────────────────────────────────────────────────────────
+def page_cpr_adx():
+    _api = st.session_state.get("kite_api_key",      _get_secret("KITE_API_KEY", ""))
+    _tok = st.session_state.get("kite_access_token", "")
+    _ok  = bool(_api and _tok)
+
+    st.markdown("""
+<div style="margin-bottom:6px;">
+  <div style="font-size:1.25rem;font-weight:900;color:#fff;letter-spacing:-0.5px;">📊 CPR + ADX Intraday Scanner</div>
+  <div style="font-size:0.78rem;color:#6e7681;margin-top:2px;">Nifty 50 F&O stocks · Central Pivot Range × ADX trend strength · Intraday MIS signals</div>
+</div>""", unsafe_allow_html=True)
+
+    if not _ok:
+        st.warning("⚡ Connect Zerodha Kite to enable CPR + ADX Scanner.")
+        return
+
+    _rc1, _rc2 = st.columns([4, 1])
+    with _rc1:
+        _sel = st.multiselect(
+            "Stocks", options=_CPR_ADX_SYMBOLS,
+            default=_CPR_ADX_SYMBOLS,
+            label_visibility="collapsed",
+            key="cpr_adx_sel",
+        )
+    with _rc2:
+        _run = st.button("🔍 Scan", key="cpr_adx_run", use_container_width=True, type="primary")
+
+    if _run and _sel:
+        import concurrent.futures as _cf
+        with st.spinner(f"Scanning {len(_sel)} stocks…"):
+            def _do(sym): return _cpr_adx_analyze(sym, _api, _tok)
+            with _cf.ThreadPoolExecutor(max_workers=10) as pool:
+                _rows = list(pool.map(_do, _sel))
+        st.session_state["cpr_adx_results"] = _rows
+        st.session_state["cpr_adx_ts"] = datetime.datetime.now(
+            datetime.timezone(datetime.timedelta(hours=5, minutes=30))
+        ).strftime("%I:%M:%S %p IST")
+
+    _results = st.session_state.get("cpr_adx_results", [])
+    _ts      = st.session_state.get("cpr_adx_ts", "")
+
+    if not _results:
+        st.markdown('<div style="color:#6e7681;font-size:0.85rem;margin-top:16px;">Select stocks and click <b>🔍 Scan</b>.</div>', unsafe_allow_html=True)
+        return
+
+    if _ts:
+        st.caption(f"Last scanned: {_ts}")
+
+    # Sort: BUY first (highest score), SHORT last (lowest score), WAIT in middle
+    _results_sorted = sorted(_results, key=lambda x: -x.get("score", 0))
+
+    # ── Summary counts ────────────────────────────────────────────────────────
+    _buys   = sum(1 for r in _results if r.get("direction") == "BUY")
+    _shorts = sum(1 for r in _results if r.get("direction") == "SHORT")
+    _waits  = sum(1 for r in _results if r.get("direction") == "WAIT")
+    _m1, _m2, _m3, _m4 = st.columns(4)
+    _m1.metric("Scanned",  len(_results))
+    _m2.metric("BUY",      _buys,   delta=None)
+    _m3.metric("SHORT",    _shorts, delta=None)
+    _m4.metric("Wait",     _waits,  delta=None)
+
+    st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
+
+    # ── Results table ─────────────────────────────────────────────────────────
+    _header = "".join(
+        f'<th style="padding:8px 12px;color:#8b949e;font-size:0.65rem;font-weight:700;'
+        f'text-transform:uppercase;letter-spacing:0.8px;text-align:{"left" if i==0 else "center"};">{h}</th>'
+        for i, h in enumerate(["Stock", "Price", "CPR Range", "CPR Width", "ADX", "DI+", "DI−", "Score", "Signal", "SL", "Target", "R:R"])
+    )
+
+    _rows_html = ""
+    for r in _results_sorted:
+        if r.get("error"):
+            _rows_html += (
+                f'<tr><td style="padding:7px 12px;color:#e6edf3;font-weight:700;">{r["symbol"]}</td>'
+                f'<td colspan="11" style="color:#f85149;font-size:0.75rem;padding:7px 12px;">Error: {r["error"][:60]}</td></tr>'
+            )
+            continue
+
+        d   = r["direction"]
+        sc  = r["score"]
+        cpr = r["cpr"]
+
+        _dc  = "#00d4aa" if d == "BUY" else "#f85149" if d == "SHORT" else "#8b949e"
+        _scc = "#00d4aa" if sc > 0     else "#f85149" if sc < 0       else "#8b949e"
+        _sig = f'<span style="color:{_dc};font-weight:700;">{d} {r["stars"]}</span>' if d != "WAIT" else '<span style="color:#8b949e;">—</span>'
+        _sl_str  = f'₹{r["sl"]:,.1f}'   if r.get("sl")     else "—"
+        _tgt_str = f'₹{r["target"]:,.1f}' if r.get("target") else "—"
+        _rr_str  = f'{r["rr"]}x'         if r.get("rr")     else "—"
+        _adx_col = "#00d4aa" if r["adx"] >= 30 else "#f0883e" if r["adx"] >= 20 else "#8b949e"
+        _w_col   = "#00d4aa" if cpr["width_pct"] < 0.3 else "#f0883e" if cpr["width_pct"] > 0.8 else "#8b949e"
+
+        _rows_html += f"""<tr style="border-bottom:1px solid #1e2330;">
+  <td style="padding:7px 12px;color:#e6edf3;font-weight:700;">{r["symbol"]}</td>
+  <td style="padding:7px 12px;text-align:center;color:#e6edf3;">₹{r["price"]:,.1f}</td>
+  <td style="padding:7px 12px;text-align:center;color:#8b949e;font-size:0.78rem;">₹{cpr["bot"]:,.1f}–{cpr["top"]:,.1f}</td>
+  <td style="padding:7px 12px;text-align:center;color:{_w_col};font-size:0.78rem;">{cpr["width_pct"]:.2f}%</td>
+  <td style="padding:7px 12px;text-align:center;color:{_adx_col};font-weight:700;">{r["adx"]}</td>
+  <td style="padding:7px 12px;text-align:center;color:#3fb950;">{r["di_p"]}</td>
+  <td style="padding:7px 12px;text-align:center;color:#f85149;">{r["di_m"]}</td>
+  <td style="padding:7px 12px;text-align:center;color:{_scc};font-weight:700;">{sc:+d}</td>
+  <td style="padding:7px 12px;text-align:center;">{_sig}</td>
+  <td style="padding:7px 12px;text-align:center;color:#f85149;font-size:0.8rem;">{_sl_str}</td>
+  <td style="padding:7px 12px;text-align:center;color:#00d4aa;font-size:0.8rem;">{_tgt_str}</td>
+  <td style="padding:7px 12px;text-align:center;color:#8b949e;font-size:0.8rem;">{_rr_str}</td>
+</tr>"""
+
+    st.markdown(f"""
+<div style="background:#0d1117;border:1px solid #2a2e39;border-radius:10px;overflow:hidden;margin-top:8px;">
+  <table style="width:100%;border-collapse:collapse;">
+    <thead><tr style="background:#161b22;">{_header}</tr></thead>
+    <tbody>{_rows_html}</tbody>
+  </table>
+</div>""", unsafe_allow_html=True)
+
+    # ── Legend ────────────────────────────────────────────────────────────────
+    st.markdown("""
+<div style="margin-top:12px;color:#6e7681;font-size:0.73rem;line-height:1.8;">
+  <b>Score:</b> CPR position (±2) + CPR width (±1) + ADX/DI direction (±2) = max ±5 &nbsp;·&nbsp;
+  <b>BUY</b> ≥ +3 &nbsp;·&nbsp; <b>SHORT</b> ≤ −3 &nbsp;·&nbsp;
+  <b>ADX green</b> ≥ 30 (strong trend) &nbsp;·&nbsp; <b>CPR width green</b> &lt; 0.3% (trending day likely)<br>
+  SL and Target based on 1.5× ATR and 3× ATR on 15m chart (1:2 R:R minimum).
+  Intraday MIS only · Not financial advice.
+</div>""", unsafe_allow_html=True)
+
+
+# ── Page routing ──────────────────────────────────────────────────────────────
 {
     "smart_alerts_pro": page_smart_alerts_pro,
     "gamma_blast":      page_gamma_blast,
@@ -9212,4 +9340,5 @@ def page_chart_analysis():
     "smart_money":      page_smart_money_options,
     "promoter_pulse":   page_promoter_pulse,
     "chart_analysis":   page_chart_analysis,
+    "cpr_adx":          page_cpr_adx,
 }.get(_cur_page, page_smart_alerts_pro)()
