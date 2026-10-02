@@ -39,10 +39,18 @@ nohup streamlit run app.py \
 ST_PID=$!
 echo "  Streamlit PID: $ST_PID"
 
+# ── Start CPR+ADX signal bot (1-min continuous loop) ───────────────────────
+echo "Starting CPR+ADX bot supervisor..."
+pkill -f cpr_adx_bot.py 2>/dev/null || true
+nohup python scripts/cpr_adx_bot.py >> cpr_adx.log 2>&1 &
+CPR_PID=$!
+echo "  cpr_adx_bot PID: $CPR_PID"
+
 echo ""
 echo "=== Done ==="
 echo "  App:    http://<your-droplet-ip>:8501"
 echo "  Ticker: tail -f $SCRIPT_DIR/ticker.log"
 echo "  App:    tail -f $SCRIPT_DIR/streamlit.log"
+echo "  CPR+ADX: tail -f $SCRIPT_DIR/cpr_adx.log"
 echo ""
 echo "To stop:  bash stop_droplet.sh"
