@@ -61,6 +61,9 @@ def _kite_creds() -> tuple[str, str]:
     return api_key, token
 
 
+_DEFAULT_NTFY_TOPIC = "marketPulse-cpr-adx-bot"
+
+
 def _ntfy_topic() -> str:
     t = os.environ.get("CPR_ADX_NTFY_TOPIC", os.environ.get("NTFY_TOPIC", ""))
     if not t:
@@ -80,7 +83,7 @@ def _ntfy_topic() -> str:
                     pass
             if t:
                 break
-    return t
+    return t or _DEFAULT_NTFY_TOPIC
 
 
 # ── Notification ──────────────────────────────────────────────────────────────
