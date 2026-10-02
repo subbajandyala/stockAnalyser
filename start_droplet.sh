@@ -13,6 +13,8 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$SCRIPT_DIR"
 
+PYTHON="${PYTHON:-/root/venv/bin/python}"
+
 echo "=== MarketPulse — Starting services ==="
 
 # ── Kill old processes ──────────────────────────────────────────────────────
@@ -22,7 +24,7 @@ sleep 1
 
 # ── Start ticker daemon ─────────────────────────────────────────────────────
 echo "Starting ticker_daemon.py..."
-nohup python ticker_daemon.py >> ticker.log 2>&1 &
+nohup "$PYTHON" ticker_daemon.py >> ticker.log 2>&1 &
 TICKER_PID=$!
 echo "  ticker_daemon PID: $TICKER_PID"
 
@@ -42,7 +44,7 @@ echo "  Streamlit PID: $ST_PID"
 # ── Start CPR+ADX signal bot (1-min continuous loop) ───────────────────────
 echo "Starting CPR+ADX bot supervisor..."
 pkill -f cpr_adx_bot.py 2>/dev/null || true
-nohup python scripts/cpr_adx_bot.py >> cpr_adx.log 2>&1 &
+nohup "$PYTHON" scripts/cpr_adx_bot.py >> cpr_adx.log 2>&1 &
 CPR_PID=$!
 echo "  cpr_adx_bot PID: $CPR_PID"
 
