@@ -1,15 +1,24 @@
 """
-CPR + ADX Intraday Signal Bot
-==============================
-Scans Nifty 50 F&O stocks every 5 minutes.
-Sends ntfy.sh push notification when score >= 3 (BUY) or <= -3 (SHORT).
+CPR + ADX Intraday Signal Bot  —  1-minute continuous loop
+===========================================================
+Runs as a long-lived background process (supervisor + worker pattern).
+Scans all 25 Nifty 50 F&O stocks every 60 seconds during market hours.
+Sends ntfy.sh push when a signal fires or upgrades.
 
-Cron (every 5 min, 9:20–14:30, Mon–Fri):
-  */5 9-14 * * 1-5 cd /root/stockAnalyser && /root/venv/bin/python scripts/cpr_adx_bot.py --once >> cpr_adx.log 2>&1
+Dedup rules (per stock, per day):
+  • Alert when score crosses +3/-3 for the first time  (regular signal)
+  • Re-alert when score jumps to ±5                    (upgraded to STRONG)
+  • Re-alert when direction flips  (BUY → SHORT or vice versa)
+  • State resets at start of each trading day
 
-Single test run:
-  /root/venv/bin/python scripts/cpr_adx_bot.py --once
-  /root/venv/bin/python scripts/cpr_adx_bot.py --test-notify
+Start (via start_droplet.sh or manually):
+  nohup python scripts/cpr_adx_bot.py >> cpr_adx.log 2>&1 &
+
+Single scan (test):
+  python scripts/cpr_adx_bot.py --once
+
+Test notification:
+  python scripts/cpr_adx_bot.py --test-notify
 """
 
 import argparse
@@ -17,7 +26,9 @@ import datetime
 import json
 import os
 import pathlib
+import subprocess
 import sys
+import time
 import concurrent.futures
 
 sys.path.insert(0, str(pathlib.Path(__file__).parent.parent))
@@ -28,9 +39,14 @@ from screener.cpr_adx import analyze_cpr_adx, NIFTY50_FNO
 
 _IST         = datetime.timezone(datetime.timedelta(hours=5, minutes=30))
 MARKET_OPEN  = datetime.time(9, 20)
-MARKET_CLOSE = datetime.time(14, 30)   # no new intraday entries after 2:30 PM
+MARKET_CLOSE = datetime.time(14, 30)
+SCAN_INTERVAL_SEC = 60        # scan every 60 seconds
 
-MIN_NOTIFY_SCORE = 3   # alert threshold (abs score)
+MIN_SIGNAL_SCORE  = 3         # regular signal threshold
+STRONG_SCORE      = 5         # strong / upgrade threshold
+
+_DEFAULT_NTFY_TOPIC = "marketPulse-cpr-adx-bot"
+
 
 # ── Credentials ───────────────────────────────────────────────────────────────
 
@@ -59,9 +75,6 @@ def _kite_creds() -> tuple[str, str]:
                     elif k.strip() == "KITE_ACCESS_TOKEN":
                         token = token or v
     return api_key, token
-
-
-_DEFAULT_NTFY_TOPIC = "marketPulse-cpr-adx-bot"
 
 
 def _ntfy_topic() -> str:
@@ -111,7 +124,7 @@ def send_ntfy(title: str, body: str, topic: str, priority: str = "high") -> bool
 
 # ── Alert formatter ───────────────────────────────────────────────────────────
 
-def _fmt_alert(r: dict) -> tuple[str, str]:
+def _fmt_alert(r: dict, upgraded: bool = False) -> tuple[str, str]:
     sym       = r["symbol"]
     price     = r["price"]
     score     = r["score"]
@@ -128,14 +141,15 @@ def _fmt_alert(r: dict) -> tuple[str, str]:
     reasons   = r["reasons"]
     now_ist   = datetime.datetime.now(_IST)
 
-    emoji  = "🚀" if abs(score) >= 5 else "⚡"
-    action = "BUY (Long)" if direction == "BUY" else "SHORT (Sell)"
-    dir_arrow = "↑" if direction == "BUY" else "↓"
+    emoji      = "🚀" if abs(score) >= STRONG_SCORE else "⚡"
+    action     = "BUY (Long)" if direction == "BUY" else "SHORT (Sell)"
+    dir_arrow  = "↑" if direction == "BUY" else "↓"
+    upgrade_tag = " 🔥 UPGRADED" if upgraded else ""
 
-    title = f"CPR+ADX {signal}: {sym} {dir_arrow} | {stars} | Score {score:+d}"
+    title = f"CPR+ADX {signal}: {sym} {dir_arrow} | {stars} | Score {score:+d}{upgrade_tag}"
 
     lines = [
-        f"{emoji} CPR+ADX SIGNAL — {sym}",
+        f"{emoji} CPR+ADX{' 🔥 UPGRADED' if upgraded else ''} — {sym}",
         f"Time   : {now_ist.strftime('%H:%M IST')}",
         f"",
         f"Signal : {signal}  {stars}",
@@ -166,37 +180,56 @@ def _fmt_alert(r: dict) -> tuple[str, str]:
     return title, "\n".join(lines)
 
 
-# ── State management ──────────────────────────────────────────────────────────
+# ── Dedup logic ───────────────────────────────────────────────────────────────
+# State per symbol:  {"direction": "BUY"|"SHORT"|"WAIT", "strength": "regular"|"strong", "date": "YYYY-MM-DD"}
 
-def _load_state(path: str) -> dict:
-    try:
-        return json.loads(pathlib.Path(path).read_text())
-    except Exception:
-        return {}
+def _should_alert(sym: str, result: dict, state: dict) -> tuple[bool, bool]:
+    """
+    Returns (should_alert, is_upgrade).
+    Checks direction, strength, and date reset.
+    """
+    direction = result["direction"]
+    score     = result["score"]
+
+    if direction == "WAIT":
+        return False, False
+
+    strength  = "strong" if abs(score) >= STRONG_SCORE else "regular"
+    today     = datetime.datetime.now(_IST).date().isoformat()
+    prev      = state.get(sym, {})
+    prev_date = prev.get("date", "")
+
+    # Reset on new trading day
+    if prev_date != today:
+        return True, False
+
+    prev_dir      = prev.get("direction", "WAIT")
+    prev_strength = prev.get("strength", "")
+
+    # Direction changed
+    if prev_dir != direction:
+        return True, False
+
+    # Score upgraded from regular to strong
+    if prev_strength == "regular" and strength == "strong":
+        return True, True
+
+    return False, False
 
 
-def _save_state(path: str, state: dict) -> None:
-    pathlib.Path(path).write_text(json.dumps(state, indent=2))
+def _update_state(sym: str, result: dict, state: dict) -> None:
+    direction = result["direction"]
+    score     = result["score"]
+    strength  = "strong" if abs(score) >= STRONG_SCORE else "regular"
+    today     = datetime.datetime.now(_IST).date().isoformat()
+    state[sym] = {"direction": direction, "strength": strength, "date": today}
 
 
-# ── Single scan ───────────────────────────────────────────────────────────────
+# ── Single scan pass ──────────────────────────────────────────────────────────
 
-def scan_once(symbols: list[str], state_file: str) -> None:
-    api_key, access_token = _kite_creds()
-    ntfy_topic = _ntfy_topic()
-
-    if not (api_key and access_token):
-        print("ERROR: KITE_API_KEY and KITE_ACCESS_TOKEN required.")
-        sys.exit(1)
-
+def _scan(symbols: list[str], api_key: str, access_token: str,
+          ntfy_topic: str, state: dict) -> None:
     now_ist = datetime.datetime.now(_IST)
-    print(f"[{now_ist.strftime('%H:%M:%S IST')}] CPR+ADX scan — {len(symbols)} stocks")
-
-    if not (MARKET_OPEN <= now_ist.time() <= MARKET_CLOSE):
-        print("Outside scan window (09:20–14:30) — skipping.")
-        return
-
-    state = _load_state(state_file)
 
     def _analyse(sym):
         return analyze_cpr_adx(sym, api_key, access_token)
@@ -204,6 +237,7 @@ def scan_once(symbols: list[str], state_file: str) -> None:
     with concurrent.futures.ThreadPoolExecutor(max_workers=10) as pool:
         results = list(pool.map(_analyse, symbols))
 
+    alerts_fired = 0
     for result in results:
         sym = result["symbol"]
 
@@ -216,33 +250,113 @@ def scan_once(symbols: list[str], state_file: str) -> None:
         adx       = result["adx"]
         stars     = result["stars"]
 
-        marker = "🚀" if abs(score) >= 5 else ("⚡" if abs(score) >= 3 else "  ")
+        marker = "🚀" if abs(score) >= STRONG_SCORE else ("⚡" if abs(score) >= MIN_SIGNAL_SCORE else "  ")
         print(f"  {marker} {sym:14s} | {direction:5s} | score {score:+d} | ADX {adx:4.0f} | {stars}")
 
-        if direction == "WAIT" or abs(score) < MIN_NOTIFY_SCORE:
+        should_alert, is_upgrade = _should_alert(sym, result, state)
+        if not should_alert:
             continue
 
-        # Dedup: skip if same symbol + direction already alerted this session
-        state_key = f"{sym}:{direction}:{score}"
-        prev_key  = state.get(sym, "")
-        # Allow re-alert only if direction changed
-        if prev_key.startswith(f"{sym}:{direction}:"):
-            print(f"         Already alerted {direction} — skipping")
-            continue
-
-        title, message = _fmt_alert(result)
+        title, message = _fmt_alert(result, upgraded=is_upgrade)
         print(f"\n{'='*55}\n{message}\n{'='*55}\n")
 
-        if ntfy_topic:
-            ok = send_ntfy(title, message, ntfy_topic,
-                           priority="urgent" if abs(score) >= 5 else "high")
-            print(f"  ntfy.sh: {'OK' if ok else 'FAILED'}")
-        else:
-            print("  No ntfy topic configured. Set CPR_ADX_NTFY_TOPIC in .env")
+        priority = "urgent" if abs(score) >= STRONG_SCORE else "high"
+        ok = send_ntfy(title, message, ntfy_topic, priority=priority)
+        print(f"  ntfy.sh [{ntfy_topic}]: {'OK' if ok else 'FAILED'}")
+        alerts_fired += 1
 
-        state[sym] = state_key
+        _update_state(sym, result, state)
 
-    _save_state(state_file, state)
+    print(f"  [{now_ist.strftime('%H:%M:%S')}] Scan done — {alerts_fired} alert(s) fired")
+
+
+# ── Worker (continuous loop) ──────────────────────────────────────────────────
+
+def run_worker(symbols: list[str]) -> None:
+    api_key, access_token = _kite_creds()
+    ntfy_topic = _ntfy_topic()
+
+    if not (api_key and access_token):
+        print("ERROR: KITE_API_KEY and KITE_ACCESS_TOKEN required.")
+        sys.exit(1)
+
+    print(f"CPR+ADX worker started — {len(symbols)} stocks — topic: {ntfy_topic}")
+    state: dict = {}
+
+    while True:
+        now_ist = datetime.datetime.now(_IST)
+        t       = now_ist.time()
+
+        if t < MARKET_OPEN:
+            wait_sec = (
+                datetime.datetime.combine(now_ist.date(), MARKET_OPEN, _IST) - now_ist
+            ).seconds
+            print(f"[{now_ist.strftime('%H:%M IST')}] Market not open yet — waiting {wait_sec//60}m")
+            time.sleep(min(wait_sec, 60))
+            continue
+
+        if t > MARKET_CLOSE:
+            print(f"[{now_ist.strftime('%H:%M IST')}] Market closed — shutting down worker.")
+            break
+
+        print(f"\n[{now_ist.strftime('%H:%M:%S IST')}] Scanning {len(symbols)} stocks…")
+        try:
+            _scan(symbols, api_key, access_token, ntfy_topic, state)
+        except Exception as e:
+            print(f"  Scan error: {e}")
+
+        time.sleep(SCAN_INTERVAL_SEC)
+
+
+# ── Supervisor (auto-restart on crash) ────────────────────────────────────────
+
+def run_supervisor(symbols: list[str]) -> None:
+    """
+    Spawns the worker as a subprocess. If it crashes, restarts after 5s.
+    Exits cleanly when the worker exits normally (market closed).
+    """
+    script = str(pathlib.Path(__file__).resolve())
+    sym_args = symbols
+
+    print(f"CPR+ADX supervisor started — managing worker")
+    while True:
+        cmd = [sys.executable, script, "--worker"] + sym_args
+        proc = subprocess.Popen(cmd)
+        proc.wait()
+        code = proc.returncode
+
+        if code == 0:
+            print("Worker exited cleanly (market closed). Supervisor done.")
+            break
+
+        now_ist = datetime.datetime.now(_IST)
+        if now_ist.time() > MARKET_CLOSE:
+            print("Worker exited after market close. Supervisor done.")
+            break
+
+        print(f"Worker crashed (exit {code}) — restarting in 5s…")
+        time.sleep(5)
+
+
+# ── Single scan mode (for testing) ───────────────────────────────────────────
+
+def scan_once(symbols: list[str]) -> None:
+    api_key, access_token = _kite_creds()
+    ntfy_topic = _ntfy_topic()
+
+    if not (api_key and access_token):
+        print("ERROR: KITE_API_KEY and KITE_ACCESS_TOKEN required.")
+        sys.exit(1)
+
+    now_ist = datetime.datetime.now(_IST)
+    print(f"[{now_ist.strftime('%H:%M:%S IST')}] CPR+ADX one-shot scan — {len(symbols)} stocks")
+
+    if not (MARKET_OPEN <= now_ist.time() <= MARKET_CLOSE):
+        print("Outside scan window (09:20–14:30) — skipping.")
+        return
+
+    state: dict = {}
+    _scan(symbols, api_key, access_token, ntfy_topic, state)
     print("Done.")
 
 
@@ -250,12 +364,10 @@ def scan_once(symbols: list[str], state_file: str) -> None:
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser(description="CPR + ADX intraday stock signal bot")
-    ap.add_argument("symbols", nargs="*", default=NIFTY50_FNO,
-                    help="Symbols to scan (default: all Nifty 50 F&O stocks)")
-    ap.add_argument("--once", action="store_true", help="Single scan then exit")
-    ap.add_argument("--state-file", default="/tmp/cpr_adx_state.json")
-    ap.add_argument("--test-notify", action="store_true",
-                    help="Send a test notification and exit")
+    ap.add_argument("symbols", nargs="*", default=NIFTY50_FNO)
+    ap.add_argument("--once",        action="store_true", help="Single scan then exit")
+    ap.add_argument("--worker",      action="store_true", help="Run as worker (called by supervisor)")
+    ap.add_argument("--test-notify", action="store_true", help="Send test notification and exit")
     args = ap.parse_args()
 
     symbols = [s.upper() for s in args.symbols]
@@ -268,16 +380,23 @@ if __name__ == "__main__":
             f"CPR + ADX Intraday Bot is running!\n"
             f"Time     : {now}\n"
             f"Watching : {len(symbols)} Nifty 50 F&O stocks\n"
+            f"Interval : Every 60 seconds\n"
             f"Strategy : CPR breakout/bounce + ADX trend strength\n"
-            f"Signals  : Score ≥ 3 = alert  |  Score ≥ 5 = urgent\n\n"
+            f"Signals  : Score ≥ 3 = alert  |  Score ≥ 5 = urgent\n"
+            f"Dedup    : Re-alerts on direction flip or score upgrade only\n\n"
             f"Stocks: {', '.join(symbols[:10])}{'...' if len(symbols) > 10 else ''}\n\n"
             f"Alerts fire 09:20–14:30 IST, Mon–Fri."
         )
         print(body)
         ok = send_ntfy(title, body, ntfy_topic)
-        print(f"ntfy.sh: {'OK' if ok else 'FAILED — check CPR_ADX_NTFY_TOPIC in .env'}")
+        print(f"ntfy.sh: {'OK' if ok else 'FAILED'}")
+
     elif args.once:
-        scan_once(symbols, args.state_file)
+        scan_once(symbols)
+
+    elif args.worker:
+        run_worker(symbols)
+
     else:
-        print("Use --once for cron mode, or --test-notify to verify notifications.")
-        sys.exit(1)
+        # Default: run supervisor (what start_droplet.sh calls)
+        run_supervisor(symbols)
