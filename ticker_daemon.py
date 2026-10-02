@@ -103,14 +103,15 @@ class TickerDaemon:
             self._tick_count += 1
 
             # Latest tick (TTL 10 min — expires if daemon stops)
-            self.redis.setex(
-                f"tick:{token}", 600,
+            self.redis.set(
+                f"tick:{token}",
                 json.dumps({
                     "ltp":    ltp,
                     "volume": vol,
                     "ts":     ts.isoformat(),
                     "symbol": WATCH_TOKENS[token],
                 }),
+                ex=600,
             )
 
             self._accumulate(token, ltp, vol, ts)
@@ -152,8 +153,8 @@ class TickerDaemon:
         self.redis.expire(key, 86400)   # auto-expire after 24h
 
     def _write_status(self):
-        self.redis.setex(
-            "ticker:status", 120,
+        self.redis.set(
+            "ticker:status",
             json.dumps({
                 "running":    True,
                 "ticks":      self._tick_count,
@@ -161,6 +162,7 @@ class TickerDaemon:
                 "last_ping":  datetime.datetime.now(_IST).isoformat(),
                 "symbols":    list(WATCH_TOKENS.values()),
             }),
+            ex=120,
         )
 
     # ── connection events ──────────────────────────────────────────────────────
@@ -186,7 +188,8 @@ def _log(msg: str):
     print(f"[{ts}] {msg}", flush=True)
 
 
-def main():
+def _run_once():
+    """Connect KiteTicker once. Called in a fresh process each time."""
     api_key, access_token = _load_creds()
     if not api_key or not access_token:
         print("ERROR: Set KITE_API_KEY and KITE_ACCESS_TOKEN in .env or environment.")
@@ -205,12 +208,32 @@ def main():
     signal.signal(signal.SIGINT,  _shutdown)
     signal.signal(signal.SIGTERM, _shutdown)
 
+    daemon.run()
+
+
+def main():
+    import subprocess
+
+    # If called with --worker, run a single connection (used by the restart loop)
+    if "--worker" in sys.argv:
+        _run_once()
+        return
+
+    # Supervisor loop: spawn a fresh worker process on each crash.
+    # Twisted reactor cannot restart in the same process, so each retry
+    # must be a new process.
+    _log("Supervisor started. Spawning worker…")
     while True:
-        try:
-            daemon.run()
-        except Exception as e:
-            _log(f"Crash: {e}. Restarting in 5s…")
-            time.sleep(5)
+        proc = subprocess.Popen(
+            [sys.executable, __file__, "--worker"],
+            stdout=sys.stdout, stderr=sys.stderr,
+        )
+        proc.wait()
+        if proc.returncode == 0:
+            _log("Worker exited cleanly. Stopping supervisor.")
+            break
+        _log(f"Worker exited (code {proc.returncode}). Restarting in 5s…")
+        time.sleep(5)
 
 
 if __name__ == "__main__":

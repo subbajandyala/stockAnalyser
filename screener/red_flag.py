@@ -2,21 +2,24 @@
 Red Flag Radar — scans all F&O stocks for unusual / suspicious activity.
 
 Flags (each scores 1 point; table sorted by flag count):
-  VOL_SPIKE   — Volume > 3× 20-day average                    (yfinance)
-  BIG_MOVE    — Price move > 5% intraday                       (yfinance)
-  OI_SPIKE    — ATM CE or PE OI > 5× typical lot size          (Kite)
-  PCR_LOW     — PCR < 0.5 — heavy call side (bearish sign)     (Kite)
-  PCR_HIGH    — PCR > 2.5 — extreme put writing                (Kite)
-  HIGH_IV     — ATM straddle cost > 3% of spot                 (Kite)
-  BULK_DEAL   — Appeared in NSE bulk deal data today           (NSE CSV)
+  VOL_SPIKE   — Intraday volume > 3× time-adjusted expected volume  (Kite)
+  BIG_MOVE    — Price move > 3% vs previous close                   (Kite)
+  OI_SPIKE    — ATM CE or PE OI > 100× lot size                     (Kite)
+  PCR_LOW     — PCR < 0.5 — heavy call side (bearish sign)          (Kite)
+  PCR_HIGH    — PCR > 2.5 — extreme put writing                     (Kite)
+  HIGH_IV     — ATM straddle cost > 3% of spot                      (Kite)
+  BULK_DEAL   — Appeared in NSE bulk deal data today                (NSE CSV)
 """
 
 import datetime
 import requests
 import pandas as pd
-import yfinance as yf
 from io import StringIO
 from typing import Callable, Optional
+
+_IST = datetime.timezone(datetime.timedelta(hours=5, minutes=30))
+_MARKET_OPEN_MINUTE = 9 * 60 + 15   # 9:15 IST in minutes since midnight
+_MARKET_TOTAL_MIN   = 375            # 9:15 → 15:30
 
 _KITE_BASE = "https://api.kite.trade"
 _NSE_BULK  = "https://archives.nseindia.com/content/equities/EQBULKDEAL.csv"
@@ -86,59 +89,79 @@ def _fetch_bulk_deals() -> set[str]:
         return set()
 
 
-# ── yfinance: volume + price ──────────────────────────────────────────────────
+# ── Kite: intraday price + volume ────────────────────────────────────────────
 
-def _yf_scan(symbols: list[str]) -> pd.DataFrame:
-    """Batch yfinance download: volume spike + big price move."""
-    tickers = [f"{s}.NS" for s in symbols]
-    try:
-        raw = yf.download(
-            tickers, period="30d", interval="1d",
-            auto_adjust=True, progress=False,
-        )
-    except Exception:
-        return pd.DataFrame()
+def _elapsed_frac() -> float:
+    """Fraction of the trading day elapsed (0.0–1.0). Used for volume normalisation."""
+    now = datetime.datetime.now(_IST)
+    now_min = now.hour * 60 + now.minute
+    elapsed = max(1, now_min - _MARKET_OPEN_MINUTE)
+    return min(elapsed / _MARKET_TOTAL_MIN, 1.0)
 
-    is_multi = isinstance(raw.columns, pd.MultiIndex)
-    close_df  = raw["Close"]  if is_multi else raw[["Close"]]
-    volume_df = raw["Volume"] if is_multi else raw[["Volume"]]
 
-    rows = []
-    for sym, tick in zip(symbols, tickers):
+def _kite_equity_scan(api_key: str, access_token: str,
+                      symbols: list[str], lot_map: dict) -> pd.DataFrame:
+    """
+    Live intraday price change % and volume spike via Kite /quote.
+
+    VOL_SPIKE: today's volume > 3× the expected volume at this point in the
+               trading day, where expected = lot_size × 1000 × elapsed_frac.
+    BIG_MOVE:  abs(last_price - prev_close) / prev_close > 3%.
+    """
+    hdrs   = _hdrs(api_key, access_token)
+    e_frac = _elapsed_frac()
+
+    nse_keys = [f"NSE:{s}" for s in symbols]
+    quotes: dict = {}
+    for i in range(0, len(nse_keys), 400):
         try:
-            closes  = (close_df[tick]  if is_multi else close_df["Close"]).dropna()
-            volumes = (volume_df[tick] if is_multi else volume_df["Volume"]).dropna()
-            if len(closes) < 5:
-                continue
-            vol_t     = float(volumes.iloc[-1])
-            vol_avg   = float(volumes.iloc[-21:-1].mean())
-            vol_ratio = round(vol_t / vol_avg, 2) if vol_avg > 0 else 0.0
-            close_t   = float(closes.iloc[-1])
-            close_p   = float(closes.iloc[-2])
-            price_chg = round((close_t - close_p) / close_p * 100, 2)
-            rows.append({
-                "symbol":     sym,
-                "close":      round(close_t, 2),
-                "chg_pct":    price_chg,
-                "vol_ratio":  vol_ratio,
-                "_vol_spike": vol_ratio > 3.0,
-                "_big_move":  abs(price_chg) > 5.0,
-            })
+            r = requests.get(
+                f"{_KITE_BASE}/quote", headers=hdrs,
+                params={"i": nse_keys[i:i + 400]}, timeout=30,
+            )
+            if r.ok:
+                quotes.update(r.json().get("data", {}))
         except Exception:
             continue
+
+    rows = []
+    for sym in symbols:
+        q = quotes.get(f"NSE:{sym}", {})
+        if not q:
+            continue
+        last       = float(q.get("last_price", 0))
+        prev_close = float(q.get("ohlc", {}).get("close", 0))
+        volume     = int(q.get("volume", 0))
+        if last <= 0 or prev_close <= 0:
+            continue
+
+        chg_pct   = round((last - prev_close) / prev_close * 100, 2)
+        lot        = lot_map.get(sym, 500)
+        exp_vol    = max(lot * 1000 * e_frac, 1)
+        vol_ratio  = round(volume / exp_vol, 2)
+
+        rows.append({
+            "symbol":     sym,
+            "close":      round(last, 2),
+            "chg_pct":    chg_pct,
+            "vol_ratio":  vol_ratio,
+            "_vol_spike": vol_ratio > 3.0,
+            "_big_move":  abs(chg_pct) > 3.0,
+        })
     return pd.DataFrame(rows)
 
 
 # ── Kite: OI + IV + PCR ──────────────────────────────────────────────────────
 
-def _kite_scan(api_key: str, access_token: str, symbols: list[str]) -> pd.DataFrame:
+def _kite_scan(api_key: str, access_token: str,
+               symbols: list[str]) -> tuple[pd.DataFrame, dict]:
     """
     For each stock: fetch ATM CE+PE at nearest expiry.
-    Returns PCR, straddle%, OI spike flags.
+    Returns (DataFrame with PCR/straddle/OI flags, lot_map dict).
     """
     hdrs = _hdrs(api_key, access_token)
 
-    # Step 1 — batch spot prices from NSE
+    # Step 1 — batch spot prices from NSE (reuse full quote for equity scan)
     spot_map: dict[str, float] = {}
     nse_keys = [f"NSE:{s}" for s in symbols]
     for i in range(0, len(nse_keys), 400):
@@ -157,10 +180,10 @@ def _kite_scan(api_key: str, access_token: str, symbols: list[str]) -> pd.DataFr
     try:
         r = requests.get(f"{_KITE_BASE}/instruments/NFO", headers=hdrs, timeout=60)
         if not r.ok:
-            return pd.DataFrame()
+            return pd.DataFrame(), {}
         instr = pd.read_csv(StringIO(r.text))
     except Exception:
-        return pd.DataFrame()
+        return pd.DataFrame(), {}
 
     instr["expiry_dt"] = pd.to_datetime(instr["expiry"], errors="coerce")
     instr["strike"]    = pd.to_numeric(instr["strike"], errors="coerce")
@@ -246,14 +269,14 @@ def _kite_scan(api_key: str, access_token: str, symbols: list[str]) -> pd.DataFr
             "_pcr_high":    pcr > 2.5,
             "_high_iv":     straddle > 3.0,
         })
-    return pd.DataFrame(rows)
+    return pd.DataFrame(rows), lot_map
 
 
 # ── Master scan ───────────────────────────────────────────────────────────────
 
 FLAG_DEFS = {
-    "_vol_spike": ("VOL_SPIKE", "Vol > 3×",   "#f85149"),
-    "_big_move":  ("BIG_MOVE",  "Move > 5%",  "#e6b800"),
+    "_vol_spike": ("VOL_SPIKE", "Vol > 3× exp",  "#f85149"),
+    "_big_move":  ("BIG_MOVE",  "Move > 3%",     "#e6b800"),
     "_oi_spike":  ("OI_SPIKE",  "OI Spike",   "#d2a8ff"),
     "_pcr_low":   ("PCR_LOW",   "PCR < 0.5",  "#ffa657"),
     "_pcr_high":  ("PCR_HIGH",  "PCR > 2.5",  "#79c0ff"),
@@ -294,22 +317,24 @@ def run_red_flag_scan(
         except Exception:
             pass
 
-    _p(f"Price & volume scan — {len(fo_symbols)} stocks…", 10)
-    yf_df = _yf_scan(fo_symbols)
+    if not (api_key and access_token):
+        return pd.DataFrame(columns=["symbol", "close", "chg_pct", "vol_ratio",
+                                     "flags", "flag_count", "trade"])
 
-    _p("Checking NSE bulk deals…", 58)
+    _p("Fetching Kite ATM OI + IV…", 15)
+    kite_df, lot_map = _kite_scan(api_key, access_token, fo_symbols)
+
+    _p(f"Live price & volume — {len(fo_symbols)} stocks via Kite…", 55)
+    eq_df = _kite_equity_scan(api_key, access_token, fo_symbols, lot_map)
+
+    _p("Checking NSE bulk deals…", 80)
     bulk = _fetch_bulk_deals()
 
-    kite_df = pd.DataFrame()
-    if api_key and access_token:
-        _p("Fetching Kite ATM OI + IV…", 65)
-        kite_df = _kite_scan(api_key, access_token, fo_symbols)
-
     _p("Building red flag summary…", 93)
-    if yf_df.empty:
+    if eq_df.empty:
         return pd.DataFrame()
 
-    merged = yf_df.copy()
+    merged = eq_df.copy()
     if not kite_df.empty:
         merged = merged.merge(kite_df, on="symbol", how="left")
 

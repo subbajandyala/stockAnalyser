@@ -47,7 +47,8 @@ def _kite_creds() -> tuple[str, str]:
 
 
 def _ntfy_topic() -> str:
-    return os.environ.get("NTFY_TOPIC", "")
+    # Prefer a dedicated red-flag topic; fall back to the shared one
+    return os.environ.get("NTFY_RF_TOPIC", "") or os.environ.get("NTFY_TOPIC", "")
 
 
 # ── Notification ──────────────────────────────────────────────────────────────
@@ -77,6 +78,59 @@ def send_ntfy(title: str, body: str, topic: str) -> bool:
 
 # ── Single scan ───────────────────────────────────────────────────────────────
 
+def _rf_log_path(date_str: str) -> pathlib.Path:
+    return pathlib.Path(f"/tmp/rf_signal_log_{date_str}.json")
+
+
+def _load_rf_log(date_str: str) -> dict:
+    p = _rf_log_path(date_str)
+    try:
+        return json.loads(p.read_text()) if p.exists() else {"date": date_str, "signals": []}
+    except Exception:
+        return {"date": date_str, "signals": []}
+
+
+def _log_rf_signals(date_str: str, signals: dict, df) -> None:
+    log  = _load_rf_log(date_str)
+    now  = datetime.datetime.now(_IST).strftime("%H:%M")
+    # track already-logged (symbol, signal) pairs to avoid duplicates
+    already = {(e["symbol"], e["signal"]) for e in log["signals"]}
+    added = False
+    for sym, trade in signals.items():
+        if (sym, trade) in already:
+            continue
+        row = df[df["symbol"] == sym]
+        if row.empty:
+            continue
+        row = row.iloc[0]
+        log["signals"].append({
+            "time":    now,
+            "symbol":  sym,
+            "signal":  trade,
+            "chg_pct": round(float(row.get("chg_pct", 0)), 2),
+            "flags":   ", ".join(row.get("flags", [])) if isinstance(row.get("flags"), list) else str(row.get("flags", "")),
+        })
+        added = True
+    if added:
+        _rf_log_path(date_str).write_text(json.dumps(log, indent=2))
+
+
+def _load_state(state_file: str) -> dict:
+    """Load state file; migrates old {sym: trade_str} format to new {sym: {...}} format."""
+    try:
+        raw = json.loads(pathlib.Path(state_file).read_text())
+        migrated = {}
+        for sym, val in raw.items():
+            if isinstance(val, str):
+                # old format — no timestamps available
+                migrated[sym] = {"trade": val, "first_seen": "", "last_seen": ""}
+            else:
+                migrated[sym] = val
+        return migrated
+    except Exception:
+        return {}
+
+
 def scan_once(state_file: str) -> None:
     api_key, access_token = _kite_creds()
     ntfy_topic = _ntfy_topic()
@@ -85,7 +139,8 @@ def scan_once(state_file: str) -> None:
         print("ERROR: KITE_API_KEY and KITE_ACCESS_TOKEN are required.")
         sys.exit(1)
 
-    now_ist = datetime.datetime.now(_IST)
+    now_ist  = datetime.datetime.now(_IST)
+    now_hhmm = now_ist.strftime("%H:%M")
     print(f"[{now_ist.strftime('%H:%M:%S IST')}] Red Flag scan — all F&O stocks")
 
     if not (MARKET_OPEN <= now_ist.time() <= MARKET_CLOSE):
@@ -111,52 +166,74 @@ def scan_once(state_file: str) -> None:
         print("  No STRONG CE / STRONG PE signals this scan.")
         return
 
-    # Load previous state to avoid duplicate alerts
-    try:
-        prev_state = json.loads(pathlib.Path(state_file).read_text())
-    except Exception:
-        prev_state = {}
+    # Load previous state
+    prev_state = _load_state(state_file)
 
-    # Build current signal map: {symbol: trade}
-    current = {row["symbol"]: row["trade"] for _, row in strong.iterrows()}
+    # Build current signal map: {symbol: trade_str}
+    current_trades = {row["symbol"]: row["trade"] for _, row in strong.iterrows()}
 
-    # Only alert on new or changed signals
-    new_signals = {
-        sym: trade for sym, trade in current.items()
-        if prev_state.get(sym) != trade
-    }
+    # Merge timestamps: preserve first_seen; update last_seen
+    new_state: dict = {}
+    new_signals: dict = {}  # sym → trade for newly appeared / changed signals
+
+    for sym, trade in current_trades.items():
+        prev = prev_state.get(sym, {})
+        prev_trade   = prev.get("trade", "")   if isinstance(prev, dict) else prev
+        prev_first   = prev.get("first_seen", "") if isinstance(prev, dict) else ""
+
+        new_state[sym] = {
+            "trade":      trade,
+            "first_seen": prev_first if prev_first else now_hhmm,
+            "last_seen":  now_hhmm,
+        }
+
+        if prev_trade != trade:
+            new_signals[sym] = trade
+
+    today_str = now_ist.strftime("%Y-%m-%d")
+
+    # Always update last_seen in state even when no new signals
+    pathlib.Path(state_file).write_text(json.dumps(new_state, indent=2))
 
     if not new_signals:
         print("  No new signals since last scan.")
-        # Still save state
-        pathlib.Path(state_file).write_text(json.dumps(current, indent=2))
+        _log_rf_signals(today_str, current_trades, df)
         return
+
+    # log all current strong signals (dedup inside)
+    _log_rf_signals(today_str, current_trades, df)
 
     # Group by signal type
     strong_ce = [s for s, t in new_signals.items() if t == "STRONG CE"]
     strong_pe = [s for s, t in new_signals.items() if t == "STRONG PE"]
 
-    lines = [f"Red Flag Scan  {now_ist.strftime('%H:%M IST')}"]
+    lines = [f"Red Flag Scan  {now_hhmm} IST"]
     lines.append(f"New signals: {len(new_signals)}")
     lines.append("")
+
+    def _fmt_row(sym: str) -> str:
+        row   = df[df["symbol"] == sym].iloc[0]
+        chg   = row.get("chg_pct", 0)
+        flags = ", ".join(row.get("flags", []))
+        entry = new_state.get(sym, {})
+        first = entry.get("first_seen", "")
+        last  = entry.get("last_seen",  "")
+        ts_part = f"  first:{first}" if first else ""
+        if last and last != first:
+            ts_part += f"  last:{last}"
+        return f"  {sym:15s}  {chg:+.1f}%  [{flags}]{ts_part}"
 
     if strong_ce:
         lines.append(f"STRONG CE ({len(strong_ce)} stocks):")
         for sym in strong_ce:
-            row = df[df["symbol"] == sym].iloc[0]
-            chg  = row.get("chg_pct", 0)
-            flags = ", ".join(row.get("flags", []))
-            lines.append(f"  {sym:15s}  {chg:+.1f}%  [{flags}]")
+            lines.append(_fmt_row(sym))
 
     if strong_pe:
         if strong_ce:
             lines.append("")
         lines.append(f"STRONG PE ({len(strong_pe)} stocks):")
         for sym in strong_pe:
-            row = df[df["symbol"] == sym].iloc[0]
-            chg  = row.get("chg_pct", 0)
-            flags = ", ".join(row.get("flags", []))
-            lines.append(f"  {sym:15s}  {chg:+.1f}%  [{flags}]")
+            lines.append(_fmt_row(sym))
 
     lines.append("")
     lines.append("Verify before executing. Not financial advice.")
@@ -168,9 +245,6 @@ def scan_once(state_file: str) -> None:
 
     ok = send_ntfy(title, message, ntfy_topic)
     print(f"  ntfy.sh: {'OK' if ok else 'FAILED'}")
-
-    # Save updated state (full current map, not just new)
-    pathlib.Path(state_file).write_text(json.dumps(current, indent=2))
     print("State saved.")
 
 

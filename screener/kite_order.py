@@ -43,8 +43,13 @@ _STRIKE_STEP = {
     "SENSEX": 100,
 }
 
-SL_PCT     = 0.30   # stop loss  = entry - 30%
-TARGET_PCT = 0.60   # target     = entry + 60%
+# Scalp targets in premium points (GTT levels)
+_SCALP_TARGET_PTS = {"NIFTY": 10, "SENSEX": 20}
+_SCALP_STOP_PTS   = {"NIFTY":  7, "SENSEX": 14}
+
+# Ride targets — percentage of entry premium (CPR-confirmed trades)
+_RIDE_TARGET_PCT = 0.60   # +60%
+_RIDE_STOP_PCT   = 0.30   # -30%
 
 
 # ── Internal helpers ───────────────────────────────────────────────────
@@ -87,23 +92,29 @@ def _resolve_tradingsymbol(
     return str(filtered.iloc[0]["tradingsymbol"])
 
 
-def _calc_qty(kite: KiteConnect, symbol: str, ltp: float) -> int:
-    """Return total units to buy based on available cash (95% utilisation, min 1 lot)."""
+def _calc_qty(kite: KiteConnect, symbol: str, ltp: float, capital_fraction: float = 1.0) -> int:
+    """Return total units to buy based on available cash (95% utilisation, min 1 lot).
+
+    capital_fraction: 0.5 when splitting between two symbols, 1.0 for single trade.
+    Falls back to 1 lot on zero balance or API error so order always fires.
+    """
     lot = LOT_SIZE[symbol]
     cost_per_lot = ltp * lot
     try:
-        seg = "equity"  # NFO and BFO are both under equity segment
-        margins = kite.margins(seg)
+        margins = kite.margins("equity")
         available = float(margins.get("available", {}).get("live_balance", 0))
     except Exception as e:
         _LOG.warning(f"Margin fetch failed ({e}) — defaulting to 1 lot")
         return lot
     if available <= 0 or cost_per_lot <= 0:
         return lot
-    usable = available * 0.95          # keep 5% buffer
+    usable = available * 0.95 * capital_fraction
     max_lots = int(usable / cost_per_lot)
     lots = max(1, max_lots)
-    _LOG.info(f"Balance ₹{available:.0f} → {lots} lot(s) of {symbol} @ ₹{ltp} (₹{cost_per_lot:.0f}/lot)")
+    _LOG.info(
+        f"Balance ₹{available:.0f} × {capital_fraction:.0%} → "
+        f"{lots} lot(s) of {symbol} @ ₹{ltp} (₹{cost_per_lot:.0f}/lot)"
+    )
     return lots * lot
 
 
@@ -126,16 +137,119 @@ def _fill_price(kite: KiteConnect, order_id: str, exchange: str, ts: str) -> flo
 
 # ── Public API ───────────────────────────────────────────────────────────────
 
-def has_open_position(kite: KiteConnect, symbol: str) -> bool:
-    """True if any net option position for this symbol is non-zero."""
+def has_open_position(kite: KiteConnect, symbol: str, only_ts: str | None = None) -> bool:
+    """True if the bot's option position for this symbol is non-zero.
+
+    If only_ts is given, checks only that specific tradingsymbol (the contract
+    the bot placed). Otherwise falls back to any position starting with symbol.
+    """
     try:
         for pos in kite.positions().get("net", []):
-            ts = pos.get("tradingsymbol", "")
-            if ts.startswith(symbol) and int(pos.get("quantity", 0)) != 0:
-                return True
+            ts  = pos.get("tradingsymbol", "")
+            qty = int(pos.get("quantity", 0))
+            if qty == 0:
+                continue
+            if only_ts:
+                if ts == only_ts:
+                    return True
+            else:
+                if ts.startswith(symbol):
+                    return True
     except Exception as e:
         _LOG.warning(f"Position check failed: {e}")
     return False
+
+
+def position_pnl_pct(kite: KiteConnect, symbol: str) -> float | None:
+    """Return unrealised P&L % for the open option position, or None if not found."""
+    try:
+        for pos in kite.positions().get("net", []):
+            ts  = pos.get("tradingsymbol", "")
+            qty = int(pos.get("quantity", 0))
+            if ts.startswith(symbol) and qty != 0:
+                avg = float(pos.get("average_price", 0))
+                cur = float(pos.get("last_price", avg))
+                return (cur - avg) / avg if avg > 0 else 0.0
+    except Exception as e:
+        _LOG.warning(f"P&L fetch failed: {e}")
+    return None
+
+
+def exit_position(symbol: str, api_key: str, access_token: str,
+                  gtt_id: int | None = None, only_ts: str | None = None) -> dict:
+    """
+    Exit the bot's open NRML option position for symbol.
+
+    If only_ts is given, exits only that specific tradingsymbol (the exact
+    contract the bot placed). This prevents touching any manual positions.
+
+    Steps:
+      1. Cancel GTT (if gtt_id given) so it doesn't fire after exit.
+      2. Place a LIMIT SELL at LTP × 0.99 (rounded to 0.05).
+
+    Returns {"exits": [...]} on success, {"error": "..."} on failure.
+    """
+    exchange = _EXCHANGE.get(symbol)
+    if not exchange:
+        return {"error": f"Unsupported symbol: {symbol}"}
+
+    kite = _kite_client(api_key, access_token)
+
+    # Step 1: cancel GTT to avoid double-sell after exit
+    if gtt_id:
+        try:
+            kite.delete_gtt(gtt_id)
+            _LOG.info(f"GTT {gtt_id} cancelled before exit")
+        except Exception as e:
+            _LOG.warning(f"GTT cancel failed ({e}) — proceeding with exit anyway")
+
+    # Step 2: fetch open positions
+    try:
+        net = kite.positions().get("net", [])
+    except Exception as e:
+        return {"error": f"Could not fetch positions: {e}"}
+
+    exits = []
+    for pos in net:
+        ts  = pos.get("tradingsymbol", "")
+        qty = int(pos.get("quantity", 0))
+        if qty == 0:
+            continue
+        # Only exit the bot's specific contract if known; else fall back to prefix match
+        if only_ts:
+            if ts != only_ts:
+                continue
+        elif not ts.startswith(symbol):
+            continue
+
+        # Fetch LTP for limit price
+        try:
+            ltp_data   = kite.ltp([f"{exchange}:{ts}"])
+            ltp        = float(ltp_data[f"{exchange}:{ts}"]["last_price"])
+            exit_limit = round(round(ltp * 0.99 / 0.05) * 0.05, 2)
+        except Exception as e:
+            return {"error": f"Could not fetch LTP for {ts} exit: {e}"}
+
+        try:
+            order_id = kite.place_order(
+                variety=kite.VARIETY_REGULAR,
+                exchange=exchange,
+                tradingsymbol=ts,
+                transaction_type=kite.TRANSACTION_TYPE_SELL,
+                quantity=abs(qty),
+                product=kite.PRODUCT_NRML,
+                order_type=kite.ORDER_TYPE_LIMIT,
+                price=exit_limit,
+            )
+            exits.append({"tradingsymbol": ts, "qty": abs(qty), "order_id": order_id, "exit_limit": exit_limit})
+            _LOG.info(f"Exit order placed: SELL {abs(qty)} x {ts} @ LIMIT {exit_limit}")
+        except Exception as e:
+            return {"error": f"Exit order failed for {ts}: {e}"}
+
+    if not exits:
+        return {"error": f"No open position found for {symbol}"}
+
+    return {"exits": exits}
 
 
 def place_order_for_signal(
@@ -144,17 +258,20 @@ def place_order_for_signal(
     spot: float,
     api_key: str,
     access_token: str,
+    capital_fraction: float = 1.0,
+    trade_mode: str = "scalp",
 ) -> dict:
     """
-    Place 1-lot ATM option order + GTT for the given signal.
+    Place ATM option order + GTT for the given signal.
 
     Args:
-        symbol:    "NIFTY" or "SENSEX"
-        direction: "CE" / "CALL" / "STRONG BUY CE" → CE
-                   "PE" / "PUT"  / "STRONG BUY PE"  → PE
-        spot:      current spot price (used to compute ATM strike)
-        api_key:   Kite API key
-        access_token: Kite access token (daily)
+        symbol:           "NIFTY" or "SENSEX"
+        direction:        "CE" / "CALL" / "STRONG BUY CE" → CE
+                          "PE" / "PUT"  / "STRONG BUY PE"  → PE
+        spot:             current spot price (used to compute ATM strike)
+        api_key:          Kite API key
+        access_token:     Kite access token (daily)
+        capital_fraction: fraction of available balance to use (0.5 = 50/50 split)
 
     Returns dict with keys:
         order_id, tradingsymbol, strike, opt_type, qty, entry_price, sl, target, gtt_id
@@ -188,8 +305,8 @@ def place_order_for_signal(
     # Round to nearest 0.05 (NSE tick size for options)
     limit_price = round(round(option_ltp * 1.01 / 0.05) * 0.05, 2)
 
-    # Dynamic lot sizing based on available balance
-    qty = _calc_qty(kite, symbol, option_ltp)
+    # Dynamic lot sizing based on available balance and capital fraction
+    qty = _calc_qty(kite, symbol, option_ltp, capital_fraction)
 
     _LOG.info(f"Placing order: BUY {qty} x {ts} @ LIMIT {limit_price} (NRML)")
 
@@ -221,9 +338,15 @@ def place_order_for_signal(
             "error":         "Order placed but fill price unavailable — GTT not set",
         }
 
-    # 6. SL and target levels
-    sl_price     = round(entry_price * (1 - SL_PCT), 1)
-    target_price = round(entry_price * (1 + TARGET_PCT), 1)
+    # 6. SL and target — scalp (points) or ride (% of premium)
+    if trade_mode == "ride":
+        sl_price     = round(entry_price * (1 - _RIDE_STOP_PCT), 1)
+        target_price = round(entry_price * (1 + _RIDE_TARGET_PCT), 1)
+    else:
+        tgt_pts      = _SCALP_TARGET_PTS.get(symbol, 10)
+        stop_pts     = _SCALP_STOP_PTS.get(symbol, 7)
+        sl_price     = round(entry_price - stop_pts, 1)
+        target_price = round(entry_price + tgt_pts, 1)
 
     # 7. GTT two-leg (OCO): [sl_trigger, target_trigger]
     gtt_id = None
@@ -265,4 +388,33 @@ def place_order_for_signal(
         "sl":            sl_price,
         "target":        target_price,
         "gtt_id":        gtt_id,
+        "trade_mode":    trade_mode,
     }
+
+
+def resolve_and_fetch_ltp(
+    kite: KiteConnect, symbol: str, strike: int, opt_type: str
+) -> tuple[str, float]:
+    """Resolve the nearest-expiry tradingsymbol and return (ts, ltp). ('', 0.0) on error."""
+    exchange = _EXCHANGE.get(symbol, "NFO")
+    ts = _resolve_tradingsymbol(kite, symbol, strike, opt_type)
+    if not ts:
+        return "", 0.0
+    try:
+        q   = kite.ltp([f"{exchange}:{ts}"])
+        ltp = float(q.get(f"{exchange}:{ts}", {}).get("last_price", 0.0))
+        return ts, ltp
+    except Exception as e:
+        _LOG.warning(f"LTP fetch failed for {ts}: {e}")
+        return ts, 0.0
+
+
+def fetch_option_ltp(kite: KiteConnect, symbol: str, ts: str) -> float:
+    """Fetch current LTP for a known option tradingsymbol. Returns 0.0 on error."""
+    exchange = _EXCHANGE.get(symbol, "NFO")
+    try:
+        q = kite.ltp([f"{exchange}:{ts}"])
+        return float(q.get(f"{exchange}:{ts}", {}).get("last_price", 0.0))
+    except Exception as e:
+        _LOG.warning(f"LTP fetch failed for {ts}: {e}")
+        return 0.0
