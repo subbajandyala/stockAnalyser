@@ -9246,6 +9246,15 @@ def page_cpr_adx():
     if _ts:
         st.caption(f"Last scanned: {_ts}")
 
+    # Detect if all results failed with data errors → likely expired token
+    _all_errors = _results and all(r.get("error") for r in _results)
+    if _all_errors:
+        st.error(
+            "⚠️ Kite API returned no data for any stock. "
+            "Your access token may have expired — please refresh it and scan again."
+        )
+        return
+
     # Sort: BUY first (highest score), SHORT last (lowest score), WAIT in middle
     _results_sorted = sorted(_results, key=lambda x: -x.get("score", 0))
 
