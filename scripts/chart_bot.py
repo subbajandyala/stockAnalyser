@@ -309,9 +309,17 @@ def scan_once(symbols: list[str], state_file: str) -> None:
 
         # Auto-execute order
         if _AUTO_TRADE and symbol in _TRADE_SYMBOLS and abs(score) >= MIN_TRADE_SCORE:
-            spot = p_res["summary"]["close"]
-            print(f"  [AUTO-TRADE] {direction} order for {symbol} @ {spot:.0f}")
-            trade = _place_order(symbol, direction, spot, api_key, access_token)
+            spot      = p_res["summary"]["close"]
+            chart_sl  = p_res["verdict"].get("stop_loss")
+            chart_tgt = (p_res["verdict"].get("targets") or [None])[0]
+            print(
+                f"  [AUTO-TRADE] {direction} order for {symbol} @ {spot:.0f}"
+                f"  (chart SL={chart_sl}  T={chart_tgt})"
+            )
+            trade = _place_order(
+                symbol, direction, spot, api_key, access_token,
+                chart_sl=chart_sl, chart_target=chart_tgt,
+            )
             if "error" in trade:
                 print(f"  [AUTO-TRADE] SKIPPED — {trade['error']}")
                 if ntfy_topic:

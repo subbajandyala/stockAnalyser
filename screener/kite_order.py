@@ -58,6 +58,52 @@ _RIDE_STOP_PCT   = 0.30   # -30%
 
 _ORDER_LOCK_PATH = "/tmp/kite_order.lock"
 
+_ATM_DELTA = 0.50  # approximate delta for ATM options
+
+
+def _spot_to_option_levels(
+    spot: float,
+    entry_premium: float,
+    chart_sl: float,
+    chart_target: float,
+    opt_type: str,
+) -> tuple[float, float] | None:
+    """Convert spot-level chart SL/target to option premium levels.
+
+    ATM delta ≈ 0.5: each 1-point move in spot moves the ATM option ~0.5 pts.
+
+    CE: gains when spot rises, loses when spot falls.
+    PE: gains when spot falls, loses when spot rises.
+
+    Returns (option_sl, option_target) rounded to nearest 0.05, or None if inputs
+    are degenerate (SL on wrong side, zero premium, etc.).
+    """
+    if not (chart_sl > 0 and chart_target > 0 and spot > 0 and entry_premium > 0):
+        return None
+
+    if opt_type == "CE":
+        sl_pts     = spot - chart_sl      # spot must fall this far to hit SL
+        target_pts = chart_target - spot  # spot must rise this far to hit target
+    else:  # PE
+        sl_pts     = chart_sl - spot      # spot must rise this far to hit SL
+        target_pts = spot - chart_target  # spot must fall this far to hit target
+
+    if sl_pts <= 0 or target_pts <= 0:
+        return None  # SL or target is on the wrong side
+
+    option_sl     = round(round((entry_premium - _ATM_DELTA * sl_pts)     / 0.05) * 0.05, 2)
+    option_target = round(round((entry_premium + _ATM_DELTA * target_pts) / 0.05) * 0.05, 2)
+
+    # Sanity clamps: SL no lower than 40% of entry, target no higher than 5×
+    option_sl     = max(round(entry_premium * 0.40, 1), option_sl)
+    option_target = min(round(entry_premium * 5.00, 1), option_target)
+    option_sl     = max(0.05, option_sl)
+
+    if option_sl >= entry_premium or option_target <= entry_premium:
+        return None  # degenerate after clamp
+
+    return option_sl, option_target
+
 
 @contextlib.contextmanager
 def _order_lock():
@@ -278,6 +324,8 @@ def place_order_for_signal(
     access_token: str,
     capital_fraction: float = 1.0,
     trade_mode: str = "scalp",
+    chart_sl: float | None = None,
+    chart_target: float | None = None,
 ) -> dict:
     """
     Place ATM option order + GTT for the given signal.
@@ -357,15 +405,26 @@ def place_order_for_signal(
             "error":         "Order placed but fill price unavailable — GTT not set",
         }
 
-    # 6. SL and target — scalp (points) or ride (% of premium)
-    if trade_mode == "ride":
-        sl_price     = round(entry_price * (1 - _RIDE_STOP_PCT), 1)
-        target_price = round(entry_price * (1 + _RIDE_TARGET_PCT), 1)
-    else:
-        tgt_pts      = _SCALP_TARGET_PTS.get(symbol, 10)
-        stop_pts     = _SCALP_STOP_PTS.get(symbol, 7)
-        sl_price     = round(entry_price - stop_pts, 1)
-        target_price = round(entry_price + tgt_pts, 1)
+    # 6. SL and target — chart-derived levels preferred; fall back to scalp/ride
+    chart_levels = None
+    if chart_sl and chart_target and spot:
+        chart_levels = _spot_to_option_levels(spot, entry_price, chart_sl, chart_target, opt_type)
+        if chart_levels:
+            sl_price, target_price = chart_levels
+            _LOG.info(
+                f"GTT levels from chart: SL={sl_price} Target={target_price}"
+                f" (spot SL={chart_sl:.1f} T={chart_target:.1f})"
+            )
+
+    if not chart_levels:
+        if trade_mode == "ride":
+            sl_price     = round(entry_price * (1 - _RIDE_STOP_PCT), 1)
+            target_price = round(entry_price * (1 + _RIDE_TARGET_PCT), 1)
+        else:
+            tgt_pts      = _SCALP_TARGET_PTS.get(symbol, 10)
+            stop_pts     = _SCALP_STOP_PTS.get(symbol, 7)
+            sl_price     = round(entry_price - stop_pts, 1)
+            target_price = round(entry_price + tgt_pts, 1)
 
     # 7. GTT two-leg (OCO): [sl_trigger, target_trigger]
     gtt_id = None
