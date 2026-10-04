@@ -19,6 +19,7 @@ Usage:
 
 import datetime
 import logging
+import threading
 import time
 
 import pandas as pd
@@ -389,6 +390,103 @@ def place_order_for_signal(
         "target":        target_price,
         "gtt_id":        gtt_id,
         "trade_mode":    trade_mode,
+    }
+
+
+def _exit_rsi_scalp(api_key: str, access_token: str, exchange: str, ts: str, buy_order_id: str) -> None:
+    """Called in a daemon thread — waits 60s then exits MIS position at MARKET."""
+    time.sleep(60)
+    kite = _kite_client(api_key, access_token)
+    try:
+        for pos in kite.positions().get("net", []):
+            if pos.get("tradingsymbol") == ts and int(pos.get("quantity", 0)) > 0:
+                kite.place_order(
+                    variety=kite.VARIETY_REGULAR,
+                    exchange=exchange,
+                    tradingsymbol=ts,
+                    transaction_type=kite.TRANSACTION_TYPE_SELL,
+                    quantity=int(pos["quantity"]),
+                    product=kite.PRODUCT_MIS,
+                    order_type=kite.ORDER_TYPE_MARKET,
+                )
+                _LOG.info(f"RSI scalp 60s EXIT: SELL {ts} @ MARKET")
+                return
+        # Not filled — cancel the pending BUY
+        try:
+            kite.cancel_order(variety=kite.VARIETY_REGULAR, order_id=buy_order_id)
+            _LOG.info(f"RSI scalp: BUY not filled after 60s, cancelled {buy_order_id}")
+        except Exception:
+            pass
+    except Exception as e:
+        _LOG.error(f"RSI scalp exit error for {ts}: {e}")
+
+
+def place_rsi_scalp_order(
+    symbol: str,
+    opt_type: str,
+    spot: float,
+    api_key: str,
+    access_token: str,
+) -> dict:
+    """BUY ATM option MIS on RSI 70 crossover; auto-exit after 60 seconds.
+
+    No GTT, no SL, no target — exit is a MARKET SELL fired 60s after entry.
+    Uses MIS product so position is always squared off by EOD even if thread fails.
+    """
+    if symbol not in LOT_SIZE:
+        return {"error": f"Unsupported symbol: {symbol}"}
+    exchange = _EXCHANGE[symbol]
+    kite = _kite_client(api_key, access_token)
+
+    if has_open_position(kite, symbol):
+        return {"error": f"Open {symbol} position exists — skipping RSI scalp"}
+
+    strike = _atm_strike(spot, symbol)
+    ts = _resolve_tradingsymbol(kite, symbol, strike, opt_type)
+    if not ts:
+        return {"error": f"No tradingsymbol for {symbol} {strike} {opt_type}"}
+
+    try:
+        ltp_data   = kite.ltp([f"{exchange}:{ts}"])
+        option_ltp = float(ltp_data[f"{exchange}:{ts}"]["last_price"])
+    except Exception as e:
+        return {"error": f"LTP fetch failed for {ts}: {e}"}
+
+    limit_price = round(round(option_ltp * 1.01 / 0.05) * 0.05, 2)
+    qty         = _calc_qty(kite, symbol, option_ltp)
+
+    try:
+        order_id = kite.place_order(
+            variety=kite.VARIETY_REGULAR,
+            exchange=exchange,
+            tradingsymbol=ts,
+            transaction_type=kite.TRANSACTION_TYPE_BUY,
+            quantity=qty,
+            product=kite.PRODUCT_MIS,
+            order_type=kite.ORDER_TYPE_LIMIT,
+            price=limit_price,
+        )
+    except Exception as e:
+        return {"error": f"BUY order failed: {e}"}
+
+    _LOG.info(f"RSI scalp BUY: {qty}×{ts} @ LIMIT {limit_price} | order {order_id}")
+
+    t = threading.Thread(
+        target=_exit_rsi_scalp,
+        args=(api_key, access_token, exchange, ts, order_id),
+        daemon=True,
+    )
+    t.start()
+
+    return {
+        "order_id":     order_id,
+        "tradingsymbol": ts,
+        "strike":       strike,
+        "opt_type":     opt_type,
+        "qty":          qty,
+        "entry_ltp":    option_ltp,
+        "limit_price":  limit_price,
+        "exit_in_sec":  60,
     }
 
 

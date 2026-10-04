@@ -33,6 +33,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).parent.parent))
 
 import requests
 from screener.rsi_scalp import analyze_rsi_scalp
+from screener.kite_order import place_rsi_scalp_order
 
 _IST          = datetime.timezone(datetime.timedelta(hours=5, minutes=30))
 MARKET_OPEN   = datetime.time(9, 20)
@@ -45,6 +46,31 @@ _DEFAULT_NTFY_TOPIC = "nty-revanth-subba-rsi"
 
 
 # ── Credentials ───────────────────────────────────────────────────────────────
+
+def _kite_creds() -> tuple[str, str]:
+    """Return (api_key, access_token) from env or ~/.kite_creds.json."""
+    api_key      = os.environ.get("KITE_API_KEY", "")
+    access_token = os.environ.get("KITE_ACCESS_TOKEN", "")
+    if not api_key or not access_token:
+        creds_file = pathlib.Path.home() / ".kite_creds.json"
+        if creds_file.exists():
+            try:
+                data         = json.loads(creds_file.read_text())
+                api_key      = api_key      or data.get("api_key", "")
+                access_token = access_token or data.get("access_token", "")
+            except Exception:
+                pass
+    if not api_key or not access_token:
+        for line in (pathlib.Path(__file__).parent.parent / ".env").read_text().splitlines() if (pathlib.Path(__file__).parent.parent / ".env").exists() else []:
+            if "=" in line:
+                k, _, v = line.partition("=")
+                k = k.strip(); v = v.strip().strip('"').strip("'")
+                if k == "KITE_API_KEY":
+                    api_key = v
+                elif k == "KITE_ACCESS_TOKEN":
+                    access_token = v
+    return api_key, access_token
+
 
 def _ntfy_topic() -> str:
     t = os.environ.get("RSI_SCALP_NTFY_TOPIC", os.environ.get("NTFY_TOPIC", ""))
@@ -155,6 +181,7 @@ def _should_alert(key: str, current_rsi: float, state: dict) -> bool:
 def _scan(ntfy_topic: str, state: dict) -> None:
     now_ist      = datetime.datetime.now(_IST)
     alerts_fired = 0
+    auto_trade   = os.environ.get("KITE_AUTO_TRADE", "0") == "1"
 
     for index in INDEXES:
         result = analyze_rsi_scalp(index)
@@ -186,6 +213,23 @@ def _scan(ntfy_topic: str, state: dict) -> None:
                 ok = send_ntfy(title, body, ntfy_topic, priority="urgent")
                 print(f"  ntfy.sh [{ntfy_topic}]: {'OK' if ok else 'FAILED'}")
                 alerts_fired += 1
+
+                if auto_trade:
+                    api_key, access_token = _kite_creds()
+                    if api_key and access_token:
+                        print(f"  KITE_AUTO_TRADE=1 — placing RSI scalp order: {index} {opt}")
+                        order_res = place_rsi_scalp_order(index, opt, spot, api_key, access_token)
+                        if order_res.get("error"):
+                            print(f"  Order FAILED: {order_res['error']}")
+                        else:
+                            print(
+                                f"  Order OK: {order_res['tradingsymbol']} "
+                                f"qty={order_res['qty']} ltp={order_res['entry_ltp']} "
+                                f"limit={order_res['limit_price']} "
+                                f"exit_in=60s | id={order_res['order_id']}"
+                            )
+                    else:
+                        print("  KITE_AUTO_TRADE=1 but no Kite creds found — skipping order")
 
     print(f"  [{now_ist.strftime('%H:%M:%S')}] Scan done — {alerts_fired} alert(s) fired")
 
