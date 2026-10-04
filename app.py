@@ -80,6 +80,7 @@ from screener.oi_buildup_history import (
 )
 from screener.chart_analysis import analyze_chart as _analyze_chart, INTERVAL_CFG as _CA_INTERVAL_CFG
 from screener.cpr_adx import analyze_cpr_adx as _cpr_adx_analyze, NIFTY50_FNO as _CPR_ADX_SYMBOLS
+from screener.rsi_scalp import analyze_rsi_scalp as _rsi_scalp_analyze
 from plotly.subplots import make_subplots
 
 try:
@@ -609,6 +610,7 @@ _NAV = [
     ("promoter_pulse",   "💰 Promoter Pulse"),
     ("chart_analysis",   "📐 Chart Analysis"),
     ("cpr_adx",          "📊 CPR + ADX"),
+    ("rsi_scalp",        "📈 RSI Scalp"),
 ]
 _NAV_KEYS   = [k for k, _ in _NAV]
 _NAV_LABELS = {k: lbl for k, lbl in _NAV}
@@ -9333,6 +9335,114 @@ def page_cpr_adx():
 </div>""", unsafe_allow_html=True)
 
 
+# ── PAGE: RSI Scalp ──────────────────────────────────────────────────────────
+def page_rsi_scalp():
+    _api = st.session_state.get("kite_api_key",      _get_secret("KITE_API_KEY", ""))
+    _tok = st.session_state.get("kite_access_token", "")
+    _ok  = bool(_api and _tok)
+
+    st.markdown("""
+<div style="margin-bottom:6px;">
+  <div style="font-size:1.25rem;font-weight:900;color:#fff;letter-spacing:-0.5px;">📈 RSI Scalp — ATM Options</div>
+  <div style="font-size:0.78rem;color:#6e7681;margin-top:2px;">NIFTY &amp; SENSEX · ATM CE + PE · RSI(14) on 5-min candles · Alert when RSI crosses 70</div>
+</div>""", unsafe_allow_html=True)
+
+    if not _ok:
+        st.warning("⚡ Connect Zerodha Kite to enable RSI Scalp Scanner.")
+        return
+
+    _rc1, _rc2 = st.columns([4, 1])
+    with _rc1:
+        _sel = st.multiselect(
+            "Indexes", options=["NIFTY", "SENSEX"],
+            default=["NIFTY", "SENSEX"],
+            label_visibility="collapsed",
+            key="rsi_scalp_sel",
+        )
+    with _rc2:
+        _run = st.button("🔍 Scan", key="rsi_scalp_run", use_container_width=True, type="primary")
+
+    if _run and _sel:
+        with st.spinner("Fetching ATM option RSI…"):
+            _rows = [_rsi_scalp_analyze(idx) for idx in _sel]
+        st.session_state["rsi_scalp_results"] = _rows
+        st.session_state["rsi_scalp_ts"] = datetime.datetime.now(
+            datetime.timezone(datetime.timedelta(hours=5, minutes=30))
+        ).strftime("%I:%M:%S %p IST")
+
+    _results = st.session_state.get("rsi_scalp_results", [])
+    _ts      = st.session_state.get("rsi_scalp_ts", "")
+
+    if not _results:
+        st.markdown('<div style="color:#6e7681;font-size:0.85rem;margin-top:16px;">Select indexes and click <b>🔍 Scan</b>.</div>', unsafe_allow_html=True)
+        return
+
+    if _ts:
+        st.caption(f"Last scanned: {_ts}")
+
+    _all_errors = all(r.get("error") for r in _results)
+    if _all_errors:
+        st.error("⚠️ No data returned — Kite access token may be expired.")
+        return
+
+    st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
+
+    for r in _results:
+        index = r.get("index", "")
+        if r.get("error"):
+            st.error(f"**{index}**: {r['error']}")
+            continue
+
+        spot   = r.get("spot", 0)
+        strike = r.get("strike", 0)
+        expiry = r.get("expiry", "")
+
+        st.markdown(f"""
+<div style="background:#161b22;border:1px solid #30363d;border-radius:10px;padding:14px 18px;margin-bottom:14px;">
+  <div style="font-size:1rem;font-weight:800;color:#e6edf3;margin-bottom:8px;">
+    {index} &nbsp;·&nbsp; Spot ₹{spot:,.2f} &nbsp;·&nbsp; ATM Strike {strike} &nbsp;·&nbsp; Expiry {expiry}
+  </div>
+  <div style="display:flex;gap:24px;flex-wrap:wrap;">""", unsafe_allow_html=True)
+
+        for opt in ("CE", "PE"):
+            key   = opt.lower()
+            rsi   = r.get(f"{key}_rsi")
+            prev  = r.get(f"{key}_prev_rsi")
+            price = r.get(f"{key}_price")
+            err   = r.get(f"{key}_error")
+
+            if err or rsi is None:
+                st.markdown(f'<span style="color:#f85149">{index} {strike} {opt}: {err or "no data"}</span>', unsafe_allow_html=True)
+                continue
+
+            crossed   = (prev is not None) and (prev < 70) and (rsi >= 70)
+            rsi_color = "#f85149" if rsi >= 70 else "#00d4aa" if rsi >= 50 else "#8b949e"
+            badge     = ' <span style="background:#f85149;color:#fff;font-size:0.65rem;padding:1px 6px;border-radius:4px;font-weight:700;">🔥 CROSSED 70</span>' if crossed else ""
+
+            bar_pct = min(int(rsi), 100)
+            bar_color = "#f85149" if rsi >= 70 else "#e6a817" if rsi >= 50 else "#00d4aa"
+
+            st.markdown(f"""
+<div style="background:#0d1117;border:1px solid #30363d;border-radius:8px;padding:10px 14px;min-width:200px;">
+  <div style="font-size:0.8rem;color:#8b949e;font-weight:700;margin-bottom:4px;">{index} {strike} {opt}{badge}</div>
+  <div style="font-size:1.4rem;font-weight:900;color:{rsi_color};">{rsi:.1f}</div>
+  <div style="background:#21262d;border-radius:4px;height:6px;margin:6px 0;">
+    <div style="background:{bar_color};width:{bar_pct}%;height:6px;border-radius:4px;"></div>
+  </div>
+  <div style="font-size:0.72rem;color:#6e7681;">LTP ₹{price:,.2f} &nbsp;·&nbsp; Prev RSI {prev:.1f}</div>
+</div>""", unsafe_allow_html=True)
+
+        st.markdown("</div></div>", unsafe_allow_html=True)
+
+    st.markdown("""
+<div style="margin-top:12px;color:#6e7681;font-size:0.73rem;line-height:1.8;">
+  <b>RSI(14)</b> on 5-minute ATM option candles &nbsp;·&nbsp;
+  <b>🔥 CROSSED 70</b> = RSI moved from below 70 to ≥ 70 this candle (entry signal) &nbsp;·&nbsp;
+  <b>Red</b> ≥ 70 (overbought momentum) &nbsp;·&nbsp; <b>Amber</b> 50–70 &nbsp;·&nbsp; <b>Green</b> &lt; 50<br>
+  Scalping MIS · Exit when RSI drops back below 70 · Not financial advice.
+</div>""", unsafe_allow_html=True)
+
+
 # ── Page routing ──────────────────────────────────────────────────────────────
 {
     "smart_alerts_pro": page_smart_alerts_pro,
@@ -9350,4 +9460,5 @@ def page_cpr_adx():
     "promoter_pulse":   page_promoter_pulse,
     "chart_analysis":   page_chart_analysis,
     "cpr_adx":          page_cpr_adx,
+    "rsi_scalp":        page_rsi_scalp,
 }.get(_cur_page, page_smart_alerts_pro)()

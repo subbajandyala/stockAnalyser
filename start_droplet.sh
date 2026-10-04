@@ -49,11 +49,19 @@ nohup "$PYTHON" scripts/cpr_adx_bot.py >> cpr_adx.log 2>&1 &
 CPR_PID=$!
 echo "  cpr_adx_bot PID: $CPR_PID"
 
+# ── Start RSI Scalp bot (5-min continuous loop) ─────────────────────────────
+echo "Starting RSI Scalp bot supervisor..."
+pkill -f rsi_scalp_bot.py 2>/dev/null || true
+nohup "$PYTHON" scripts/rsi_scalp_bot.py >> rsi_scalp.log 2>&1 &
+RSI_PID=$!
+echo "  rsi_scalp_bot PID: $RSI_PID"
+
 echo ""
 echo "=== Done ==="
 echo "  App:    http://<your-droplet-ip>:8501"
 echo "  Ticker: tail -f $SCRIPT_DIR/ticker.log"
 echo "  App:    tail -f $SCRIPT_DIR/streamlit.log"
-echo "  CPR+ADX: tail -f $SCRIPT_DIR/cpr_adx.log"
+echo "  CPR+ADX: tail -f $SCRIPT_DIR/cpr_adx.log
+  RSI Scalp: tail -f $SCRIPT_DIR/rsi_scalp.log"
 echo ""
 echo "To stop:  bash stop_droplet.sh"
