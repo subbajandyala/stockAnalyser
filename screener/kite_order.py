@@ -17,7 +17,9 @@ Usage:
   Without it, bots run in signal-only / notify-only mode.
 """
 
+import contextlib
 import datetime
+import fcntl
 import logging
 import threading
 import time
@@ -51,6 +53,20 @@ _SCALP_STOP_PTS   = {"NIFTY":  7, "SENSEX": 14}
 # Ride targets — percentage of entry premium (CPR-confirmed trades)
 _RIDE_TARGET_PCT = 0.60   # +60%
 _RIDE_STOP_PCT   = 0.30   # -30%
+
+
+_ORDER_LOCK_PATH = "/tmp/kite_order.lock"
+
+
+@contextlib.contextmanager
+def _order_lock():
+    """Cross-process advisory lock — held only during position-check + order placement."""
+    with open(_ORDER_LOCK_PATH, "w") as _f:
+        fcntl.flock(_f, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(_f, fcntl.LOCK_UN)
 
 
 # ── Internal helpers ───────────────────────────────────────────────────
@@ -286,45 +302,46 @@ def place_order_for_signal(
 
     kite = _kite_client(api_key, access_token)
 
-    # 1. Existing position guard
-    if has_open_position(kite, symbol):
-        return {"error": f"Open {symbol} position already exists — skipping"}
+    with _order_lock():
+        # 1. Existing position guard
+        if has_open_position(kite, symbol):
+            return {"error": f"Open {symbol} position already exists — skipping"}
 
-    # 2. Resolve ATM tradingsymbol
-    strike = _atm_strike(spot, symbol)
-    ts = _resolve_tradingsymbol(kite, symbol, strike, opt_type)
-    if not ts:
-        return {"error": f"Could not find tradingsymbol for {symbol} {strike} {opt_type}"}
+        # 2. Resolve ATM tradingsymbol
+        strike = _atm_strike(spot, symbol)
+        ts = _resolve_tradingsymbol(kite, symbol, strike, opt_type)
+        if not ts:
+            return {"error": f"Could not find tradingsymbol for {symbol} {strike} {opt_type}"}
 
-    # 3. Fetch option LTP and compute limit price (1% above to ensure fill)
-    try:
-        ltp_data = kite.ltp([f"{exchange}:{ts}"])
-        option_ltp = float(ltp_data[f"{exchange}:{ts}"]["last_price"])
-    except Exception as e:
-        return {"error": f"Could not fetch option LTP for {ts}: {e}"}
+        # 3. Fetch option LTP and compute limit price (1% above to ensure fill)
+        try:
+            ltp_data = kite.ltp([f"{exchange}:{ts}"])
+            option_ltp = float(ltp_data[f"{exchange}:{ts}"]["last_price"])
+        except Exception as e:
+            return {"error": f"Could not fetch option LTP for {ts}: {e}"}
 
-    # Round to nearest 0.05 (NSE tick size for options)
-    limit_price = round(round(option_ltp * 1.01 / 0.05) * 0.05, 2)
+        # Round to nearest 0.05 (NSE tick size for options)
+        limit_price = round(round(option_ltp * 1.01 / 0.05) * 0.05, 2)
 
-    # Dynamic lot sizing based on available balance and capital fraction
-    qty = _calc_qty(kite, symbol, option_ltp, capital_fraction)
+        # Dynamic lot sizing based on available balance and capital fraction
+        qty = _calc_qty(kite, symbol, option_ltp, capital_fraction)
 
-    _LOG.info(f"Placing order: BUY {qty} x {ts} @ LIMIT {limit_price} (NRML)")
+        _LOG.info(f"Placing order: BUY {qty} x {ts} @ LIMIT {limit_price} (NRML)")
 
-    # 4. Place limit buy order (NRML so GTT works; market orders blocked via API)
-    try:
-        order_id = kite.place_order(
-            variety=kite.VARIETY_REGULAR,
-            exchange=exchange,
-            tradingsymbol=ts,
-            transaction_type=kite.TRANSACTION_TYPE_BUY,
-            quantity=qty,
-            product=kite.PRODUCT_NRML,
-            order_type=kite.ORDER_TYPE_LIMIT,
-            price=limit_price,
-        )
-    except Exception as e:
-        return {"error": f"Order placement failed: {e}"}
+        # 4. Place limit buy order (NRML so GTT works; market orders blocked via API)
+        try:
+            order_id = kite.place_order(
+                variety=kite.VARIETY_REGULAR,
+                exchange=exchange,
+                tradingsymbol=ts,
+                transaction_type=kite.TRANSACTION_TYPE_BUY,
+                quantity=qty,
+                product=kite.PRODUCT_NRML,
+                order_type=kite.ORDER_TYPE_LIMIT,
+                price=limit_price,
+            )
+        except Exception as e:
+            return {"error": f"Order placement failed: {e}"}
 
     _LOG.info(f"Order placed: {order_id}")
 
@@ -438,36 +455,37 @@ def place_rsi_scalp_order(
     exchange = _EXCHANGE[symbol]
     kite = _kite_client(api_key, access_token)
 
-    if has_open_position(kite, symbol):
-        return {"error": f"Open {symbol} position exists — skipping RSI scalp"}
+    with _order_lock():
+        if has_open_position(kite, symbol):
+            return {"error": f"Open {symbol} position exists — skipping RSI scalp"}
 
-    strike = _atm_strike(spot, symbol)
-    ts = _resolve_tradingsymbol(kite, symbol, strike, opt_type)
-    if not ts:
-        return {"error": f"No tradingsymbol for {symbol} {strike} {opt_type}"}
+        strike = _atm_strike(spot, symbol)
+        ts = _resolve_tradingsymbol(kite, symbol, strike, opt_type)
+        if not ts:
+            return {"error": f"No tradingsymbol for {symbol} {strike} {opt_type}"}
 
-    try:
-        ltp_data   = kite.ltp([f"{exchange}:{ts}"])
-        option_ltp = float(ltp_data[f"{exchange}:{ts}"]["last_price"])
-    except Exception as e:
-        return {"error": f"LTP fetch failed for {ts}: {e}"}
+        try:
+            ltp_data   = kite.ltp([f"{exchange}:{ts}"])
+            option_ltp = float(ltp_data[f"{exchange}:{ts}"]["last_price"])
+        except Exception as e:
+            return {"error": f"LTP fetch failed for {ts}: {e}"}
 
-    limit_price = round(round(option_ltp * 1.01 / 0.05) * 0.05, 2)
-    qty         = _calc_qty(kite, symbol, option_ltp)
+        limit_price = round(round(option_ltp * 1.01 / 0.05) * 0.05, 2)
+        qty         = _calc_qty(kite, symbol, option_ltp)
 
-    try:
-        order_id = kite.place_order(
-            variety=kite.VARIETY_REGULAR,
-            exchange=exchange,
-            tradingsymbol=ts,
-            transaction_type=kite.TRANSACTION_TYPE_BUY,
-            quantity=qty,
-            product=kite.PRODUCT_MIS,
-            order_type=kite.ORDER_TYPE_LIMIT,
-            price=limit_price,
-        )
-    except Exception as e:
-        return {"error": f"BUY order failed: {e}"}
+        try:
+            order_id = kite.place_order(
+                variety=kite.VARIETY_REGULAR,
+                exchange=exchange,
+                tradingsymbol=ts,
+                transaction_type=kite.TRANSACTION_TYPE_BUY,
+                quantity=qty,
+                product=kite.PRODUCT_MIS,
+                order_type=kite.ORDER_TYPE_LIMIT,
+                price=limit_price,
+            )
+        except Exception as e:
+            return {"error": f"BUY order failed: {e}"}
 
     _LOG.info(f"RSI scalp BUY: {qty}×{ts} @ LIMIT {limit_price} | order {order_id}")
 
