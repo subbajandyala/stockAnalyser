@@ -25,6 +25,7 @@ import threading
 import time
 
 import pandas as pd
+import requests as _requests
 from kiteconnect import KiteConnect
 
 _LOG = logging.getLogger(__name__)
@@ -410,32 +411,87 @@ def place_order_for_signal(
     }
 
 
-def _exit_rsi_scalp(api_key: str, access_token: str, exchange: str, ts: str, buy_order_id: str) -> None:
-    """Called in a daemon thread — waits 60s then exits MIS position at MARKET."""
-    time.sleep(60)
-    kite = _kite_client(api_key, access_token)
+def _send_rsi_exit_ntfy(ts: str, entry_ltp: float, exit_ltp: float, ntfy_topic: str) -> None:
+    pnl_pts = round(exit_ltp - entry_ltp, 2)
+    pnl_pct = round((exit_ltp - entry_ltp) / entry_ltp * 100, 1) if entry_ltp else 0
+    sign    = "+" if pnl_pts >= 0 else ""
+    emoji   = "✅" if pnl_pts >= 0 else "🔴"
+    body = (
+        f"{emoji} RSI Scalp EXIT — {ts}\n"
+        f"Entry    : ₹{entry_ltp:.2f}\n"
+        f"Exit LTP : ₹{exit_ltp:.2f}\n"
+        f"P&L      : {sign}{pnl_pts:.2f} pts ({sign}{pnl_pct:.1f}%)\n"
+        f"Duration : ~60 seconds (MIS auto-exit)"
+    )
+    try:
+        _requests.post(
+            f"https://ntfy.sh/{ntfy_topic}",
+            data=body.encode("utf-8"),
+            headers={
+                "Title":        f"RSI Scalp EXIT {emoji} {ts}",
+                "Priority":     "high",
+                "Tags":         "white_check_mark" if pnl_pts >= 0 else "x",
+                "Content-Type": "text/plain; charset=utf-8",
+            },
+            timeout=10,
+        )
+    except Exception as e:
+        _LOG.warning(f"Exit ntfy failed: {e}")
+
+
+def _try_exit_once(kite: KiteConnect, exchange: str, ts: str,
+                   buy_order_id: str, entry_ltp: float, ntfy_topic: str,
+                   attempt: int) -> bool:
+    """Attempt one MARKET SELL exit. Returns True if position was exited or not found."""
     try:
         for pos in kite.positions().get("net", []):
             if pos.get("tradingsymbol") == ts and int(pos.get("quantity", 0)) > 0:
+                open_qty = int(pos["quantity"])
                 kite.place_order(
                     variety=kite.VARIETY_REGULAR,
                     exchange=exchange,
                     tradingsymbol=ts,
                     transaction_type=kite.TRANSACTION_TYPE_SELL,
-                    quantity=int(pos["quantity"]),
+                    quantity=open_qty,
                     product=kite.PRODUCT_MIS,
                     order_type=kite.ORDER_TYPE_MARKET,
                 )
-                _LOG.info(f"RSI scalp 60s EXIT: SELL {ts} @ MARKET")
-                return
-        # Not filled — cancel the pending BUY
-        try:
-            kite.cancel_order(variety=kite.VARIETY_REGULAR, order_id=buy_order_id)
-            _LOG.info(f"RSI scalp: BUY not filled after 60s, cancelled {buy_order_id}")
-        except Exception:
-            pass
+                _LOG.info(f"RSI scalp EXIT (attempt {attempt}): SELL {open_qty}×{ts} @ MARKET")
+                if ntfy_topic:
+                    try:
+                        q       = kite.ltp([f"{exchange}:{ts}"])
+                        exit_lt = float(q.get(f"{exchange}:{ts}", {}).get("last_price", entry_ltp))
+                    except Exception:
+                        exit_lt = entry_ltp
+                    _send_rsi_exit_ntfy(ts, entry_ltp, exit_lt, ntfy_topic)
+                return True
+        # Position not found — BUY was never filled; cancel it (only on first attempt)
+        if attempt == 1:
+            try:
+                kite.cancel_order(variety=kite.VARIETY_REGULAR, order_id=buy_order_id)
+                _LOG.info(f"RSI scalp: BUY not filled after 60s, cancelled {buy_order_id}")
+            except Exception:
+                pass
+        return True  # nothing left to do
     except Exception as e:
-        _LOG.error(f"RSI scalp exit error for {ts}: {e}")
+        _LOG.error(f"RSI scalp exit error for {ts} (attempt {attempt}): {e}")
+        return False  # signal caller to retry
+
+
+def _exit_rsi_scalp(
+    api_key: str, access_token: str, exchange: str, ts: str,
+    buy_order_id: str, entry_ltp: float, ntfy_topic: str = "",
+) -> None:
+    """Called in a daemon thread — waits 60s then exits MIS position at MARKET.
+    Retries once more after another 60s if the first attempt hits an API error."""
+    time.sleep(60)
+    kite = _kite_client(api_key, access_token)
+    ok = _try_exit_once(kite, exchange, ts, buy_order_id, entry_ltp, ntfy_topic, attempt=1)
+    if not ok:
+        # API error on first attempt — retry after another 60s
+        time.sleep(60)
+        kite = _kite_client(api_key, access_token)  # fresh client in case token was refreshed
+        _try_exit_once(kite, exchange, ts, buy_order_id, entry_ltp, ntfy_topic, attempt=2)
 
 
 def place_rsi_scalp_order(
@@ -444,6 +500,7 @@ def place_rsi_scalp_order(
     spot: float,
     api_key: str,
     access_token: str,
+    ntfy_topic: str = "",
 ) -> dict:
     """BUY ATM option MIS on RSI 70 crossover; auto-exit after 60 seconds.
 
@@ -491,7 +548,7 @@ def place_rsi_scalp_order(
 
     t = threading.Thread(
         target=_exit_rsi_scalp,
-        args=(api_key, access_token, exchange, ts, order_id),
+        args=(api_key, access_token, exchange, ts, order_id, option_ltp, ntfy_topic),
         daemon=True,
     )
     t.start()
@@ -506,6 +563,43 @@ def place_rsi_scalp_order(
         "limit_price":  limit_price,
         "exit_in_sec":  60,
     }
+
+
+def exit_orphan_mis_positions(api_key: str, access_token: str) -> list:
+    """Exit any open MIS NIFTY/SENSEX positions left from a previous crashed run.
+
+    Called at worker startup so stale positions don't survive a restart.
+    """
+    kite   = _kite_client(api_key, access_token)
+    exited = []
+    try:
+        net = kite.positions().get("net", [])
+    except Exception as e:
+        _LOG.warning(f"Orphan position check failed: {e}")
+        return exited
+    for pos in net:
+        ts      = pos.get("tradingsymbol", "")
+        qty     = int(pos.get("quantity", 0))
+        product = pos.get("product", "")
+        if qty <= 0 or product != "MIS":
+            continue
+        for symbol, exchange in _EXCHANGE.items():
+            if ts.startswith(symbol):
+                try:
+                    order_id = kite.place_order(
+                        variety=kite.VARIETY_REGULAR,
+                        exchange=exchange,
+                        tradingsymbol=ts,
+                        transaction_type=kite.TRANSACTION_TYPE_SELL,
+                        quantity=qty,
+                        product=kite.PRODUCT_MIS,
+                        order_type=kite.ORDER_TYPE_MARKET,
+                    )
+                    _LOG.info(f"Orphan MIS exit: SELL {qty}×{ts} @ MARKET | {order_id}")
+                    exited.append({"tradingsymbol": ts, "qty": qty, "order_id": order_id})
+                except Exception as e:
+                    _LOG.error(f"Orphan exit failed for {ts}: {e}")
+    return exited
 
 
 def resolve_and_fetch_ltp(

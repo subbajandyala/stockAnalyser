@@ -30,6 +30,9 @@ _EXPIRY_WEEKDAY = {"NIFTY": 3, "SENSEX": 4}
 _INSTR_CACHE: dict = {}
 _INSTR_TTL = 3600  # refresh every hour
 
+# Don't scan before 10:35 IST — need 15 × 5-min candles (75 min from 9:20 open)
+_RSI_SCAN_START = datetime.time(10, 35)
+
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -138,6 +141,13 @@ def analyze_rsi_scalp(index: str) -> dict:
       pe_rsi, pe_prev_rsi, pe_price, pe_token,
       ce_error, pe_error, error
     """
+    now_ist = datetime.datetime.now(_IST)
+    if now_ist.time() < _RSI_SCAN_START:
+        return {
+            "index": index,
+            "error": f"Too early — RSI needs 15 candles (scanning starts 10:35 IST, now {now_ist.strftime('%H:%M')})",
+        }
+
     try:
         # Current spot price from most recent 5m candle
         df_spot = _fetch_index(index, interval="5minute", days=3)

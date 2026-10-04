@@ -33,7 +33,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).parent.parent))
 
 import requests
 from screener.rsi_scalp import analyze_rsi_scalp
-from screener.kite_order import place_rsi_scalp_order
+from screener.kite_order import place_rsi_scalp_order, exit_orphan_mis_positions
 
 _IST          = datetime.timezone(datetime.timedelta(hours=5, minutes=30))
 MARKET_OPEN   = datetime.time(9, 20)
@@ -218,7 +218,7 @@ def _scan(ntfy_topic: str, state: dict) -> None:
                     api_key, access_token = _kite_creds()
                     if api_key and access_token:
                         print(f"  KITE_AUTO_TRADE=1 — placing RSI scalp order: {index} {opt}")
-                        order_res = place_rsi_scalp_order(index, opt, spot, api_key, access_token)
+                        order_res = place_rsi_scalp_order(index, opt, spot, api_key, access_token, ntfy_topic)
                         if order_res.get("error"):
                             print(f"  Order FAILED: {order_res['error']}")
                         else:
@@ -239,6 +239,19 @@ def _scan(ntfy_topic: str, state: dict) -> None:
 def run_worker() -> None:
     ntfy_topic = _ntfy_topic()
     print(f"RSI Scalp worker started — {INDEXES} — topic: {ntfy_topic}")
+
+    # Exit any MIS positions left open from a previous crashed run
+    if os.environ.get("KITE_AUTO_TRADE", "0") == "1":
+        api_key, access_token = _kite_creds()
+        if api_key and access_token:
+            print("  Checking for orphaned MIS positions from previous run...")
+            orphans = exit_orphan_mis_positions(api_key, access_token)
+            if orphans:
+                for o in orphans:
+                    print(f"  Orphan exit: SELL {o['qty']}×{o['tradingsymbol']} | {o['order_id']}")
+            else:
+                print("  No orphaned MIS positions found.")
+
     state: dict = {}
 
     while True:
