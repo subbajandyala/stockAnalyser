@@ -56,6 +56,17 @@ def _save_token(token: str):
         text = text.rstrip("\n") + f"\nKITE_ACCESS_TOKEN={token}\n"
     _ENV_FILE.write_text(text, encoding="utf-8")
 
+    # Also update ~/.kite_creds.json so bots that read it get the fresh token
+    import json
+    creds_file = Path.home() / ".kite_creds.json"
+    if creds_file.exists():
+        try:
+            data = json.loads(creds_file.read_text())
+            data["access_token"] = token
+            creds_file.write_text(json.dumps(data, indent=2))
+        except Exception as e:
+            _log(f"Warning: could not update ~/.kite_creds.json: {e}")
+
 
 def _get_access_token(user_id: str, password: str, totp_secret: str,
                       api_key: str, api_secret: str) -> str:
