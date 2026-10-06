@@ -48,9 +48,22 @@ _DEFAULT_NTFY_TOPIC = "nty-revanth-subba-rsi"
 # ── Credentials ───────────────────────────────────────────────────────────────
 
 def _kite_creds() -> tuple[str, str]:
-    """Return (api_key, access_token) from env or ~/.kite_creds.json."""
+    """Return (api_key, access_token). Priority: env vars → .env → ~/.kite_creds.json."""
     api_key      = os.environ.get("KITE_API_KEY", "")
     access_token = os.environ.get("KITE_ACCESS_TOKEN", "")
+    # .env first — auto_token.py always writes the fresh token here
+    if not api_key or not access_token:
+        env_path = pathlib.Path(__file__).parent.parent / ".env"
+        if env_path.exists():
+            for line in env_path.read_text().splitlines():
+                if "=" in line and not line.startswith("#"):
+                    k, _, v = line.partition("=")
+                    k = k.strip(); v = v.strip().strip('"').strip("'")
+                    if k == "KITE_API_KEY":
+                        api_key = api_key or v
+                    elif k == "KITE_ACCESS_TOKEN":
+                        access_token = access_token or v
+    # ~/.kite_creds.json as fallback
     if not api_key or not access_token:
         creds_file = pathlib.Path.home() / ".kite_creds.json"
         if creds_file.exists():
@@ -60,15 +73,6 @@ def _kite_creds() -> tuple[str, str]:
                 access_token = access_token or data.get("access_token", "")
             except Exception:
                 pass
-    if not api_key or not access_token:
-        for line in (pathlib.Path(__file__).parent.parent / ".env").read_text().splitlines() if (pathlib.Path(__file__).parent.parent / ".env").exists() else []:
-            if "=" in line:
-                k, _, v = line.partition("=")
-                k = k.strip(); v = v.strip().strip('"').strip("'")
-                if k == "KITE_API_KEY":
-                    api_key = v
-                elif k == "KITE_ACCESS_TOKEN":
-                    access_token = v
     return api_key, access_token
 
 

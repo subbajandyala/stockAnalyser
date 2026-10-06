@@ -57,17 +57,10 @@ _AUTO_TRADE = os.environ.get("CHART_AUTO_TRADE", os.environ.get("KITE_AUTO_TRADE
 # ── Credentials ───────────────────────────────────────────────────────────────
 
 def _kite_creds() -> tuple[str, str]:
+    """Priority: env vars → .env → ~/.kite_creds.json."""
     api_key = os.environ.get("KITE_API_KEY", "")
     token   = os.environ.get("KITE_ACCESS_TOKEN", "")
-    if not (api_key and token):
-        p = pathlib.Path.home() / ".kite_creds.json"
-        if p.exists():
-            try:
-                c = json.loads(p.read_text())
-                api_key = api_key or c.get("api_key", "")
-                token   = token   or c.get("access_token", "")
-            except Exception:
-                pass
+    # .env first — auto_token.py always writes the fresh token here
     if not (api_key and token):
         env_path = pathlib.Path(__file__).parent.parent / ".env"
         if env_path.exists():
@@ -80,6 +73,16 @@ def _kite_creds() -> tuple[str, str]:
                         api_key = api_key or v
                     elif k.strip() == "KITE_ACCESS_TOKEN":
                         token = token or v
+    # ~/.kite_creds.json as fallback
+    if not (api_key and token):
+        p = pathlib.Path.home() / ".kite_creds.json"
+        if p.exists():
+            try:
+                c = json.loads(p.read_text())
+                api_key = api_key or c.get("api_key", "")
+                token   = token   or c.get("access_token", "")
+            except Exception:
+                pass
     return api_key, token
 
 
