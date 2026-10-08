@@ -14,11 +14,11 @@ A signal only fires when BOTH timeframes agree in direction.
 Set KITE_AUTO_TRADE=1 to enable auto order execution.
 
 Cron (every 5 min, market hours):
-  */5 9-15 * * 1-5 cd /root/stockAnalyser && /root/venv/bin/python scripts/chart_bot.py --once >> chart_bot.log 2>&1
+  */5 9-15 * * 1-5 cd /root/stockAnalyser && /root/venv/bin/python -u scripts/chart_bot.py --once >> chart_bot.log 2>&1
 
 Single test run:
-  /root/venv/bin/python scripts/chart_bot.py --once
-  /root/venv/bin/python scripts/chart_bot.py --test-notify
+  /root/venv/bin/python -u scripts/chart_bot.py --once
+  /root/venv/bin/python -u scripts/chart_bot.py --test-notify
 """
 
 import argparse

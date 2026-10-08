@@ -11,13 +11,13 @@ Dedup rules (per instrument, per day):
   • State resets at start of each trading day
 
 Start (via start_droplet.sh or manually):
-  nohup /root/venv/bin/python scripts/rsi_scalp_bot.py >> rsi_scalp.log 2>&1 &
+  nohup /root/venv/bin/python -u scripts/rsi_scalp_bot.py >> rsi_scalp.log 2>&1 &
 
 Single scan (test):
-  /root/venv/bin/python scripts/rsi_scalp_bot.py --once
+  /root/venv/bin/python -u scripts/rsi_scalp_bot.py --once
 
 Test notification:
-  /root/venv/bin/python scripts/rsi_scalp_bot.py --test-notify
+  /root/venv/bin/python -u scripts/rsi_scalp_bot.py --test-notify
 """
 
 import argparse

@@ -16,6 +16,9 @@ cd "$SCRIPT_DIR"
 PYTHON="${PYTHON:-/root/venv/bin/python}"
 STREAMLIT="${STREAMLIT:-/root/venv/bin/streamlit}"
 
+# Force Python stdout/stderr to be unbuffered so logs appear in real time
+export PYTHONUNBUFFERED=1
+
 echo "=== MarketPulse — Starting services ==="
 
 # ── Kill old processes ──────────────────────────────────────────────────────
@@ -25,7 +28,7 @@ sleep 1
 
 # ── Start ticker daemon ─────────────────────────────────────────────────────
 echo "Starting ticker_daemon.py..."
-nohup "$PYTHON" ticker_daemon.py >> ticker.log 2>&1 &
+nohup "$PYTHON" -u ticker_daemon.py >> ticker.log 2>&1 &
 TICKER_PID=$!
 echo "  ticker_daemon PID: $TICKER_PID"
 
@@ -45,14 +48,14 @@ echo "  Streamlit PID: $ST_PID"
 # ── Start CPR+ADX signal bot (1-min continuous loop) ───────────────────────
 echo "Starting CPR+ADX bot supervisor..."
 pkill -f cpr_adx_bot.py 2>/dev/null || true
-nohup "$PYTHON" scripts/cpr_adx_bot.py >> cpr_adx.log 2>&1 &
+nohup "$PYTHON" -u scripts/cpr_adx_bot.py >> cpr_adx.log 2>&1 &
 CPR_PID=$!
 echo "  cpr_adx_bot PID: $CPR_PID"
 
 # ── Start RSI Scalp bot (5-min continuous loop) ─────────────────────────────
 echo "Starting RSI Scalp bot supervisor..."
 pkill -f rsi_scalp_bot.py 2>/dev/null || true
-nohup "$PYTHON" scripts/rsi_scalp_bot.py >> rsi_scalp.log 2>&1 &
+nohup "$PYTHON" -u scripts/rsi_scalp_bot.py >> rsi_scalp.log 2>&1 &
 RSI_PID=$!
 echo "  rsi_scalp_bot PID: $RSI_PID"
 
