@@ -24,6 +24,7 @@ Test notification:
 import argparse
 import datetime
 import json
+import logging
 import os
 import pathlib
 import subprocess
@@ -36,6 +37,12 @@ sys.path.insert(0, str(pathlib.Path(__file__).parent.parent))
 import requests
 
 from screener.cpr_adx import analyze_cpr_adx, NIFTY50_FNO
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    datefmt="%H:%M:%S",
+)
 
 _IST         = datetime.timezone(datetime.timedelta(hours=5, minutes=30))
 MARKET_OPEN  = datetime.time(9, 20)

@@ -24,6 +24,7 @@ Single test run:
 import argparse
 import datetime
 import json
+import logging
 import os
 import pathlib
 import sys
@@ -34,6 +35,12 @@ import requests
 
 from screener.chart_analysis import analyze_chart
 from screener.kite_order import place_order_for_signal as _place_order
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    datefmt="%H:%M:%S",
+)
 
 _IST         = datetime.timezone(datetime.timedelta(hours=5, minutes=30))
 MARKET_OPEN  = datetime.time(9, 20)   # give 5 min after open to avoid noise
@@ -51,7 +58,24 @@ MIN_NOTIFY_SCORE = 3
 # Minimum score to auto-execute an order
 MIN_TRADE_SCORE  = 5
 
-_AUTO_TRADE = os.environ.get("CHART_AUTO_TRADE", os.environ.get("KITE_AUTO_TRADE", "0")) == "1"
+def _auto_trade_enabled() -> bool:
+    """Check KITE_AUTO_TRADE in env vars first, then .env file."""
+    for key in ("CHART_AUTO_TRADE", "KITE_AUTO_TRADE"):
+        if os.environ.get(key) == "1":
+            return True
+    env_path = pathlib.Path(__file__).parent.parent / ".env"
+    if env_path.exists():
+        for line in env_path.read_text().splitlines():
+            line = line.strip()
+            if "=" in line and not line.startswith("#"):
+                k, v = line.split("=", 1)
+                if k.strip() in ("KITE_AUTO_TRADE", "CHART_AUTO_TRADE"):
+                    if v.strip().strip('"').strip("'") == "1":
+                        return True
+    return False
+
+_AUTO_TRADE = _auto_trade_enabled()
+print(f"[chart_bot] AUTO_TRADE={'ON' if _AUTO_TRADE else 'OFF (set KITE_AUTO_TRADE=1 in .env to enable)'}", flush=True)
 
 
 # ── Credentials ───────────────────────────────────────────────────────────────

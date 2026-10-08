@@ -19,6 +19,16 @@ STREAMLIT="${STREAMLIT:-/root/venv/bin/streamlit}"
 # Force Python stdout/stderr to be unbuffered so logs appear in real time
 export PYTHONUNBUFFERED=1
 
+# Export KITE_AUTO_TRADE from .env so bots can see it even if not in shell env
+_auto_trade_val=$(grep '^KITE_AUTO_TRADE=' .env 2>/dev/null | head -1 | cut -d= -f2 | tr -d '"'"'" | tr -d '[:space:]' || true)
+if [ "$_auto_trade_val" = "1" ]; then
+    export KITE_AUTO_TRADE=1
+    echo "  KITE_AUTO_TRADE=1 (from .env)"
+else
+    export KITE_AUTO_TRADE=0
+    echo "  KITE_AUTO_TRADE=0 (auto-trade disabled)"
+fi
+
 echo "=== MarketPulse — Starting services ==="
 
 # ── Kill old processes ──────────────────────────────────────────────────────

@@ -23,6 +23,7 @@ Test notification:
 import argparse
 import datetime
 import json
+import logging
 import os
 import pathlib
 import subprocess
@@ -34,6 +35,12 @@ sys.path.insert(0, str(pathlib.Path(__file__).parent.parent))
 import requests
 from screener.rsi_scalp import analyze_rsi_scalp
 from screener.kite_order import place_rsi_scalp_order, exit_orphan_mis_positions
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    datefmt="%H:%M:%S",
+)
 
 _IST          = datetime.timezone(datetime.timedelta(hours=5, minutes=30))
 MARKET_OPEN   = datetime.time(9, 20)
@@ -182,10 +189,27 @@ def _should_alert(key: str, current_rsi: float, state: dict) -> bool:
 
 # ── Single scan pass ──────────────────────────────────────────────────────────
 
+def _is_auto_trade() -> bool:
+    """Check KITE_AUTO_TRADE in env vars, then .env file."""
+    if os.environ.get("KITE_AUTO_TRADE") == "1":
+        return True
+    env_path = pathlib.Path(__file__).parent.parent / ".env"
+    if env_path.exists():
+        for line in env_path.read_text().splitlines():
+            line = line.strip()
+            if "=" in line and not line.startswith("#"):
+                k, v = line.split("=", 1)
+                if k.strip() == "KITE_AUTO_TRADE" and v.strip().strip('"').strip("'") == "1":
+                    return True
+    return False
+
+
 def _scan(ntfy_topic: str, state: dict) -> None:
     now_ist      = datetime.datetime.now(_IST)
     alerts_fired = 0
-    auto_trade   = os.environ.get("KITE_AUTO_TRADE", "0") == "1"
+    auto_trade   = _is_auto_trade()
+    if auto_trade:
+        print("  [AUTO-TRADE ON]", flush=True)
 
     for index in INDEXES:
         result = analyze_rsi_scalp(index)
