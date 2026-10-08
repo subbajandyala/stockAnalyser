@@ -46,22 +46,32 @@ MIN_SIGNAL_SCORE  = 3         # regular signal threshold
 STRONG_SCORE      = 5         # strong / upgrade threshold
 
 _DEFAULT_NTFY_TOPIC = "marketPulse-cpr-adx-bot"
+_STATE_FILE = "/tmp/cpr_adx_bot_state.json"
+
+
+# ── State persistence ─────────────────────────────────────────────────────────
+
+def _load_state(path: str) -> dict:
+    try:
+        return json.loads(pathlib.Path(path).read_text())
+    except Exception:
+        return {}
+
+
+def _save_state(path: str, state: dict) -> None:
+    try:
+        pathlib.Path(path).write_text(json.dumps(state, indent=2))
+    except Exception as e:
+        print(f"  Warning: could not save state: {e}")
 
 
 # ── Credentials ───────────────────────────────────────────────────────────────
 
 def _kite_creds() -> tuple[str, str]:
+    """Priority: env vars → .env → ~/.kite_creds.json."""
     api_key = os.environ.get("KITE_API_KEY", "")
     token   = os.environ.get("KITE_ACCESS_TOKEN", "")
-    if not (api_key and token):
-        p = pathlib.Path.home() / ".kite_creds.json"
-        if p.exists():
-            try:
-                c = json.loads(p.read_text())
-                api_key = api_key or c.get("api_key", "")
-                token   = token   or c.get("access_token", "")
-            except Exception:
-                pass
+    # .env first — auto_token.py always writes the fresh token here
     if not (api_key and token):
         env_path = pathlib.Path(__file__).parent.parent / ".env"
         if env_path.exists():
@@ -74,6 +84,16 @@ def _kite_creds() -> tuple[str, str]:
                         api_key = api_key or v
                     elif k.strip() == "KITE_ACCESS_TOKEN":
                         token = token or v
+    # ~/.kite_creds.json as fallback
+    if not (api_key and token):
+        p = pathlib.Path.home() / ".kite_creds.json"
+        if p.exists():
+            try:
+                c = json.loads(p.read_text())
+                api_key = api_key or c.get("api_key", "")
+                token   = token   or c.get("access_token", "")
+            except Exception:
+                pass
     return api_key, token
 
 
@@ -266,6 +286,7 @@ def _scan(symbols: list[str], api_key: str, access_token: str,
         alerts_fired += 1
 
         _update_state(sym, result, state)
+        _save_state(_STATE_FILE, state)
 
     print(f"  [{now_ist.strftime('%H:%M:%S')}] Scan done — {alerts_fired} alert(s) fired")
 
@@ -281,7 +302,8 @@ def run_worker(symbols: list[str]) -> None:
         sys.exit(1)
 
     print(f"CPR+ADX worker started — {len(symbols)} stocks — topic: {ntfy_topic}")
-    state: dict = {}
+    state: dict = _load_state(_STATE_FILE)
+    print(f"  Loaded {len(state)} dedup entries from state file")
 
     while True:
         now_ist = datetime.datetime.now(_IST)
