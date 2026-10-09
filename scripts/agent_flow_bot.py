@@ -38,14 +38,27 @@ MIN_RATING   = 3   # alert only on 3-star and above
 # ── Credentials ───────────────────────────────────────────────────────────────
 
 def _kite_creds() -> tuple[str, str]:
+    """Priority: env vars → .env → ~/.kite_creds.json."""
     api_key = os.environ.get("KITE_API_KEY", "")
     token   = os.environ.get("KITE_ACCESS_TOKEN", "")
+    if not (api_key and token):
+        env_path = pathlib.Path(__file__).parent.parent / ".env"
+        if env_path.exists():
+            for line in env_path.read_text().splitlines():
+                line = line.strip()
+                if "=" in line and not line.startswith("#"):
+                    k, v = line.split("=", 1)
+                    v = v.strip().strip('"').strip("'")
+                    if k.strip() == "KITE_API_KEY":
+                        api_key = api_key or v
+                    elif k.strip() == "KITE_ACCESS_TOKEN":
+                        token = token or v
     if not (api_key and token):
         p = pathlib.Path.home() / ".kite_creds.json"
         if p.exists():
             try:
                 c = json.loads(p.read_text())
-                api_key = api_key or c.get("api_key", "plz6ik09bgb62mey")
+                api_key = api_key or c.get("api_key", "")
                 token   = token   or c.get("access_token", "")
             except Exception:
                 pass
@@ -55,12 +68,22 @@ def _kite_creds() -> tuple[str, str]:
 def _ntfy_topic() -> str:
     t = os.environ.get("NTFY_TOPIC", "")
     if not t:
-        p = pathlib.Path.home() / ".kite_creds.json"
-        if p.exists():
-            try:
-                t = json.loads(p.read_text()).get("ntfy_agent_topic", "")
-            except Exception:
-                pass
+        for src in [
+            pathlib.Path.home() / ".kite_creds.json",
+            pathlib.Path(__file__).parent.parent / ".env",
+        ]:
+            if src.exists():
+                try:
+                    if src.suffix == ".json":
+                        t = json.loads(src.read_text()).get("ntfy_agent_topic", "")
+                    else:
+                        for line in src.read_text().splitlines():
+                            if "NTFY_TOPIC" in line and "=" in line:
+                                t = line.split("=", 1)[1].strip().strip('"').strip("'")
+                except Exception:
+                    pass
+            if t:
+                break
     return t
 
 
