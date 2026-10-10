@@ -177,6 +177,99 @@ def _futures_buildup(symbol: str) -> dict:
     }
 
 
+# ── GEX helpers ───────────────────────────────────────────────────────────────
+
+def _norm_pdf(x: float) -> float:
+    return float(np.exp(-0.5 * x * x) / np.sqrt(2.0 * np.pi))
+
+
+def _bs_gamma(S: float, K: float, T: float, sigma: float) -> float:
+    """Black-Scholes gamma. r=0.065 (Indian repo rate proxy)."""
+    if T <= 0 or sigma <= 0 or S <= 0 or K <= 0:
+        return 0.0
+    r = 0.065
+    try:
+        d1 = (np.log(S / K) + (r + 0.5 * sigma ** 2) * T) / (sigma * np.sqrt(T))
+        return _norm_pdf(float(d1)) / (S * sigma * np.sqrt(T))
+    except Exception:
+        return 0.0
+
+
+def _calc_gex(df_chain: pd.DataFrame, spot: float, expiry: str,
+              vix: float = 14.5) -> dict:
+    """
+    Gamma Exposure (GEX) per strike.
+
+    Net GEX > 0 → dealers LONG gamma → sell rallies / buy dips → mean-reversion / pin
+    Net GEX < 0 → dealers SHORT gamma → chase moves → trending / volatile
+
+    Gamma Wall = strike with highest absolute GEX = key magnet level.
+
+    IV source: use chain CE IV / PE IV when available (> 0),
+    else fall back to VIX-based proxy with a simple smile.
+    """
+    if df_chain.empty or spot <= 0:
+        return {"regime": "Unknown", "net_gex": 0.0, "gamma_wall": spot, "signals": []}
+
+    try:
+        exp_dt = datetime.datetime.strptime(expiry, "%d-%b-%Y").date()
+        dte    = max((exp_dt - datetime.date.today()).days, 0)
+    except Exception:
+        dte = 7
+    T = max(dte / 365.0, 1.0 / 365.0)
+
+    base_iv = max(float(vix) / 100.0, 0.08)   # VIX ≈ annualised ATM IV
+
+    rows = []
+    for _, row in df_chain.iterrows():
+        K      = float(row["Strike"])
+        ce_oi  = int(row.get("CE OI", 0))
+        pe_oi  = int(row.get("PE OI", 0))
+
+        ce_iv_raw = float(row.get("CE IV", 0))
+        pe_iv_raw = float(row.get("PE IV", 0))
+        moneyness = abs(K / spot - 1.0)
+        smile     = moneyness * 1.5        # simple OTM smile bump
+        iv = max(ce_iv_raw / 100.0, pe_iv_raw / 100.0, base_iv + smile)
+
+        gamma  = _bs_gamma(spot, K, T, iv)
+        ce_gex = gamma * ce_oi * spot
+        pe_gex = gamma * pe_oi * spot
+
+        rows.append({"strike": K, "ce_gex": ce_gex, "pe_gex": pe_gex,
+                     "net_gex": ce_gex - pe_gex})
+
+    if not rows:
+        return {"regime": "Unknown", "net_gex": 0.0, "gamma_wall": spot, "signals": []}
+
+    df_gex   = pd.DataFrame(rows)
+    net_gex  = float(df_gex["net_gex"].sum())
+    wall_idx = df_gex["net_gex"].abs().idxmax()
+    gamma_wall = float(df_gex.loc[wall_idx, "strike"])
+    regime   = "Positive" if net_gex >= 0 else "Negative"
+
+    signals = []
+    if regime == "Negative":
+        signals.append("Negative GEX — Trending/Volatile")
+    else:
+        signals.append("Positive GEX — Mean-Reverting")
+
+    wall_pct = (gamma_wall - spot) / spot * 100
+    if wall_pct > 0.5:
+        signals.append(f"Gamma Wall {int(gamma_wall)} — Resistance")
+    elif wall_pct < -0.5:
+        signals.append(f"Gamma Wall {int(gamma_wall)} — Support")
+    else:
+        signals.append(f"Gamma Wall {int(gamma_wall)} — ATM Pin")
+
+    return {
+        "regime":     regime,
+        "net_gex":    round(net_gex, 2),
+        "gamma_wall": gamma_wall,
+        "signals":    signals,
+    }
+
+
 # ── Market structure ──────────────────────────────────────────────────────────
 
 def _market_structure(df: pd.DataFrame) -> str:
@@ -258,7 +351,8 @@ def _oi_analysis(df_chain: pd.DataFrame, spot: float) -> dict:
 
 def _market_bias(trend: str, oi: dict, spot: float,
                  vwap: float, ema20: float, ema50: float, vix: float,
-                 fut_buildup: str = "Unknown") -> dict:
+                 fut_buildup: str = "Unknown",
+                 gex: Optional[dict] = None) -> dict:
     bull, bear = 0, 0
 
     # Trend weight 25
@@ -290,6 +384,19 @@ def _market_bias(trend: str, oi: dict, spot: float,
     elif fut_buildup == "Short Covering": bull += 7
     elif fut_buildup == "Short Buildup":  bear += 15
     elif fut_buildup == "Long Unwinding": bear += 7
+
+    # GEX weight: regime amplifies dominant direction; gamma wall acts as level
+    if gex and gex.get("regime") != "Unknown":
+        gex_regime = gex["regime"]
+        gex_wall   = gex.get("gamma_wall", spot)
+        wall_pct   = (gex_wall - spot) / spot * 100
+        if gex_regime == "Negative":
+            # Dealers short gamma → moves get amplified → add to leading side
+            if bull > bear:  bull += 10
+            elif bear > bull: bear += 10
+        # Gamma wall position: resistance above spot, support below
+        if wall_pct > 0.5:    bear += 5   # wall above → resistance
+        elif wall_pct < -0.5: bull += 5   # wall below → support
 
     # VIX penalty (uncertain market)
     if vix > 20:
@@ -459,8 +566,13 @@ def run_agent_analysis(symbol: str, api_key: str, access_token: str) -> dict:
     if fut_signal not in ("Unknown",):
         oi["signals"].append(fut_signal)
 
-    # 4. Bias (includes futures buildup weight)
-    bias_r = _market_bias(trend, oi, spot, vwap_v, ema20, ema50, vix, fut_signal)
+    # 3c. Gamma Exposure (GEX)
+    gex = _calc_gex(df_chain, spot, expiry, vix)
+    for sig in gex.get("signals", []):
+        oi["signals"].append(sig)
+
+    # 4. Bias (includes futures buildup + GEX weights)
+    bias_r = _market_bias(trend, oi, spot, vwap_v, ema20, ema50, vix, fut_signal, gex)
     bias, conf = bias_r["bias"], bias_r["confidence"]
 
     common = {**base,
@@ -469,7 +581,7 @@ def run_agent_analysis(symbol: str, api_key: str, access_token: str) -> dict:
               "vix": vix, "trend": trend, "expiry": expiry,
               "oi": oi, "df_chain": df_chain,
               "support": oi["support"], "resistance": oi["resistance"],
-              "fut_buildup": fut_data}
+              "fut_buildup": fut_data, "gex": gex}
 
     # 5. Direction
     if bias in ("Strong Bullish", "Moderately Bullish"):
