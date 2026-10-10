@@ -117,6 +117,14 @@ def send_ntfy(title: str, body: str, topic: str) -> bool:
 _STARS = {1: "★", 2: "★★", 3: "★★★", 4: "★★★★", 5: "★★★★★"}
 
 
+_FUT_EMOJI = {
+    "Long Buildup":    "↑OI",
+    "Short Covering":  "↑SC",
+    "Short Buildup":   "↓OI",
+    "Long Unwinding":  "↓LU",
+}
+
+
 def _fmt_alert(r: dict) -> tuple[str, str]:
     symbol    = r["symbol"]
     direction = r["direction"]        # CALL / PUT
@@ -127,14 +135,31 @@ def _fmt_alert(r: dict) -> tuple[str, str]:
     rating    = r.get("rating", 3)
     prob      = r.get("probability", 0)
     tgt       = r.get("targets", {})
-    signals   = r.get("signals", [])
     spot      = r.get("spot", 0)
     expiry    = r.get("expiry", "")
     now_ist   = datetime.datetime.now(_IST)
 
+    # Futures buildup
+    fut       = r.get("fut_buildup", {})
+    fut_sig   = fut.get("signal", "")
+    fut_tag   = _FUT_EMOJI.get(fut_sig, "")
+
+    # GEX
+    gex       = r.get("gex", {})
+    gex_reg   = gex.get("regime", "")
+    gex_wall  = gex.get("gamma_wall", 0)
+    gex_emoji = "⚡" if gex_reg == "Negative" else ("🔒" if gex_reg == "Positive" else "")
+
+    # Filter out GEX/futures lines from signals — shown in dedicated section
+    _skip = {"Long Buildup", "Short Covering", "Short Buildup", "Long Unwinding",
+             "Negative GEX — Trending/Volatile", "Positive GEX — Mean-Reverting"}
+    core_signals = [s for s in r.get("signals", [])
+                    if not any(s.startswith(k) for k in _skip)
+                    and "Gamma Wall" not in s]
+    wall_signal  = next((s for s in r.get("signals", []) if "Gamma Wall" in s), "")
+
     emoji  = "🚀" if rating >= 4 else "⚡"
     dline  = "🟢 BUY CALL (CE)" if direction == "CALL" else "🔴 BUY PUT (PE)"
-    opt    = f"{symbol} {strike} {'CE' if direction == 'CALL' else 'PE'}"
     stars  = _STARS.get(rating, "★★★")
 
     lines = [
@@ -159,15 +184,31 @@ def _fmt_alert(r: dict) -> tuple[str, str]:
             f"R:R    : {tgt.get('rr', 0):.1f}x",
         ]
 
-    if signals:
+    # ── Futures buildup + GEX block ──────────────────────────────────────────
+    lines.append(f"")
+    if fut_sig and fut_sig != "Unknown":
+        price_chg = fut.get("price_chg", 0)
+        oi_chg    = fut.get("oi_chg", 0)
+        chg_str   = f"  Fut {fut_tag} {price_chg:+.0f}  OI {oi_chg:+,}"
+        lines.append(f"Futures: {fut_sig}{chg_str}")
+    if gex_reg and gex_reg != "Unknown":
+        wall_str = f"  Wall: {int(gex_wall):,}" if gex_wall else ""
+        lines.append(f"GEX    : {gex_emoji} {gex_reg}{wall_str}")
+        if wall_signal:
+            lines.append(f"         {wall_signal}")
+
+    # ── Why (OI / price signals only) ────────────────────────────────────────
+    if core_signals:
         lines.append(f"")
         lines.append(f"Why:")
-        for s in signals[:4]:
+        for s in core_signals[:5]:
             lines.append(f"  - {s}")
 
     lines += ["", "Verify before executing. Not financial advice."]
 
-    title = f"Agent Flow: {direction} {symbol} {strike} | {stars}"
+    # Title includes GEX tag so it's visible in notification preview
+    gex_title = f" | {gex_emoji}{gex_reg[:3]}" if gex_reg and gex_reg != "Unknown" else ""
+    title = f"Agent Flow: {direction} {symbol} {strike} | {stars}{gex_title}"
     return title, "\n".join(lines)
 
 
