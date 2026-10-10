@@ -18,6 +18,93 @@ import pandas as pd
 import requests
 
 _IST       = datetime.timezone(datetime.timedelta(hours=5, minutes=30))
+
+# ── GEX helpers ───────────────────────────────────────────────────────────────
+
+_GEX_SYMBOLS = {"NIFTY", "BANKNIFTY", "SENSEX"}   # only indices have liquid option chains
+
+
+def _gex_norm_pdf(x: float) -> float:
+    return float(np.exp(-0.5 * x * x) / np.sqrt(2.0 * np.pi))
+
+
+def _gex_bs_gamma(S: float, K: float, T: float, sigma: float) -> float:
+    if T <= 0 or sigma <= 0 or S <= 0 or K <= 0:
+        return 0.0
+    r = 0.065
+    try:
+        d1 = (np.log(S / K) + (r + 0.5 * sigma ** 2) * T) / (sigma * np.sqrt(T))
+        return _gex_norm_pdf(float(d1)) / (S * sigma * np.sqrt(T))
+    except Exception:
+        return 0.0
+
+
+def _fetch_index_gex(symbol: str, spot: float,
+                     api_key: str, access_token: str) -> dict:
+    """
+    Fetch option chain + compute GEX for index symbols (NIFTY/BANKNIFTY/SENSEX).
+    Returns {} silently on any failure so chart analysis still works.
+    """
+    if symbol not in _GEX_SYMBOLS or not (api_key and access_token):
+        return {}
+    try:
+        from screener.option_chain import fetch_option_chain, get_expiries, parse_chain
+        raw      = fetch_option_chain(symbol, api_key=api_key, access_token=access_token)
+        expiries = get_expiries(raw)
+        if not expiries:
+            return {}
+        expiry       = expiries[0]
+        df_chain, _ = parse_chain(raw, expiry)
+        if df_chain.empty:
+            return {}
+
+        # VIX as flat IV proxy
+        try:
+            from screener.kite_data import fetch_ohlcv as _ko
+            vix_df = _ko("INDIAVIX", interval="day", days=3)
+            vix    = float(vix_df["Close"].dropna().iloc[-1]) if not vix_df.empty else 14.5
+        except Exception:
+            vix = 14.5
+
+        try:
+            exp_dt = datetime.datetime.strptime(expiry, "%d-%b-%Y").date()
+            dte    = max((exp_dt - datetime.date.today()).days, 0)
+        except Exception:
+            dte = 7
+        T       = max(dte / 365.0, 1.0 / 365.0)
+        base_iv = max(vix / 100.0, 0.08)
+
+        rows = []
+        for _, row in df_chain.iterrows():
+            K         = float(row["Strike"])
+            ce_oi     = int(row.get("CE OI", 0))
+            pe_oi     = int(row.get("PE OI", 0))
+            moneyness = abs(K / spot - 1.0)
+            iv        = max(float(row.get("CE IV", 0)) / 100.0,
+                            float(row.get("PE IV", 0)) / 100.0,
+                            base_iv + moneyness * 1.5)
+            gamma     = _gex_bs_gamma(spot, K, T, iv)
+            rows.append({"strike": K,
+                         "net_gex": gamma * ce_oi * spot - gamma * pe_oi * spot})
+
+        if not rows:
+            return {}
+        df_gex     = pd.DataFrame(rows)
+        net_gex    = float(df_gex["net_gex"].sum())
+        wall_idx   = df_gex["net_gex"].abs().idxmax()
+        gamma_wall = float(df_gex.loc[wall_idx, "strike"])
+        regime     = "Positive" if net_gex >= 0 else "Negative"
+        wall_pct   = (gamma_wall - spot) / spot * 100
+
+        return {
+            "regime":     regime,
+            "net_gex":    round(net_gex, 2),
+            "gamma_wall": gamma_wall,
+            "wall_pct":   wall_pct,
+            "expiry":     expiry,
+        }
+    except Exception:
+        return {}
 _KITE_BASE = "https://api.kite.trade"
 
 # Hardcoded spot index tokens (no instruments lookup needed)
@@ -455,7 +542,8 @@ def build_summary(df: pd.DataFrame, events: list) -> dict:
 # ── Trade Verdict ─────────────────────────────────────────────────────────────
 
 def generate_verdict(df: pd.DataFrame, events: list, obs: list,
-                     fvgs: list, summary: dict, cpr: dict | None = None) -> dict:
+                     fvgs: list, summary: dict, cpr: dict | None = None,
+                     gex: dict | None = None) -> dict:
     last   = df.iloc[-1]
     close  = float(last["Close"])
     ema20  = float(last.get("EMA20",  0) or 0)
@@ -567,6 +655,34 @@ def generate_verdict(df: pd.DataFrame, events: list, obs: list,
             reasons.append({"text": f"Below CPR ({_bc:,.0f}–{_tc:,.0f}) — bearish day bias", "ok": False})
         else:
             reasons.append({"text": f"Inside CPR ({_bc:,.0f}–{_tc:,.0f}) — choppy/indecision", "ok": None})
+
+    # GEX regime + gamma wall
+    if gex and gex.get("regime"):
+        regime     = gex["regime"]
+        gamma_wall = gex.get("gamma_wall", 0)
+        wall_pct   = gex.get("wall_pct", 0)
+        if regime == "Negative":
+            # Amplifying environment: dealers chase moves → boost leading direction
+            if score > 0:
+                score += 1
+                reasons.append({"text": "Negative GEX — trending environment amplifies the upside", "ok": True})
+            elif score < 0:
+                score -= 1
+                reasons.append({"text": "Negative GEX — trending environment amplifies the downside", "ok": False})
+            else:
+                reasons.append({"text": "Negative GEX — volatile/trending, wait for direction", "ok": None})
+        else:
+            reasons.append({"text": "Positive GEX — dealers pin price, expect mean-reversion/range", "ok": None})
+
+        if gamma_wall > 0:
+            if wall_pct > 0.5:
+                score -= 1
+                reasons.append({"text": f"Gamma Wall {int(gamma_wall):,} above price — dealer resistance", "ok": False})
+            elif wall_pct < -0.5:
+                score += 1
+                reasons.append({"text": f"Gamma Wall {int(gamma_wall):,} below price — dealer support", "ok": True})
+            else:
+                reasons.append({"text": f"Gamma Wall {int(gamma_wall):,} — ATM pin zone", "ok": None})
 
     # Verdict
     if score >= 5:
@@ -738,11 +854,15 @@ def analyze_chart(symbol: str, interval: str,
     df       = generate_signals(df, obs, evts)
     summary  = build_summary(df, evts)
     cpr      = compute_cpr(df, interval)
-    verdict  = generate_verdict(df, evts, obs, fvgs, summary, cpr=cpr)
+
+    spot = float(df["Close"].iloc[-1])
+    gex  = _fetch_index_gex(display_name, spot, api_key, access_token)
+
+    verdict  = generate_verdict(df, evts, obs, fvgs, summary, cpr=cpr, gex=gex)
 
     return {
         "df": df, "events": evts, "obs": obs, "fvgs": fvgs,
         "summary": summary, "verdict": verdict, "cpr": cpr,
-        "symbol": display_name, "interval": interval,
+        "gex": gex, "symbol": display_name, "interval": interval,
         "error": None,
     }
