@@ -6,11 +6,13 @@ a high-probability CALL / PUT buying recommendation, or NO TRADE.
 """
 
 import datetime
+import io
 from typing import Optional
 
 import numpy as np
 import pandas as pd
-from screener.kite_data import fetch_ohlcv as _kite_ohlcv
+import requests
+from screener.kite_data import _KITE_BASE, _hdrs, fetch_ohlcv as _kite_ohlcv
 from screener.option_chain import (
     fetch_option_chain, get_expiries, parse_chain,
     atm_strike, calc_pcr, calc_max_pain,
@@ -19,6 +21,13 @@ from screener.option_chain import (
 _IST = datetime.timezone(datetime.timedelta(hours=5, minutes=30))
 
 INSTRUMENTS = ["NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX"]
+
+_FUT_EXCHANGE = {
+    "NIFTY": "NFO", "BANKNIFTY": "NFO", "FINNIFTY": "NFO",
+    "MIDCPNIFTY": "NFO", "SENSEX": "BFO",
+}
+_FUT_INSTR_CACHE: dict = {}
+_FUT_INSTR_TTL = 3600
 
 
 # ── Data helpers ──────────────────────────────────────────────────────────────
@@ -52,6 +61,120 @@ def _vwap(df: pd.DataFrame) -> float:
         return 0.0
     tp = (df["High"] + df["Low"] + df["Close"]) / 3
     return float((tp * df["Volume"]).sum() / df["Volume"].sum())
+
+
+# ── Futures instruments + 5m candles ─────────────────────────────────────────
+
+def _load_fut_instruments(exchange: str) -> pd.DataFrame:
+    now = datetime.datetime.now(_IST).timestamp()
+    cached = _FUT_INSTR_CACHE.get(exchange, {})
+    if cached.get("ts", 0) + _FUT_INSTR_TTL > now:
+        return cached["df"]
+    try:
+        r = requests.get(
+            f"{_KITE_BASE}/instruments/{exchange}",
+            headers=_hdrs(),
+            timeout=30,
+        )
+        if not r.ok:
+            return cached.get("df", pd.DataFrame())
+        df = pd.read_csv(io.StringIO(r.text))
+        _FUT_INSTR_CACHE[exchange] = {"df": df, "ts": now}
+        return df
+    except Exception:
+        return cached.get("df", pd.DataFrame())
+
+
+def _fetch_fut_5m(token: int) -> pd.DataFrame:
+    to_d = datetime.date.today()
+    fr_d = to_d - datetime.timedelta(days=3)
+    try:
+        r = requests.get(
+            f"{_KITE_BASE}/instruments/historical/{token}/5minute",
+            headers=_hdrs(),
+            params={
+                "from": fr_d.strftime("%Y-%m-%d %H:%M:%S"),
+                "to":   to_d.strftime("%Y-%m-%d %H:%M:%S"),
+                "oi":   "1",
+            },
+            timeout=30,
+        )
+        if not r.ok:
+            return pd.DataFrame()
+        candles = r.json().get("data", {}).get("candles", [])
+        if not candles:
+            return pd.DataFrame()
+    except Exception:
+        return pd.DataFrame()
+
+    rows = [c[:7] if len(c) >= 7 else c[:6] + [0] for c in candles]
+    df = pd.DataFrame(rows, columns=["datetime", "Open", "High", "Low", "Close", "Volume", "OI"])
+    df["datetime"] = pd.to_datetime(df["datetime"])
+    df = df.set_index("datetime").sort_index()
+    for col in ["Open", "High", "Low", "Close", "Volume", "OI"]:
+        df[col] = pd.to_numeric(df[col], errors="coerce")
+    return df.dropna(subset=["Close"])
+
+
+def _futures_buildup(symbol: str) -> dict:
+    """
+    4-quadrant futures OI analysis:
+      Price UP  + OI UP   → Long Buildup   (fresh longs — strong bullish)
+      Price UP  + OI DOWN → Short Covering (shorts exiting — weak bullish)
+      Price DOWN + OI UP  → Short Buildup  (fresh shorts — strong bearish)
+      Price DOWN + OI DOWN→ Long Unwinding (longs exiting — weak bearish)
+    """
+    exchange = _FUT_EXCHANGE.get(symbol, "NFO")
+    df_instr = _load_fut_instruments(exchange)
+    if df_instr.empty:
+        return {"signal": "Unknown"}
+
+    try:
+        df_instr["expiry_dt"] = pd.to_datetime(df_instr["expiry"]).dt.date
+        today = datetime.date.today()
+        futs = df_instr[
+            (df_instr["name"].str.strip().str.upper() == symbol.upper()) &
+            (df_instr["instrument_type"] == "FUT") &
+            (df_instr["expiry_dt"] >= today)
+        ]
+        if futs.empty:
+            return {"signal": "Unknown"}
+        near = futs.sort_values("expiry_dt").iloc[0]
+        token = int(near["instrument_token"])
+    except Exception:
+        return {"signal": "Unknown"}
+
+    df = _fetch_fut_5m(token)
+    if df is None or len(df) < 3:
+        return {"signal": "Unknown"}
+
+    curr_oi   = float(df["OI"].iloc[-1])
+    prev_oi   = float(df["OI"].iloc[-2])
+    curr_close = float(df["Close"].iloc[-1])
+    prev_close = float(df["Close"].iloc[-2])
+
+    # If OI data absent, fall back to price-only signals
+    if curr_oi == 0 and prev_oi == 0:
+        return {"signal": "Unknown", "fut_price": round(curr_close, 2)}
+
+    price_up = curr_close > prev_close
+    oi_up    = curr_oi    > prev_oi
+
+    if price_up and oi_up:
+        signal = "Long Buildup"
+    elif price_up and not oi_up:
+        signal = "Short Covering"
+    elif not price_up and oi_up:
+        signal = "Short Buildup"
+    else:
+        signal = "Long Unwinding"
+
+    return {
+        "signal":     signal,
+        "fut_price":  round(curr_close, 2),
+        "price_chg":  round(curr_close - prev_close, 2),
+        "oi_chg":     int(curr_oi - prev_oi),
+    }
 
 
 # ── Market structure ──────────────────────────────────────────────────────────
@@ -134,7 +257,8 @@ def _oi_analysis(df_chain: pd.DataFrame, spot: float) -> dict:
 # ── Bias engine ───────────────────────────────────────────────────────────────
 
 def _market_bias(trend: str, oi: dict, spot: float,
-                 vwap: float, ema20: float, ema50: float, vix: float) -> dict:
+                 vwap: float, ema20: float, ema50: float, vix: float,
+                 fut_buildup: str = "Unknown") -> dict:
     bull, bear = 0, 0
 
     # Trend weight 25
@@ -160,6 +284,12 @@ def _market_bias(trend: str, oi: dict, spot: float,
     pcr = oi.get("pcr", 1.0)
     if pcr > 1.2:    bull += 10
     elif pcr < 0.8:  bear += 10
+
+    # Futures OI buildup weight 15 (strong) / 7 (weak)
+    if fut_buildup == "Long Buildup":    bull += 15
+    elif fut_buildup == "Short Covering": bull += 7
+    elif fut_buildup == "Short Buildup":  bear += 15
+    elif fut_buildup == "Long Unwinding": bear += 7
 
     # VIX penalty (uncertain market)
     if vix > 20:
@@ -323,8 +453,14 @@ def run_agent_analysis(symbol: str, api_key: str, access_token: str) -> dict:
     # 3. OI analysis
     oi = _oi_analysis(df_chain, spot)
 
-    # 4. Bias
-    bias_r = _market_bias(trend, oi, spot, vwap_v, ema20, ema50, vix)
+    # 3b. Futures OI buildup (4-quadrant)
+    fut_data   = _futures_buildup(symbol)
+    fut_signal = fut_data.get("signal", "Unknown")
+    if fut_signal not in ("Unknown",):
+        oi["signals"].append(fut_signal)
+
+    # 4. Bias (includes futures buildup weight)
+    bias_r = _market_bias(trend, oi, spot, vwap_v, ema20, ema50, vix, fut_signal)
     bias, conf = bias_r["bias"], bias_r["confidence"]
 
     common = {**base,
@@ -332,7 +468,8 @@ def run_agent_analysis(symbol: str, api_key: str, access_token: str) -> dict:
               "spot": spot, "vwap": vwap_v, "ema20": ema20, "ema50": ema50,
               "vix": vix, "trend": trend, "expiry": expiry,
               "oi": oi, "df_chain": df_chain,
-              "support": oi["support"], "resistance": oi["resistance"]}
+              "support": oi["support"], "resistance": oi["resistance"],
+              "fut_buildup": fut_data}
 
     # 5. Direction
     if bias in ("Strong Bullish", "Moderately Bullish"):
