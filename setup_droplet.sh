@@ -13,7 +13,7 @@ if free | grep -q "^Swap:.*0.*0.*0"; then
     fi
     chmod 600 /swapfile
     blkid /swapfile | grep -q swap || mkswap /swapfile
-    swapon /swapfile
+    swapon /swapfile 2>/dev/null || true
     grep -q swapfile /etc/fstab || echo '/swapfile none swap sw 0 0' >> /etc/fstab
     echo "Swap created."
 else
@@ -23,7 +23,7 @@ free -h
 
 echo ""
 echo "=== 2. GIT PULL ==="
-git pull origin claude/sensex-option-moves-analysis-ma3tr7 || git pull
+git pull origin claude/sensex-option-moves-analysis-ma3tr7 2>/dev/null || git pull 2>/dev/null || echo "  (git pull skipped — already up to date or no network)"
 
 echo ""
 echo "=== 3. VERIFY KITE TOKEN ==="
