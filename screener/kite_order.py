@@ -624,10 +624,16 @@ def place_rsi_scalp_order(
     }
 
 
-def exit_orphan_mis_positions(api_key: str, access_token: str) -> list:
-    """Exit any open MIS NIFTY/SENSEX positions left from a previous crashed run.
+def exit_orphan_mis_positions(
+    api_key: str,
+    access_token: str,
+    known_ts: set | None = None,
+) -> list:
+    """Exit open MIS positions left from a previous crashed run.
 
-    Called at worker startup so stale positions don't survive a restart.
+    known_ts: set of tradingsymbols the bot placed. When provided, only those
+    contracts are exited — manual positions are never touched. Pass None to
+    exit all (legacy behaviour, not recommended).
     """
     kite   = _kite_client(api_key, access_token)
     exited = []
@@ -641,6 +647,9 @@ def exit_orphan_mis_positions(api_key: str, access_token: str) -> list:
         qty     = int(pos.get("quantity", 0))
         product = pos.get("product", "")
         if qty <= 0 or product != "MIS":
+            continue
+        # Only exit positions the bot placed — never touch manual positions
+        if known_ts is not None and ts not in known_ts:
             continue
         for symbol, exchange in _EXCHANGE.items():
             if ts.startswith(symbol):
