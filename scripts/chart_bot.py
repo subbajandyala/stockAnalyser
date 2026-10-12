@@ -34,8 +34,13 @@ sys.path.insert(0, str(pathlib.Path(__file__).parent.parent))
 
 import requests
 
+from kiteconnect import KiteConnect
+
 from screener.chart_analysis import analyze_chart
-from screener.kite_order import place_order_for_signal as _place_order
+from screener.kite_order import (
+    has_open_position,
+    place_order_for_signal as _place_order,
+)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -260,6 +265,95 @@ def _save_state(path: str, state: dict) -> None:
     pathlib.Path(path).write_text(json.dumps(state, indent=2))
 
 
+# ── Position monitor ─────────────────────────────────────────────────────────
+
+def _monitor_positions(
+    symbols: list[str],
+    state: dict,
+    api_key: str,
+    access_token: str,
+    ntfy_topic: str,
+    now_ist: datetime.datetime,
+) -> None:
+    """Check every symbol that has a recorded trade today.
+
+    For each open-trade state key:
+    - If the Kite position is gone (GTT hit SL or Target) → clear the trade_key
+      so the next strong signal can re-enter.
+    - If the position is still open AND the current 15m signal has reversed →
+      send an ntfy alert prompting the user to review the position.
+    """
+    today = now_ist.strftime("%Y%m%d")
+
+    kite = KiteConnect(api_key=api_key)
+    kite.set_access_token(access_token)
+
+    for symbol in symbols:
+        trade_key = f"{today}:{symbol}:trade"
+        order_id  = state.get(trade_key)
+        if not order_id:
+            continue  # no recorded trade for this symbol today
+
+        # Look up original direction from the alerted state key
+        # state[symbol] = "YYYYMMDD:symbol:direction:verdict"
+        state_val = state.get(symbol, "")
+        parts = state_val.split(":")
+        recorded_direction = parts[2] if len(parts) >= 4 else None
+
+        position_open = has_open_position(kite, symbol)
+
+        if not position_open:
+            print(f"  [MONITOR] {symbol}: position closed (GTT hit) — re-entry unlocked")
+            del state[trade_key]
+            if ntfy_topic:
+                send_ntfy(
+                    f"Chart Bot: {symbol} position closed",
+                    (
+                        f"The GTT was triggered (SL or Target hit).\n"
+                        f"Re-entry unlocked — bot will enter again on the next strong signal."
+                    ),
+                    ntfy_topic,
+                    priority="default",
+                )
+            continue
+
+        # Position still open — check if 15m signal has reversed
+        if not recorded_direction:
+            continue
+        try:
+            p_res = analyze_chart(symbol, PRIMARY_TF, api_key, access_token)
+        except Exception as e:
+            print(f"  [MONITOR] {symbol}: chart fetch failed — {e}")
+            continue
+
+        if p_res.get("error"):
+            continue
+
+        current_verdict   = p_res["verdict"]["verdict"]
+        current_direction = _verdict_direction(current_verdict)
+        current_score     = p_res["verdict"]["score"]
+
+        if current_direction == "WAIT":
+            continue
+
+        if current_direction != recorded_direction:
+            print(
+                f"  [MONITOR] {symbol}: SIGNAL REVERSED — was {recorded_direction}, "
+                f"now {current_verdict} ({current_score:+d}) — alerting"
+            )
+            if ntfy_topic:
+                send_ntfy(
+                    f"⚠️ Chart Bot: {symbol} signal REVERSED",
+                    (
+                        f"You have an open {recorded_direction} position.\n"
+                        f"15m chart now shows: {current_verdict} ({current_score:+d})\n\n"
+                        f"Consider reviewing / exiting your position."
+                    ),
+                    ntfy_topic,
+                    priority="urgent",
+                )
+
+
 # ── Single scan ───────────────────────────────────────────────────────────────
 
 def scan_once(symbols: list[str], state_file: str) -> None:
@@ -278,6 +372,10 @@ def scan_once(symbols: list[str], state_file: str) -> None:
         return
 
     state = _load_state(state_file)
+
+    # Monitor existing open positions before scanning for new signals
+    _monitor_positions(symbols, state, api_key, access_token, ntfy_topic, now_ist)
+    _save_state(state_file, state)  # persist any GTT-hit clearances immediately
 
     for symbol in symbols:
         try:
