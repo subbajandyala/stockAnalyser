@@ -94,11 +94,20 @@ def _ntfy_topic() -> str:
             if src.exists():
                 try:
                     if src.suffix == ".json":
-                        t = json.loads(src.read_text()).get("rsi_scalp_ntfy_topic", "")
+                        c = json.loads(src.read_text())
+                        t = c.get("rsi_scalp_ntfy_topic", "") or c.get("ntfy_agent_topic", "")
                     else:
                         for line in src.read_text().splitlines():
-                            if "RSI_SCALP_NTFY_TOPIC" in line and "=" in line:
-                                t = line.split("=", 1)[1].strip().strip('"').strip("'")
+                            line = line.strip()
+                            if not line or line.startswith("#") or "=" not in line:
+                                continue
+                            k, v = line.split("=", 1)
+                            k = k.strip(); v = v.strip().strip('"').strip("'")
+                            if k == "RSI_SCALP_NTFY_TOPIC":
+                                t = v
+                                break
+                            if k == "NTFY_TOPIC" and not t:
+                                t = v  # use shared topic as fallback
                 except Exception:
                     pass
             if t:
@@ -199,12 +208,12 @@ def _should_alert(key: str, current_rsi: float, state: dict) -> bool:
     prev      = state.get(key, {})
     now_above = current_rsi >= RSI_THRESHOLD
 
-    # New day or first time seeing this key — update state, fire only on fresh crossover
+    # New day — reset state and fire if RSI already above 70 at market open
+    # Same-day restarts are safe because disk-persisted state has date==today
+    # so they fall through to the else branch below (no re-fire on restart)
     if prev.get("date") != today:
-        state[key] = {**state.get(key, {}), "above_70": now_above, "date": today}
-        # Only fire if RSI is crossing up right now, not if it was already above
-        # (prevents re-firing when bot restarts mid-day with RSI already above 70)
-        return now_above and not prev.get("above_70", False)
+        state[key] = {"above_70": now_above, "date": today}
+        return now_above
 
     was_above = prev.get("above_70", False)
     state[key] = {**prev, "above_70": now_above}
