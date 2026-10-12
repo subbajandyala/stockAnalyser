@@ -294,17 +294,21 @@ def _monitor_positions(
         if not order_id:
             continue  # no recorded trade for this symbol today
 
+        # Use the exact contract the bot placed — never touch manual positions
+        bot_ts = state.get(f"{trade_key}:ts")  # e.g. "NIFTY2541524950CE"
+
         # Look up original direction from the alerted state key
         # state[symbol] = "YYYYMMDD:symbol:direction:verdict"
         state_val = state.get(symbol, "")
         parts = state_val.split(":")
         recorded_direction = parts[2] if len(parts) >= 4 else None
 
-        position_open = has_open_position(kite, symbol)
+        position_open = has_open_position(kite, symbol, only_ts=bot_ts)
 
         if not position_open:
             print(f"  [MONITOR] {symbol}: position closed (GTT hit) — re-entry unlocked")
             del state[trade_key]
+            state.pop(f"{trade_key}:ts", None)
             if ntfy_topic:
                 send_ntfy(
                     f"Chart Bot: {symbol} position closed",
@@ -487,6 +491,7 @@ def scan_once(symbols: list[str], state_file: str) -> None:
                         ntfy_topic,
                     )
                 state[trade_key] = trade["order_id"]
+                state[f"{trade_key}:ts"] = trade["tradingsymbol"]
 
         state[symbol] = state_key  # mark as alerted (date-prefixed)
 
