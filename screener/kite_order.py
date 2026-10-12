@@ -201,17 +201,26 @@ def _fill_price(kite: KiteConnect, order_id: str, exchange: str, ts: str) -> flo
 
 # ── Public API ───────────────────────────────────────────────────────────────
 
-def has_open_position(kite: KiteConnect, symbol: str, only_ts: str | None = None) -> bool:
-    """True if the bot's option position for this symbol is non-zero.
+def has_open_position(
+    kite: KiteConnect,
+    symbol: str,
+    only_ts: str | None = None,
+    product: str | None = None,
+) -> bool:
+    """True if an option position for this symbol is non-zero.
 
-    If only_ts is given, checks only that specific tradingsymbol (the contract
-    the bot placed). Otherwise falls back to any position starting with symbol.
+    only_ts:  when set, checks only that exact contract (e.g. NIFTY2541524950CE)
+    product:  when set, checks only that product type ("NRML" or "MIS")
+              — use this to keep chart_bot (NRML) and RSI scalp (MIS) independent
     """
     try:
         for pos in kite.positions().get("net", []):
-            ts  = pos.get("tradingsymbol", "")
-            qty = int(pos.get("quantity", 0))
+            ts      = pos.get("tradingsymbol", "")
+            qty     = int(pos.get("quantity", 0))
+            prod    = pos.get("product", "")
             if qty == 0:
+                continue
+            if product and prod != product:
                 continue
             if only_ts:
                 if ts == only_ts:
@@ -352,9 +361,9 @@ def place_order_for_signal(
     kite = _kite_client(api_key, access_token)
 
     with _order_lock():
-        # 1. Existing position guard
-        if has_open_position(kite, symbol):
-            return {"error": f"Open {symbol} position already exists — skipping"}
+        # 1. Existing position guard — NRML only so RSI scalp MIS positions never block us
+        if has_open_position(kite, symbol, product="NRML"):
+            return {"error": f"Open {symbol} NRML position already exists — skipping"}
 
         # 2. Resolve ATM tradingsymbol
         strike = _atm_strike(spot, symbol)
@@ -572,8 +581,9 @@ def place_rsi_scalp_order(
     kite = _kite_client(api_key, access_token)
 
     with _order_lock():
-        if has_open_position(kite, symbol):
-            return {"error": f"Open {symbol} position exists — skipping RSI scalp"}
+        # MIS only — chart_bot NRML positions never block RSI scalp and vice versa
+        if has_open_position(kite, symbol, product="MIS"):
+            return {"error": f"Open {symbol} MIS position exists — skipping RSI scalp"}
 
         strike = _atm_strike(spot, symbol)
         ts = _resolve_tradingsymbol(kite, symbol, strike, opt_type)
