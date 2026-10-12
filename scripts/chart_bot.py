@@ -28,6 +28,7 @@ import logging
 import os
 import pathlib
 import sys
+import time
 
 sys.path.insert(0, str(pathlib.Path(__file__).parent.parent))
 
@@ -392,6 +393,8 @@ if __name__ == "__main__":
     ap.add_argument("symbols", nargs="*", default=SYMBOLS)
     ap.add_argument("--once", action="store_true", help="Single scan then exit")
     ap.add_argument("--state-file", default="/tmp/chart_bot_state.json")
+    ap.add_argument("--loop",        action="store_true", help="Run as daemon, scanning every --interval seconds")
+    ap.add_argument("--interval",    type=int, default=300, help="Loop interval in seconds (default: 300)")
     ap.add_argument("--test-notify", action="store_true", help="Send test notification and exit")
     args = ap.parse_args()
 
@@ -415,6 +418,14 @@ if __name__ == "__main__":
         print(f"ntfy.sh: {'OK' if ok else 'FAILED — check NTFY_TOPIC in .env'}")
     elif args.once:
         scan_once(symbols, args.state_file)
+    elif args.loop:
+        print(f"Chart bot loop started — scanning every {args.interval}s")
+        while True:
+            try:
+                scan_once(symbols, args.state_file)
+            except Exception as e:
+                print(f"[loop] Unhandled error: {e}")
+            time.sleep(args.interval)
     else:
-        print("Use --once for cron mode, or --test-notify to verify notifications.")
+        print("Use --once for cron mode, --loop for daemon mode, or --test-notify.")
         sys.exit(1)
