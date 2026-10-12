@@ -114,11 +114,20 @@ def _ntfy_topic() -> str:
             if src.exists():
                 try:
                     if src.suffix == ".json":
-                        t = json.loads(src.read_text()).get("cpr_adx_ntfy_topic", "")
+                        c = json.loads(src.read_text())
+                        t = c.get("cpr_adx_ntfy_topic", "") or c.get("ntfy_agent_topic", "")
                     else:
                         for line in src.read_text().splitlines():
-                            if "CPR_ADX_NTFY_TOPIC" in line and "=" in line:
-                                t = line.split("=", 1)[1].strip().strip('"').strip("'")
+                            line = line.strip()
+                            if not line or line.startswith("#") or "=" not in line:
+                                continue
+                            k, v = line.split("=", 1)
+                            k = k.strip(); v = v.strip().strip('"').strip("'")
+                            if k == "CPR_ADX_NTFY_TOPIC":
+                                t = v
+                                break
+                            if k == "NTFY_TOPIC" and not t:
+                                t = v  # shared topic as fallback
                 except Exception:
                     pass
             if t:
@@ -226,8 +235,15 @@ def _should_alert(sym: str, result: dict, state: dict) -> tuple[bool, bool]:
     prev      = state.get(sym, {})
     prev_date = prev.get("date", "")
 
-    # Reset on new trading day
+    # New trading day — only alert if direction actually changed from yesterday.
+    # Carrying the same BUY/SHORT signal overnight is not worth re-alerting.
     if prev_date != today:
+        prev_dir = prev.get("direction", "WAIT")
+        if prev_dir == direction:
+            # Same signal continues from yesterday — update date silently, no alert
+            state[sym] = {"direction": direction, "strength": strength, "date": today}
+            return False, False
+        # Direction changed overnight (or no prior signal) — fire
         return True, False
 
     prev_dir      = prev.get("direction", "WAIT")
