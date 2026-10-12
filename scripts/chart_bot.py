@@ -314,16 +314,26 @@ def scan_once(symbols: list[str], state_file: str) -> None:
 
         print(f"         {CONFIRM_TF} confirm: {c_verdict} ({c_score:+d})")
 
-        # Both timeframes must agree in direction
-        if c_direction != direction:
-            print(f"         Timeframe conflict ({direction} vs {c_direction}) — skipping")
+        # 5m must NOT actively oppose the primary direction.
+        # WAIT on 5m is acceptable (consolidation before continuation).
+        # Only block when 5m gives a confirmed opposite signal (CE vs PE).
+        if c_direction != "WAIT" and c_direction != direction:
+            print(f"         Confirmed conflict ({direction} vs {c_direction}) — skipping")
             continue
 
-        # Dedup: skip if same symbol+direction+verdict already alerted this session
-        state_key = f"{symbol}:{direction}:{verdict}"
-        if state.get(symbol) == state_key:
-            print(f"         Already alerted — no change")
+        # Dedup: skip if same date+direction+verdict already alerted AND order was placed.
+        # Prefix with today's date so stale state from yesterday never blocks today.
+        today     = now_ist.strftime("%Y%m%d")
+        state_key = f"{today}:{symbol}:{direction}:{verdict}"
+        trade_key = f"{today}:{symbol}:trade"
+        already_alerted = state.get(symbol) == state_key
+        already_traded  = bool(state.get(trade_key))
+
+        if already_alerted and already_traded:
+            print(f"         Already alerted+traded today — no change")
             continue
+        elif already_alerted:
+            print(f"         Already alerted (no trade yet) — will retry order if conditions met")
 
         # Format and send notification
         title, message = _fmt_alert(symbol, p_res, c_res)
@@ -378,9 +388,9 @@ def scan_once(symbols: list[str], state_file: str) -> None:
                         ),
                         ntfy_topic,
                     )
-                state[f"{symbol}:trade"] = trade["order_id"]
+                state[trade_key] = trade["order_id"]
 
-        state[symbol] = state_key
+        state[symbol] = state_key  # mark as alerted (date-prefixed)
 
     _save_state(state_file, state)
     print("Done.")
