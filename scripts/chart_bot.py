@@ -505,7 +505,7 @@ if __name__ == "__main__":
     ap = argparse.ArgumentParser(description="Chart Analysis signal bot")
     ap.add_argument("symbols", nargs="*", default=SYMBOLS)
     ap.add_argument("--once", action="store_true", help="Single scan then exit")
-    ap.add_argument("--state-file", default="/tmp/chart_bot_state.json")
+    ap.add_argument("--state-file", default="/root/stockAnalyser/chart_bot_state.json")
     ap.add_argument("--loop",        action="store_true", help="Run as daemon, scanning every --interval seconds")
     ap.add_argument("--interval",    type=int, default=300, help="Loop interval in seconds (default: 300)")
     ap.add_argument("--test-notify", action="store_true", help="Send test notification and exit")

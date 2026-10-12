@@ -53,7 +53,7 @@ MIN_SIGNAL_SCORE  = 3         # regular signal threshold
 STRONG_SCORE      = 5         # strong / upgrade threshold
 
 _DEFAULT_NTFY_TOPIC = "marketPulse-cpr-adx-bot"
-_STATE_FILE = "/tmp/cpr_adx_bot_state.json"
+_STATE_FILE = "/root/stockAnalyser/cpr_adx_state.json"
 
 
 # ── State persistence ─────────────────────────────────────────────────────────

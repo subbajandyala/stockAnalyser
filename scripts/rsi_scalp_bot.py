@@ -50,7 +50,7 @@ SCAN_INTERVAL = 300   # 5 minutes
 RSI_THRESHOLD = 70
 INDEXES       = ["NIFTY", "SENSEX"]
 _DEFAULT_NTFY_TOPIC = "nty-revanth-subba-rsi"
-_STATE_FILE   = "/tmp/rsi_scalp_state.json"
+_STATE_FILE   = "/root/stockAnalyser/rsi_scalp_state.json"
 
 
 # ── Credentials ───────────────────────────────────────────────────────────────
