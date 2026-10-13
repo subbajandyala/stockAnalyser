@@ -117,7 +117,10 @@ def main() -> None:
         print(f"  ERROR: Unexpected 408 without code: {d1}")
         sys.exit(1)
 
-    if status1 not in (200, None):
+    # 100 = credentials accepted, 2FA required (normal intermediate state)
+    # 200 = success (no 2FA needed)
+    # anything else = real error
+    if status1 not in (100, 200, None):
         print(f"  ERROR: Login failed: {d1}")
         sys.exit(1)
 
