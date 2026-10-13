@@ -186,8 +186,6 @@ def _exchange_and_save(response_url: str, api_key: str, secret_key: str) -> None
         print(f"  ERROR: no code in responseUrl: {response_url}")
         sys.exit(1)
 
-    print(f"  DEBUG responseUrl : {response_url}")
-    print(f"  DEBUG code (raw)  : {request_token[:30]}… ({len(request_token)} chars)")
     print(f"  [3/3] Exchanging code for access token ...")
 
     try:
