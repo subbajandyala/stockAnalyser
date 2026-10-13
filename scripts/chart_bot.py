@@ -265,6 +265,30 @@ def _save_state(path: str, state: dict) -> None:
     pathlib.Path(path).write_text(json.dumps(state, indent=2))
 
 
+# ── Signal log (for EOD report) ───────────────────────────────────────────────
+
+def _chart_log_path(date_str: str) -> pathlib.Path:
+    return pathlib.Path(f"/tmp/chart_bot_log_{date_str}.json")
+
+
+def _append_chart_log(date_str: str, entry: dict) -> None:
+    path = _chart_log_path(date_str)
+    try:
+        log = json.loads(path.read_text()) if path.exists() else {"date": date_str, "signals": []}
+    except Exception:
+        log = {"date": date_str, "signals": []}
+    # Update existing entry for same symbol+time if re-processed (e.g. trade details added)
+    existing = next((s for s in log["signals"] if s.get("_key") == entry.get("_key")), None)
+    if existing:
+        existing.update(entry)
+    else:
+        log["signals"].append(entry)
+    try:
+        path.write_text(json.dumps(log, indent=2))
+    except Exception as e:
+        print(f"  [log] Failed to write chart log: {e}")
+
+
 # ── Position monitor ─────────────────────────────────────────────────────────
 
 def _monitor_positions(
@@ -447,6 +471,36 @@ def scan_once(symbols: list[str], state_file: str) -> None:
         else:
             print("  No ntfy topic configured.")
 
+        # Build log entry for EOD report
+        vdict   = p_res["verdict"]
+        targets = vdict.get("targets") or []
+        entry_z = vdict.get("entry_zone") or []
+        log_entry: dict = {
+            "_key":      f"{today}:{symbol}:{now_ist.strftime('%H%M')}",
+            "time":      now_ist.strftime("%H:%M IST"),
+            "symbol":    symbol,
+            "direction": direction,
+            "verdict":   verdict,
+            "score":     score,
+            "conf":      conf,
+            "spot":      p_res["summary"]["close"],
+            "tf_15m":    f"{verdict} ({score:+d})",
+            "tf_5m":     f"{c_verdict} ({c_score:+d})",
+            "entry_low":  round(entry_z[0], 1) if len(entry_z) >= 1 else "",
+            "entry_high": round(entry_z[1], 1) if len(entry_z) >= 2 else "",
+            "stop_loss":  vdict.get("stop_loss", ""),
+            "targets":    " / ".join(str(round(t, 1)) for t in targets),
+            "rr":         vdict.get("rr", ""),
+            "auto_trade": "off",
+            "tradingsymbol": "",
+            "strike": "",
+            "qty": "",
+            "entry_premium": "",
+            "sl_premium": "",
+            "target_premium": "",
+            "order_id": "",
+        }
+
         # Auto-execute order
         if _AUTO_TRADE and symbol in _TRADE_SYMBOLS and abs(score) >= MIN_TRADE_SCORE:
             spot      = p_res["summary"]["close"]
@@ -462,6 +516,7 @@ def scan_once(symbols: list[str], state_file: str) -> None:
             )
             if "error" in trade:
                 print(f"  [AUTO-TRADE] SKIPPED — {trade['error']}")
+                log_entry["auto_trade"] = f"skipped: {trade['error']}"
                 if ntfy_topic:
                     send_ntfy(
                         f"Chart Auto-Trade SKIPPED: {symbol}",
@@ -476,6 +531,16 @@ def scan_once(symbols: list[str], state_file: str) -> None:
                     f" | SL ₹{trade['sl']}"
                     f" | Target ₹{trade['target']}"
                 )
+                log_entry.update({
+                    "auto_trade":    "placed",
+                    "tradingsymbol": trade["tradingsymbol"],
+                    "strike":        trade.get("strike", ""),
+                    "qty":           trade.get("qty", ""),
+                    "entry_premium": trade.get("entry_price", ""),
+                    "sl_premium":    trade.get("sl", ""),
+                    "target_premium":trade.get("target", ""),
+                    "order_id":      trade.get("order_id", ""),
+                })
                 if ntfy_topic:
                     send_ntfy(
                         f"Chart ORDER PLACED: {trade['tradingsymbol']}",
@@ -492,7 +557,12 @@ def scan_once(symbols: list[str], state_file: str) -> None:
                     )
                 state[trade_key] = trade["order_id"]
                 state[f"{trade_key}:ts"] = trade["tradingsymbol"]
+        elif _AUTO_TRADE and symbol not in _TRADE_SYMBOLS:
+            log_entry["auto_trade"] = "signal only (no auto-trade for this symbol)"
+        elif _AUTO_TRADE and abs(score) < MIN_TRADE_SCORE:
+            log_entry["auto_trade"] = f"signal only (score {score:+d} < {MIN_TRADE_SCORE})"
 
+        _append_chart_log(today, log_entry)
         state[symbol] = state_key  # mark as alerted (date-prefixed)
 
     _save_state(state_file, state)

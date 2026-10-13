@@ -67,6 +67,16 @@ def _load_log(date_str: str) -> dict:
         return {"date": date_str, "signals": [], "trades": []}
 
 
+def _load_chart_log(date_str: str) -> dict:
+    p = pathlib.Path(f"/tmp/chart_bot_log_{date_str}.json")
+    if not p.exists():
+        return {"date": date_str, "signals": []}
+    try:
+        return json.loads(p.read_text())
+    except Exception:
+        return {"date": date_str, "signals": []}
+
+
 def _load_rf_log(date_str: str) -> dict:
     p = pathlib.Path(f"/tmp/rf_signal_log_{date_str}.json")
     if not p.exists():
@@ -336,15 +346,93 @@ def _write_rf_signals_sheet(ws, signals: list) -> None:
     ws.freeze_panes = "A2"
 
 
-def _build_excel(log: dict, rf_log: dict) -> bytes:
+def _write_chart_bot_sheet(ws, signals: list) -> None:
+    ws.title = "Chart Bot"
+    ws.sheet_properties.tabColor = "9C27B0"
+
+    headers = [
+        "#", "Time", "Symbol", "Direction", "Verdict", "Score", "Conf%",
+        "Spot", "15m", "5m", "Entry Low", "Entry High", "Stop Loss",
+        "Targets", "R:R", "Auto-Trade",
+        "Tradingsymbol", "Strike", "Qty", "Entry ₹", "SL ₹", "Target ₹", "Order ID",
+    ]
+    ws.append(headers)
+    for col, h in enumerate(headers, 1):
+        cell = ws.cell(1, col)
+        cell.font      = Font(bold=True, color=_WHITE, name="Calibri", size=11)
+        cell.fill      = _hdr_fill(_HEADER)
+        cell.alignment = Alignment(horizontal="center")
+        cell.border    = _thin_border()
+
+    for i, s in enumerate(signals, 1):
+        direction  = s.get("direction", "")
+        auto_trade = s.get("auto_trade", "")
+        row_data = [
+            i,
+            s.get("time", ""),
+            s.get("symbol", ""),
+            direction,
+            s.get("verdict", ""),
+            s.get("score", ""),
+            s.get("conf", ""),
+            s.get("spot", ""),
+            s.get("tf_15m", ""),
+            s.get("tf_5m", ""),
+            s.get("entry_low", ""),
+            s.get("entry_high", ""),
+            s.get("stop_loss", ""),
+            s.get("targets", ""),
+            s.get("rr", ""),
+            auto_trade,
+            s.get("tradingsymbol", ""),
+            s.get("strike", ""),
+            s.get("qty", ""),
+            s.get("entry_premium", ""),
+            s.get("sl_premium", ""),
+            s.get("target_premium", ""),
+            s.get("order_id", ""),
+        ]
+        ws.append(row_data)
+        row_num = ws.max_row
+
+        # Colour direction cell
+        dir_cell = ws.cell(row_num, 4)
+        if direction == "CE":
+            dir_cell.font = Font(color=_TEAL, bold=True, name="Calibri")
+        elif direction == "PE":
+            dir_cell.font = Font(color="FFFF6B6B", bold=True, name="Calibri")
+
+        # Colour auto-trade cell
+        at_cell = ws.cell(row_num, 16)
+        if auto_trade == "placed":
+            at_cell.fill = _hdr_fill("FF1A3A2A")
+            at_cell.font = Font(color=_TEAL, bold=True, name="Calibri")
+        elif auto_trade.startswith("skipped"):
+            at_cell.fill = _hdr_fill("FF3A1A1A")
+            at_cell.font = Font(color="FFFF6B6B", bold=True, name="Calibri")
+
+        for col in range(1, len(headers) + 1):
+            ws.cell(row_num, col).border    = _thin_border()
+            ws.cell(row_num, col).alignment = Alignment(horizontal="center")
+
+    for col_cells in ws.columns:
+        length = max(len(str(c.value or "")) for c in col_cells) + 4
+        ws.column_dimensions[get_column_letter(col_cells[0].column)].width = length
+
+    ws.freeze_panes = "A2"
+
+
+def _build_excel(log: dict, rf_log: dict, chart_log: dict) -> bytes:
     wb = openpyxl.Workbook()
     wb.remove(wb.active)
 
+    ws_chart       = wb.create_sheet("Chart Bot")
     ws_trades      = wb.create_sheet("Trades")
     ws_kite        = wb.create_sheet("Kite Signals")
     ws_all_signals = wb.create_sheet("All Signals")
     ws_rf          = wb.create_sheet("Red Flag Signals")
 
+    _write_chart_bot_sheet(ws_chart, chart_log.get("signals", []))
     total_pnl = _write_trades_sheet(ws_trades, log.get("trades", []))
     _write_kite_signals_sheet(ws_kite, log.get("kite_signals", []))
     _write_signals_sheet(ws_all_signals, log.get("signals", []), log["date"])
@@ -417,11 +505,13 @@ if __name__ == "__main__":
     access_token = creds["access_token"]
     topic        = _eod_topic()
 
-    log    = _load_log(date_str)
-    rf_log = _load_rf_log(date_str)
-    print(f"  Signals     : {len(log['signals'])}")
-    print(f"  Trades      : {len(log['trades'])}")
-    print(f"  RF Signals  : {len(rf_log['signals'])}")
+    log       = _load_log(date_str)
+    rf_log    = _load_rf_log(date_str)
+    chart_log = _load_chart_log(date_str)
+    print(f"  Chart signals: {len(chart_log['signals'])}")
+    print(f"  Signals      : {len(log['signals'])}")
+    print(f"  Trades       : {len(log['trades'])}")
+    print(f"  RF Signals   : {len(rf_log['signals'])}")
 
     if api_key and access_token:
         print("  Fetching final premiums for open trades...")
@@ -430,7 +520,7 @@ if __name__ == "__main__":
         print("  No Kite creds — open trades will show no exit premium")
 
     print("  Building Excel...")
-    excel_bytes, total_pnl = _build_excel(log, rf_log)
+    excel_bytes, total_pnl = _build_excel(log, rf_log, chart_log)
 
     sign = "+" if total_pnl >= 0 else ""
     print(f"  Total P&L: {sign}₹{total_pnl:,.0f}")
