@@ -204,20 +204,28 @@ def _exchange_and_save(response_url: str, api_key: str, secret_key: str) -> None
         print(f"  ERROR: Token exchange — {e}")
         sys.exit(1)
 
+    # Response may be flat {accessToken:...} or nested {data: {token:...}}
+    _data = token_data.get("data") or token_data
     access_token = (
-        token_data.get("accessToken")
+        _data.get("accessToken")
+        or _data.get("access_token")
+        or _data.get("AccessToken")
+        or _data.get("token")
+        or token_data.get("accessToken")
         or token_data.get("access_token")
         or token_data.get("AccessToken")
         or ""
     )
     customer_id = (
-        token_data.get("customerId")
-        or token_data.get("customer_id")
+        _data.get("customerId")
+        or _data.get("customer_id")
+        or token_data.get("customerId")
         or ""
     )
     login_id_resp = (
-        token_data.get("loginId")
-        or token_data.get("login_id")
+        _data.get("loginId")
+        or _data.get("login_id")
+        or token_data.get("loginId")
         or ""
     )
 
