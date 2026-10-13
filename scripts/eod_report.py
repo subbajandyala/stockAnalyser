@@ -176,6 +176,13 @@ def _close_at(candles: list, target_dt: datetime.datetime) -> float | None:
     return None
 
 
+def _eod_close(candles: list) -> float | None:
+    """Return the last candle close (end-of-day price)."""
+    if not candles:
+        return None
+    return float(candles[-1]["close"])
+
+
 def _build_perf_rows(
     chart_log: dict,
     cpr_adx_log: dict,
@@ -214,29 +221,39 @@ def _build_perf_rows(
             target_dt = base.replace(hour=h, minute=m) + datetime.timedelta(minutes=15)
             candles   = _fetch_candles(kite, symbol, date_str)
             p15       = _close_at(candles, target_dt)
-            if p15 is not None:
-                chg_pts = round(p15 - spot, 2)
-                chg_pct = round(chg_pts / spot * 100, 2) if spot else 0
-                dir_up  = direction in ("CE", "CALL", "BUY")
-                if chg_pts == 0:
-                    correct = "→"
-                elif (dir_up and chg_pts > 0) or (not dir_up and chg_pts < 0):
-                    correct = "✓"
+            peod      = _eod_close(candles)
+            dir_up    = direction in ("CE", "CALL", "BUY")
+
+            def _outcome(ref_price):
+                if ref_price is None:
+                    return "", "", "—"
+                chg  = round(ref_price - spot, 2)
+                pct  = round(chg / spot * 100, 2) if spot else 0
+                if chg == 0:
+                    ok = "→"
+                elif (dir_up and chg > 0) or (not dir_up and chg < 0):
+                    ok = "✓"
                 else:
-                    correct = "✗"
-            else:
-                chg_pts = chg_pct = ""
-                correct = "—"
+                    ok = "✗"
+                return chg, pct, ok
+
+            chg_pts, chg_pct, correct      = _outcome(p15)
+            eod_pts, eod_pct, eod_correct  = _outcome(peod)
+
             rows.append({
-                "source":    source,
-                "time":      time_str,
-                "symbol":    symbol,
-                "direction": direction,
-                "spot":      spot,
-                "price_15m": round(p15, 2) if p15 is not None else "—",
-                "chg_pts":   chg_pts,
-                "chg_pct":   chg_pct,
-                "correct":   correct,
+                "source":      source,
+                "time":        time_str,
+                "symbol":      symbol,
+                "direction":   direction,
+                "spot":        spot,
+                "price_15m":   round(p15,  2) if p15  is not None else "—",
+                "chg_pts":     chg_pts,
+                "chg_pct":     chg_pct,
+                "correct":     correct,
+                "price_eod":   round(peod, 2) if peod is not None else "—",
+                "eod_pts":     eod_pts,
+                "eod_pct":     eod_pct,
+                "eod_correct": eod_correct,
             })
 
     _process(chart_log.get("signals", []),      "Chart Bot",  "symbol", "spot",  "direction")
@@ -762,26 +779,51 @@ def _write_performance_sheet(ws, rows: list) -> None:
     ws.sheet_properties.tabColor = "4CAF50"
 
     headers = [
-        "#", "Source", "Time", "Symbol", "Direction",
-        "Spot @ Signal", "Spot +15min", "Chg Pts", "Chg %", "Correct?",
+        "#", "Source", "Time", "Symbol", "Direction", "Spot @ Signal",
+        # 15-min block
+        "Spot +15min", "+15m Pts", "+15m %", "+15m ✓?",
+        # EOD block
+        "Spot EOD", "EOD Pts", "EOD %", "EOD ✓?",
     ]
     ws.append(headers)
+    # Colour the two performance-block header groups distinctly
+    _15M_FILL  = "FF1A3A5A"   # dark blue tint for +15m columns
+    _EOD_FILL  = "FF2A1A4A"   # dark purple tint for EOD columns
     for col, h in enumerate(headers, 1):
         cell = ws.cell(1, col)
         cell.font      = Font(bold=True, color=_WHITE, name="Calibri", size=11)
-        cell.fill      = _hdr_fill(_HEADER)
+        cell.fill      = _hdr_fill(_15M_FILL if 7 <= col <= 10 else (_EOD_FILL if col >= 11 else _HEADER))
         cell.alignment = Alignment(horizontal="center")
         cell.border    = _thin_border()
 
-    correct_count = wrong_count = 0
+    correct_15m = wrong_15m = correct_eod = wrong_eod = 0
+
+    def _color_outcome(ws, row_num, pct_col, cor_col, pct_val, correct, c_counter, w_counter):
+        if pct_val != "":
+            try:
+                ws.cell(row_num, pct_col).font = Font(
+                    color=(_TEAL if float(pct_val) > 0 else "FFFF6B6B"),
+                    bold=True, name="Calibri",
+                )
+            except Exception:
+                pass
+        cor_cell = ws.cell(row_num, cor_col)
+        if correct == "✓":
+            cor_cell.fill = _hdr_fill("FF1A3A2A")
+            cor_cell.font = Font(color=_TEAL, bold=True, name="Calibri")
+            c_counter += 1
+        elif correct == "✗":
+            cor_cell.fill = _hdr_fill("FF3A1A1A")
+            cor_cell.font = Font(color="FFFF6B6B", bold=True, name="Calibri")
+            w_counter += 1
+        return c_counter, w_counter
+
     for i, r in enumerate(rows, 1):
         direction = r["direction"]
-        chg_pts   = r["chg_pts"]
-        chg_pct   = r["chg_pct"]
-        correct   = r["correct"]
         ws.append([
-            i, r["source"], r["time"], r["symbol"], direction,
-            r["spot"], r["price_15m"], chg_pts, chg_pct, correct,
+            i, r["source"], r["time"], r["symbol"], direction, r["spot"],
+            r["price_15m"], r["chg_pts"], r["chg_pct"], r["correct"],
+            r["price_eod"], r["eod_pts"], r["eod_pct"], r["eod_correct"],
         ])
         row_num = ws.max_row
 
@@ -791,25 +833,12 @@ def _write_performance_sheet(ws, rows: list) -> None:
         elif direction in ("PE", "PUT", "SHORT"):
             dir_cell.font = Font(color="FFFF6B6B", bold=True, name="Calibri")
 
-        try:
-            pct_val = float(chg_pct) if chg_pct != "" else None
-        except Exception:
-            pct_val = None
-        if pct_val is not None:
-            ws.cell(row_num, 9).font = Font(
-                color=(_TEAL if pct_val > 0 else "FFFF6B6B"),
-                bold=True, name="Calibri",
-            )
-
-        cor_cell = ws.cell(row_num, 10)
-        if correct == "✓":
-            cor_cell.fill = _hdr_fill("FF1A3A2A")
-            cor_cell.font = Font(color=_TEAL, bold=True, name="Calibri")
-            correct_count += 1
-        elif correct == "✗":
-            cor_cell.fill = _hdr_fill("FF3A1A1A")
-            cor_cell.font = Font(color="FFFF6B6B", bold=True, name="Calibri")
-            wrong_count += 1
+        correct_15m, wrong_15m = _color_outcome(
+            ws, row_num, 9, 10, r["chg_pct"], r["correct"], correct_15m, wrong_15m
+        )
+        correct_eod, wrong_eod = _color_outcome(
+            ws, row_num, 13, 14, r["eod_pct"], r["eod_correct"], correct_eod, wrong_eod
+        )
 
         for col in range(1, len(headers) + 1):
             ws.cell(row_num, col).border    = _thin_border()
@@ -817,12 +846,15 @@ def _write_performance_sheet(ws, rows: list) -> None:
 
     # Summary row
     if rows:
-        total = correct_count + wrong_count
-        acc   = f"{correct_count}/{total} correct ({round(correct_count/total*100) if total else 0}%)"
+        def _acc(c, w):
+            t = c + w
+            return f"{c}/{t} ({round(c/t*100) if t else 0}%)"
         sum_row = ws.max_row + 1
-        ws.cell(sum_row, 9).value  = "Accuracy:"
-        ws.cell(sum_row, 10).value = acc
-        for col in [9, 10]:
+        ws.cell(sum_row, 9).value  = "Accuracy →"
+        ws.cell(sum_row, 10).value = _acc(correct_15m, wrong_15m)
+        ws.cell(sum_row, 13).value = "Accuracy →"
+        ws.cell(sum_row, 14).value = _acc(correct_eod, wrong_eod)
+        for col in [9, 10, 13, 14]:
             ws.cell(sum_row, col).font = Font(bold=True, color=_WHITE, name="Calibri")
             ws.cell(sum_row, col).fill = _hdr_fill(_HEADER)
             ws.cell(sum_row, col).alignment = Alignment(horizontal="center")
