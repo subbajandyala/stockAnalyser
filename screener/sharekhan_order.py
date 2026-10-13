@@ -111,8 +111,8 @@ def _atm_strike(spot: float, symbol: str) -> int:
 
 
 def _nearest_expiry(symbol: str) -> datetime.date:
-    """Nearest weekly expiry: Thursday for NIFTY/BANKNIFTY, Friday for SENSEX."""
-    target_weekday = 4 if symbol == "SENSEX" else 3  # Fri=4, Thu=3
+    """Nearest weekly expiry: Thursday for all index options."""
+    target_weekday = 3  # Thu=3
     today = datetime.date.today()
     days  = (target_weekday - today.weekday()) % 7
     if days == 0 and datetime.datetime.now().hour >= 15:
