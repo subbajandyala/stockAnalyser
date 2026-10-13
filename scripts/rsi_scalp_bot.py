@@ -185,6 +185,21 @@ def _save_state(path: str, state: dict) -> None:
     pathlib.Path(path).write_text(json.dumps(state, indent=2))
 
 
+# ── Signal log (for EOD report) ───────────────────────────────────────────────
+
+def _append_signal_log(date_str: str, entry: dict) -> None:
+    path = pathlib.Path(f"/tmp/rsi_scalp_log_{date_str}.json")
+    try:
+        log = json.loads(path.read_text()) if path.exists() else {"date": date_str, "signals": []}
+    except Exception:
+        log = {"date": date_str, "signals": []}
+    log["signals"].append(entry)
+    try:
+        path.write_text(json.dumps(log, indent=2))
+    except Exception as e:
+        print(f"  [log] rsi_scalp log write failed: {e}")
+
+
 def _bot_tradingsymbols(state: dict) -> set:
     """Return the set of tradingsymbols the bot placed today (for orphan-exit scoping)."""
     today = datetime.datetime.now(_IST).date().isoformat()
@@ -280,9 +295,26 @@ def _scan(ntfy_topic: str, state: dict) -> None:
                 print(f"  ntfy.sh [{ntfy_topic}]: {'OK' if ok else 'FAILED'}")
                 alerts_fired += 1
 
+                log_entry = {
+                    "time":       now_ist.strftime("%H:%M IST"),
+                    "index":      index,
+                    "opt":        opt,
+                    "strike":     strike,
+                    "spot":       spot,
+                    "rsi":        round(rsi, 1),
+                    "prev_rsi":   round(result.get(f"{opt.lower()}_prev_rsi", 0), 1),
+                    "ltp":        round(result.get(f"{opt.lower()}_price", 0), 2),
+                    "expiry":     result.get("expiry", ""),
+                    "auto_trade": "off",
+                    "tradingsymbol": "",
+                    "order_id":   "",
+                }
+
                 if auto_trade:
                     if index in _ordered_this_scan:
                         print(f"  Already placed {index} order this scan — skipping {opt}")
+                        log_entry["auto_trade"] = f"skipped: already placed {index} this scan"
+                        _append_signal_log(now_ist.date().isoformat(), log_entry)
                         continue
                     api_key, access_token = _kite_creds()
                     if api_key and access_token:
@@ -290,6 +322,7 @@ def _scan(ntfy_topic: str, state: dict) -> None:
                         order_res = place_rsi_scalp_order(index, opt, spot, api_key, access_token, ntfy_topic)
                         if order_res.get("error"):
                             print(f"  Order FAILED: {order_res['error']}")
+                            log_entry["auto_trade"] = f"failed: {order_res['error']}"
                         else:
                             print(
                                 f"  Order OK: {order_res['tradingsymbol']} "
@@ -297,12 +330,20 @@ def _scan(ntfy_topic: str, state: dict) -> None:
                                 f"limit={order_res['limit_price']} "
                                 f"exit_in=60s | id={order_res['order_id']}"
                             )
+                            log_entry.update({
+                                "auto_trade":    "placed",
+                                "tradingsymbol": order_res["tradingsymbol"],
+                                "order_id":      order_res["order_id"],
+                            })
                             # Record bot's exact contract — used to scope orphan exit
                             state[inst_key]["tradingsymbol"] = order_res["tradingsymbol"]
                             state[inst_key]["order_id"]      = order_res["order_id"]
                             _ordered_this_scan.add(index)
                     else:
                         print("  KITE_AUTO_TRADE=1 but no Kite creds found — skipping order")
+                        log_entry["auto_trade"] = "skipped: no kite creds"
+
+                _append_signal_log(now_ist.date().isoformat(), log_entry)
 
     print(f"  [{now_ist.strftime('%H:%M:%S')}] Scan done — {alerts_fired} alert(s) fired")
 

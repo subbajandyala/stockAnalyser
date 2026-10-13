@@ -77,6 +77,36 @@ def _load_chart_log(date_str: str) -> dict:
         return {"date": date_str, "signals": []}
 
 
+def _load_cpr_adx_log(date_str: str) -> dict:
+    p = pathlib.Path(f"/tmp/cpr_adx_log_{date_str}.json")
+    if not p.exists():
+        return {"date": date_str, "signals": []}
+    try:
+        return json.loads(p.read_text())
+    except Exception:
+        return {"date": date_str, "signals": []}
+
+
+def _load_rsi_scalp_log(date_str: str) -> dict:
+    p = pathlib.Path(f"/tmp/rsi_scalp_log_{date_str}.json")
+    if not p.exists():
+        return {"date": date_str, "signals": []}
+    try:
+        return json.loads(p.read_text())
+    except Exception:
+        return {"date": date_str, "signals": []}
+
+
+def _load_agent_flow_log(date_str: str) -> dict:
+    p = pathlib.Path(f"/tmp/agent_flow_log_{date_str}.json")
+    if not p.exists():
+        return {"date": date_str, "signals": []}
+    try:
+        return json.loads(p.read_text())
+    except Exception:
+        return {"date": date_str, "signals": []}
+
+
 def _load_rf_log(date_str: str) -> dict:
     p = pathlib.Path(f"/tmp/rf_signal_log_{date_str}.json")
     if not p.exists():
@@ -346,6 +376,183 @@ def _write_rf_signals_sheet(ws, signals: list) -> None:
     ws.freeze_panes = "A2"
 
 
+def _write_cpr_adx_sheet(ws, signals: list) -> None:
+    ws.title = "CPR + ADX"
+    ws.sheet_properties.tabColor = "FF9800"
+
+    headers = [
+        "#", "Time", "Symbol", "Direction", "Signal", "Stars", "Score",
+        "Price", "ADX", "DI+", "DI−", "CPR Bot", "CPR Top", "CPR Width%",
+        "SL", "Target", "R:R", "Upgraded", "Reasons",
+    ]
+    ws.append(headers)
+    for col, h in enumerate(headers, 1):
+        cell = ws.cell(1, col)
+        cell.font      = Font(bold=True, color=_WHITE, name="Calibri", size=11)
+        cell.fill      = _hdr_fill(_HEADER)
+        cell.alignment = Alignment(horizontal="center")
+        cell.border    = _thin_border()
+
+    for i, s in enumerate(signals, 1):
+        direction = s.get("direction", "")
+        row_data = [
+            i,
+            s.get("time", ""),
+            s.get("symbol", ""),
+            direction,
+            s.get("signal", ""),
+            s.get("stars", ""),
+            s.get("score", ""),
+            s.get("price", ""),
+            s.get("adx", ""),
+            s.get("di_plus", ""),
+            s.get("di_minus", ""),
+            s.get("cpr_bot", ""),
+            s.get("cpr_top", ""),
+            s.get("cpr_width", ""),
+            s.get("sl", ""),
+            s.get("target", ""),
+            s.get("rr", ""),
+            s.get("upgraded", ""),
+            s.get("reasons", ""),
+        ]
+        ws.append(row_data)
+        row_num  = ws.max_row
+        dir_cell = ws.cell(row_num, 4)
+        if direction == "BUY":
+            dir_cell.font = Font(color=_TEAL, bold=True, name="Calibri")
+        elif direction == "SHORT":
+            dir_cell.font = Font(color="FFFF6B6B", bold=True, name="Calibri")
+        for col in range(1, len(headers) + 1):
+            ws.cell(row_num, col).border    = _thin_border()
+            ws.cell(row_num, col).alignment = Alignment(horizontal="center")
+
+    for col_cells in ws.columns:
+        length = max(len(str(c.value or "")) for c in col_cells) + 4
+        ws.column_dimensions[get_column_letter(col_cells[0].column)].width = min(length, 40)
+    ws.freeze_panes = "A2"
+
+
+def _write_rsi_scalp_sheet(ws, signals: list) -> None:
+    ws.title = "RSI Scalp"
+    ws.sheet_properties.tabColor = "E91E63"
+
+    headers = [
+        "#", "Time", "Index", "Opt", "Strike", "Spot",
+        "RSI", "Prev RSI", "LTP", "Expiry",
+        "Auto-Trade", "Tradingsymbol", "Order ID",
+    ]
+    ws.append(headers)
+    for col, h in enumerate(headers, 1):
+        cell = ws.cell(1, col)
+        cell.font      = Font(bold=True, color=_WHITE, name="Calibri", size=11)
+        cell.fill      = _hdr_fill(_HEADER)
+        cell.alignment = Alignment(horizontal="center")
+        cell.border    = _thin_border()
+
+    for i, s in enumerate(signals, 1):
+        opt        = s.get("opt", "")
+        auto_trade = s.get("auto_trade", "")
+        row_data = [
+            i,
+            s.get("time", ""),
+            s.get("index", ""),
+            opt,
+            s.get("strike", ""),
+            s.get("spot", ""),
+            s.get("rsi", ""),
+            s.get("prev_rsi", ""),
+            s.get("ltp", ""),
+            s.get("expiry", ""),
+            auto_trade,
+            s.get("tradingsymbol", ""),
+            s.get("order_id", ""),
+        ]
+        ws.append(row_data)
+        row_num  = ws.max_row
+        opt_cell = ws.cell(row_num, 4)
+        if opt == "CE":
+            opt_cell.font = Font(color=_TEAL, bold=True, name="Calibri")
+        elif opt == "PE":
+            opt_cell.font = Font(color="FFFF6B6B", bold=True, name="Calibri")
+        at_cell = ws.cell(row_num, 11)
+        if auto_trade == "placed":
+            at_cell.fill = _hdr_fill("FF1A3A2A")
+            at_cell.font = Font(color=_TEAL, bold=True, name="Calibri")
+        elif auto_trade.startswith(("skipped", "failed")):
+            at_cell.fill = _hdr_fill("FF3A1A1A")
+            at_cell.font = Font(color="FFFF6B6B", bold=True, name="Calibri")
+        for col in range(1, len(headers) + 1):
+            ws.cell(row_num, col).border    = _thin_border()
+            ws.cell(row_num, col).alignment = Alignment(horizontal="center")
+
+    for col_cells in ws.columns:
+        length = max(len(str(c.value or "")) for c in col_cells) + 4
+        ws.column_dimensions[get_column_letter(col_cells[0].column)].width = min(length, 40)
+    ws.freeze_panes = "A2"
+
+
+def _write_agent_flow_sheet(ws, signals: list) -> None:
+    ws.title = "Agent Flow"
+    ws.sheet_properties.tabColor = "2196F3"
+
+    headers = [
+        "#", "Time", "Symbol", "Direction", "Bias", "Conf%", "Rating★",
+        "Strike", "Spot", "LTP", "Expiry",
+        "SL", "T1", "T2", "T3", "R:R",
+        "Futures", "GEX", "Signals",
+    ]
+    ws.append(headers)
+    for col, h in enumerate(headers, 1):
+        cell = ws.cell(1, col)
+        cell.font      = Font(bold=True, color=_WHITE, name="Calibri", size=11)
+        cell.fill      = _hdr_fill(_HEADER)
+        cell.alignment = Alignment(horizontal="center")
+        cell.border    = _thin_border()
+
+    for i, s in enumerate(signals, 1):
+        direction = s.get("direction", "")
+        rating    = s.get("rating", 0)
+        row_data = [
+            i,
+            s.get("time", ""),
+            s.get("symbol", ""),
+            direction,
+            s.get("bias", ""),
+            s.get("confidence", ""),
+            "★" * int(rating) if rating else "",
+            s.get("strike", ""),
+            s.get("spot", ""),
+            s.get("ltp", ""),
+            s.get("expiry", ""),
+            s.get("sl", ""),
+            s.get("t1", ""),
+            s.get("t2", ""),
+            s.get("t3", ""),
+            s.get("rr", ""),
+            s.get("futures", ""),
+            s.get("gex", ""),
+            s.get("signals", ""),
+        ]
+        ws.append(row_data)
+        row_num  = ws.max_row
+        dir_cell = ws.cell(row_num, 4)
+        if direction == "CALL":
+            dir_cell.font = Font(color=_TEAL, bold=True, name="Calibri")
+        elif direction == "PUT":
+            dir_cell.font = Font(color="FFFF6B6B", bold=True, name="Calibri")
+        for col in range(1, len(headers) + 1):
+            ws.cell(row_num, col).border    = _thin_border()
+            ws.cell(row_num, col).alignment = Alignment(horizontal="center")
+        # Widen signals column
+        ws.cell(row_num, 19).alignment = Alignment(horizontal="left", wrap_text=True)
+
+    for col_cells in ws.columns:
+        length = max(len(str(c.value or "")) for c in col_cells) + 4
+        ws.column_dimensions[get_column_letter(col_cells[0].column)].width = min(length, 50)
+    ws.freeze_panes = "A2"
+
+
 def _write_chart_bot_sheet(ws, signals: list) -> None:
     ws.title = "Chart Bot"
     ws.sheet_properties.tabColor = "9C27B0"
@@ -422,17 +629,30 @@ def _write_chart_bot_sheet(ws, signals: list) -> None:
     ws.freeze_panes = "A2"
 
 
-def _build_excel(log: dict, rf_log: dict, chart_log: dict) -> bytes:
+def _build_excel(
+    log: dict,
+    rf_log: dict,
+    chart_log: dict,
+    cpr_adx_log: dict,
+    rsi_scalp_log: dict,
+    agent_flow_log: dict,
+) -> bytes:
     wb = openpyxl.Workbook()
     wb.remove(wb.active)
 
+    ws_agent       = wb.create_sheet("Agent Flow")
     ws_chart       = wb.create_sheet("Chart Bot")
+    ws_cpr         = wb.create_sheet("CPR + ADX")
+    ws_rsi         = wb.create_sheet("RSI Scalp")
     ws_trades      = wb.create_sheet("Trades")
     ws_kite        = wb.create_sheet("Kite Signals")
     ws_all_signals = wb.create_sheet("All Signals")
     ws_rf          = wb.create_sheet("Red Flag Signals")
 
+    _write_agent_flow_sheet(ws_agent, agent_flow_log.get("signals", []))
     _write_chart_bot_sheet(ws_chart, chart_log.get("signals", []))
+    _write_cpr_adx_sheet(ws_cpr, cpr_adx_log.get("signals", []))
+    _write_rsi_scalp_sheet(ws_rsi, rsi_scalp_log.get("signals", []))
     total_pnl = _write_trades_sheet(ws_trades, log.get("trades", []))
     _write_kite_signals_sheet(ws_kite, log.get("kite_signals", []))
     _write_signals_sheet(ws_all_signals, log.get("signals", []), log["date"])
@@ -505,13 +725,19 @@ if __name__ == "__main__":
     access_token = creds["access_token"]
     topic        = _eod_topic()
 
-    log       = _load_log(date_str)
-    rf_log    = _load_rf_log(date_str)
-    chart_log = _load_chart_log(date_str)
-    print(f"  Chart signals: {len(chart_log['signals'])}")
-    print(f"  Signals      : {len(log['signals'])}")
-    print(f"  Trades       : {len(log['trades'])}")
-    print(f"  RF Signals   : {len(rf_log['signals'])}")
+    log            = _load_log(date_str)
+    rf_log         = _load_rf_log(date_str)
+    chart_log      = _load_chart_log(date_str)
+    cpr_adx_log    = _load_cpr_adx_log(date_str)
+    rsi_scalp_log  = _load_rsi_scalp_log(date_str)
+    agent_flow_log = _load_agent_flow_log(date_str)
+
+    print(f"  Agent Flow   : {len(agent_flow_log['signals'])} signals")
+    print(f"  Chart Bot    : {len(chart_log['signals'])} signals")
+    print(f"  CPR+ADX      : {len(cpr_adx_log['signals'])} signals")
+    print(f"  RSI Scalp    : {len(rsi_scalp_log['signals'])} signals")
+    print(f"  Elder Ray    : {len(log['signals'])} signals, {len(log['trades'])} trades")
+    print(f"  Red Flag     : {len(rf_log['signals'])} signals")
 
     if api_key and access_token:
         print("  Fetching final premiums for open trades...")
@@ -520,7 +746,9 @@ if __name__ == "__main__":
         print("  No Kite creds — open trades will show no exit premium")
 
     print("  Building Excel...")
-    excel_bytes, total_pnl = _build_excel(log, rf_log, chart_log)
+    excel_bytes, total_pnl = _build_excel(
+        log, rf_log, chart_log, cpr_adx_log, rsi_scalp_log, agent_flow_log
+    )
 
     sign = "+" if total_pnl >= 0 else ""
     print(f"  Total P&L: {sign}₹{total_pnl:,.0f}")

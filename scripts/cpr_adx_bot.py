@@ -72,6 +72,21 @@ def _save_state(path: str, state: dict) -> None:
         print(f"  Warning: could not save state: {e}")
 
 
+# ── Signal log (for EOD report) ───────────────────────────────────────────────
+
+def _append_signal_log(date_str: str, entry: dict) -> None:
+    path = pathlib.Path(f"/tmp/cpr_adx_log_{date_str}.json")
+    try:
+        log = json.loads(path.read_text()) if path.exists() else {"date": date_str, "signals": []}
+    except Exception:
+        log = {"date": date_str, "signals": []}
+    log["signals"].append(entry)
+    try:
+        path.write_text(json.dumps(log, indent=2))
+    except Exception as e:
+        print(f"  [log] cpr_adx log write failed: {e}")
+
+
 # ── Credentials ───────────────────────────────────────────────────────────────
 
 def _kite_creds() -> tuple[str, str]:
@@ -310,6 +325,28 @@ def _scan(symbols: list[str], api_key: str, access_token: str,
 
         _update_state(sym, result, state)
         _save_state(_STATE_FILE, state)
+
+        today = now_ist.date().isoformat()
+        _append_signal_log(today, {
+            "time":      now_ist.strftime("%H:%M IST"),
+            "symbol":    sym,
+            "direction": result["direction"],
+            "signal":    result["signal"],
+            "stars":     result["stars"],
+            "score":     result["score"],
+            "price":     result["price"],
+            "adx":       round(float(result["adx"]), 1),
+            "di_plus":   result["di_p"],
+            "di_minus":  result["di_m"],
+            "cpr_bot":   result["cpr"]["bot"],
+            "cpr_top":   result["cpr"]["top"],
+            "cpr_width": round(result["cpr"]["width_pct"], 2),
+            "sl":        result.get("sl", ""),
+            "target":    result.get("target", ""),
+            "rr":        result.get("rr", ""),
+            "upgraded":  "Yes" if is_upgrade else "No",
+            "reasons":   " | ".join(result.get("reasons", [])[:3]),
+        })
 
     print(f"  [{now_ist.strftime('%H:%M:%S')}] Scan done — {alerts_fired} alert(s) fired")
 

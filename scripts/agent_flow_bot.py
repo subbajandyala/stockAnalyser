@@ -225,6 +225,21 @@ def _save_state(path: str, state: dict) -> None:
     pathlib.Path(path).write_text(json.dumps(state, indent=2))
 
 
+# ── Signal log (for EOD report) ───────────────────────────────────────────────
+
+def _append_signal_log(date_str: str, entry: dict) -> None:
+    path = pathlib.Path(f"/tmp/agent_flow_log_{date_str}.json")
+    try:
+        log = json.loads(path.read_text()) if path.exists() else {"date": date_str, "signals": []}
+    except Exception:
+        log = {"date": date_str, "signals": []}
+    log["signals"].append(entry)
+    try:
+        path.write_text(json.dumps(log, indent=2))
+    except Exception as e:
+        print(f"  [log] agent_flow log write failed: {e}")
+
+
 # ── Single scan ───────────────────────────────────────────────────────────────
 
 def scan_once(symbols: list[str], state_file: str) -> None:
@@ -282,6 +297,28 @@ def scan_once(symbols: list[str], state_file: str) -> None:
             print(f"  ntfy.sh : {'OK' if ok else 'FAILED'}")
         else:
             print("  No ntfy topic configured.")
+
+        tgt = result.get("targets", {}) or {}
+        _append_signal_log(now_ist.strftime("%Y-%m-%d"), {
+            "time":       now_ist.strftime("%H:%M IST"),
+            "symbol":     symbol,
+            "direction":  direction,
+            "bias":       result.get("bias", ""),
+            "confidence": result.get("confidence", 0),
+            "rating":     result.get("rating", 0),
+            "strike":     int(result.get("strike", 0)),
+            "spot":       result.get("spot", 0),
+            "ltp":        result.get("ltp", 0),
+            "expiry":     result.get("expiry", ""),
+            "sl":         tgt.get("sl", ""),
+            "t1":         tgt.get("t1", ""),
+            "t2":         tgt.get("t2", ""),
+            "t3":         tgt.get("t3", ""),
+            "rr":         tgt.get("rr", ""),
+            "futures":    result.get("fut_buildup", {}).get("signal", ""),
+            "gex":        result.get("gex", {}).get("regime", ""),
+            "signals":    " | ".join(result.get("signals", [])[:4]),
+        })
 
         # ── Auto-execute order ─────────────────────────────────────────────────────────────
         if _AUTO_TRADE and symbol in _TRADE_SYMBOLS:
