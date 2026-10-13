@@ -47,9 +47,9 @@ def _write_env(key: str, value: str) -> None:
 
 def main() -> None:
     try:
-        from shareconnect import SharekhanConnect
+        from SharekhanApi import SharekhanConnect
     except ImportError:
-        print("ERROR: shareconnect not installed — run: pip install shareconnect")
+        print("ERROR: SharekhanApi not found — run: pip install shareconnect")
         sys.exit(1)
 
     env = _read_env()
