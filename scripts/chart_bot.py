@@ -41,6 +41,7 @@ from screener.kite_order import (
     has_open_position,
     place_order_for_signal as _place_order,
 )
+from screener.sharekhan_order import place_sk_order as _place_sk_order
 
 logging.basicConfig(
     level=logging.INFO,
@@ -557,6 +558,44 @@ def scan_once(symbols: list[str], state_file: str) -> None:
                     )
                 state[trade_key] = trade["order_id"]
                 state[f"{trade_key}:ts"] = trade["tradingsymbol"]
+
+                # Mirror on Sharekhan
+                try:
+                    sk_result = _place_sk_order(
+                        symbol, direction, spot,
+                        option_ltp=trade.get("entry_price", 0),
+                    )
+                    if "error" in sk_result:
+                        print(f"  [SHAREKHAN] SKIPPED — {sk_result['error']}")
+                        if ntfy_topic:
+                            send_ntfy(
+                                f"Sharekhan SKIPPED: {symbol}",
+                                f"Kite order placed but Sharekhan failed.\nReason: {sk_result['error']}",
+                                ntfy_topic,
+                                priority="default",
+                            )
+                    else:
+                        print(
+                            f"  [SHAREKHAN] ORDER — {sk_result['tradingsymbol']}"
+                            f" | ID: {sk_result['order_id']}"
+                        )
+                        log_entry["sk_order_id"]       = sk_result["order_id"]
+                        log_entry["sk_tradingsymbol"]  = sk_result["tradingsymbol"]
+                        if ntfy_topic:
+                            send_ntfy(
+                                f"Sharekhan ORDER: {sk_result['tradingsymbol']}",
+                                (
+                                    f"Symbol : {symbol} {sk_result['opt_type']}\n"
+                                    f"Strike : {sk_result['strike']}\n"
+                                    f"Qty    : {sk_result['qty']}\n"
+                                    f"Price  : ₹{sk_result['price']}\n"
+                                    f"Order  : {sk_result['order_id']}"
+                                ),
+                                ntfy_topic,
+                            )
+                except Exception as _sk_err:
+                    print(f"  [SHAREKHAN] ERROR — {_sk_err}")
+
         elif _AUTO_TRADE and symbol not in _TRADE_SYMBOLS:
             log_entry["auto_trade"] = "signal only (no auto-trade for this symbol)"
         elif _AUTO_TRADE and abs(score) < MIN_TRADE_SCORE:

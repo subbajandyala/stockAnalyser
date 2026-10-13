@@ -11,3 +11,4 @@ streamlit-autorefresh>=1.0.0
 kiteconnect>=5.0.1
 pyotp>=2.8.0
 openpyxl>=3.1.0
+shareconnect>=1.0.0
