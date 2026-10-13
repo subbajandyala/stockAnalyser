@@ -206,6 +206,19 @@ def place_sk_order(
 
     try:
         result   = client.placeOrder(order_params)
+        _LOG.debug(f"[Sharekhan] placeOrder raw: {result}")
+
+        # Detect API-level errors (403, 4xx, error message)
+        status = result.get("status") if isinstance(result, dict) else None
+        if isinstance(status, int) and status >= 400:
+            err_msg = result.get("message") or result.get("errorType") or str(result)
+            _LOG.error(f"[Sharekhan] placeOrder error {status}: {err_msg}")
+            return {"error": f"HTTP {status}: {err_msg}"}
+        if isinstance(result, dict) and result.get("message") == "error":
+            err_msg = result.get("errorType") or str(result)
+            _LOG.error(f"[Sharekhan] placeOrder error: {err_msg}")
+            return {"error": err_msg}
+
         order_id = (result.get("orderId") or result.get("OrderId")
                     or result.get("order_id") or result.get("BrokerOrderId") or "")
         _LOG.info(f"[Sharekhan] Order placed — ID: {order_id}")
