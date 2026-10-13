@@ -176,11 +176,11 @@ def main() -> None:
 def _exchange_and_save(response_url: str, api_key: str, secret_key: str) -> None:
     """Extract code from redirect URL, exchange for access token, save to .env."""
     # ── Step 3: Extract code ───────────────────────────────────────────────────
+    # Use regex on the raw query string — parse_qs decodes '+' as space which
+    # corrupts standard base64 tokens that contain '+' characters.
     parsed = urllib.parse.urlparse(response_url)
-    qs = urllib.parse.parse_qs(parsed.query)
-    request_token = (
-        qs.get("code", qs.get("request_token", [""]))[0]
-    )
+    m = re.search(r'(?:code|request_token)=([^&]+)', parsed.query)
+    request_token = m.group(1) if m else ""
 
     if not request_token:
         print(f"  ERROR: no code in responseUrl: {response_url}")
