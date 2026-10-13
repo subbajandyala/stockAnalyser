@@ -361,11 +361,7 @@ def place_order_for_signal(
     kite = _kite_client(api_key, access_token)
 
     with _order_lock():
-        # 1. Existing position guard — NRML only so RSI scalp MIS positions never block us
-        if has_open_position(kite, symbol, product="NRML"):
-            return {"error": f"Open {symbol} NRML position already exists — skipping"}
-
-        # 2. Resolve ATM tradingsymbol
+        # 1. Resolve ATM tradingsymbol
         strike = _atm_strike(spot, symbol)
         ts = _resolve_tradingsymbol(kite, symbol, strike, opt_type)
         if not ts:
