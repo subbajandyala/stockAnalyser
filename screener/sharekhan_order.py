@@ -75,7 +75,7 @@ def _load_master(client) -> list:
             except Exception:
                 pass
     try:
-        master = client.getScriptMaster("FNO")
+        master = client.master("FNO")
         if isinstance(master, list) and master:
             _MASTER_PATH.write_text(json.dumps(master))
             return master
