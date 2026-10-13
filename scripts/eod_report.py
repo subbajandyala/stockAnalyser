@@ -38,6 +38,13 @@ _IST = datetime.timezone(datetime.timedelta(hours=5, minutes=30))
 _EXCHANGE = {"NIFTY": "NFO", "SENSEX": "BFO"}
 _LOT_SIZE = {"NIFTY": 65, "SENSEX": 20}
 
+_INDEX_TOKENS = {
+    "NIFTY": 256265, "BANKNIFTY": 260105, "SENSEX": 265,
+    "FINNIFTY": 257801, "MIDCPNIFTY": 288009, "INDIAVIX": 264969,
+}
+
+_candle_cache: dict = {}  # "SYMBOL:YYYY-MM-DD" -> list of kite candle dicts
+
 
 # ── Credentials ───────────────────────────────────────────────────────────────
 
@@ -115,6 +122,127 @@ def _load_rf_log(date_str: str) -> dict:
         return json.loads(p.read_text())
     except Exception:
         return {"date": date_str, "signals": []}
+
+
+# ── Performance helpers ───────────────────────────────────────────────────────
+
+def _get_instrument_token(symbol: str) -> int | None:
+    """Return Kite instrument token for a symbol (index or NSE stock)."""
+    if symbol in _INDEX_TOKENS:
+        return _INDEX_TOKENS[symbol]
+    p = pathlib.Path("/tmp/kite_instr_nse.json")
+    if p.exists():
+        try:
+            for instr in json.loads(p.read_text()):
+                if instr.get("tradingsymbol") == symbol and instr.get("segment") in ("NSE", "NSE-EQ"):
+                    return instr["instrument_token"]
+        except Exception:
+            pass
+    return None
+
+
+def _fetch_candles(kite: KiteConnect, symbol: str, date_str: str) -> list:
+    """Fetch 1-minute candles for symbol on date_str. Cached per symbol."""
+    key = f"{symbol}:{date_str}"
+    if key in _candle_cache:
+        return _candle_cache[key]
+    token = _get_instrument_token(symbol)
+    if not token:
+        _candle_cache[key] = []
+        return []
+    try:
+        d = datetime.datetime.strptime(date_str, "%Y-%m-%d")
+        candles = kite.historical_data(
+            token,
+            d.replace(hour=9, minute=0, second=0),
+            d.replace(hour=15, minute=35, second=0),
+            "minute",
+        )
+        _candle_cache[key] = candles
+    except Exception as e:
+        print(f"  [perf] candles failed {symbol}: {e}")
+        _candle_cache[key] = []
+    return _candle_cache[key]
+
+
+def _close_at(candles: list, target_dt: datetime.datetime) -> float | None:
+    """Return the close of the first candle at or after target_dt (IST-naive)."""
+    for c in candles:
+        cdt = c["date"]
+        if hasattr(cdt, "tzinfo") and cdt.tzinfo is not None:
+            cdt = cdt.replace(tzinfo=None)
+        if cdt >= target_dt:
+            return float(c["close"])
+    return None
+
+
+def _build_perf_rows(
+    chart_log: dict,
+    cpr_adx_log: dict,
+    agent_flow_log: dict,
+    kite: KiteConnect | None,
+    date_str: str,
+) -> list:
+    if kite is None:
+        return []
+    rows = []
+
+    def _parse_hm(t: str):
+        t = t.replace(" IST", "").strip()
+        try:
+            h, m = map(int, t.split(":"))
+            return h, m
+        except Exception:
+            return None, None
+
+    def _process(signals, source, sym_key, spot_key, dir_key):
+        base = datetime.datetime.strptime(date_str, "%Y-%m-%d")
+        for s in signals:
+            symbol = s.get(sym_key, "")
+            time_str = s.get("time", "")
+            raw_spot = s.get(spot_key)
+            direction = s.get(dir_key, "")
+            if not symbol or not raw_spot:
+                continue
+            try:
+                spot = float(raw_spot)
+            except Exception:
+                continue
+            h, m = _parse_hm(time_str)
+            if h is None:
+                continue
+            target_dt = base.replace(hour=h, minute=m) + datetime.timedelta(minutes=15)
+            candles   = _fetch_candles(kite, symbol, date_str)
+            p15       = _close_at(candles, target_dt)
+            if p15 is not None:
+                chg_pts = round(p15 - spot, 2)
+                chg_pct = round(chg_pts / spot * 100, 2) if spot else 0
+                dir_up  = direction in ("CE", "CALL", "BUY")
+                if chg_pts == 0:
+                    correct = "→"
+                elif (dir_up and chg_pts > 0) or (not dir_up and chg_pts < 0):
+                    correct = "✓"
+                else:
+                    correct = "✗"
+            else:
+                chg_pts = chg_pct = ""
+                correct = "—"
+            rows.append({
+                "source":    source,
+                "time":      time_str,
+                "symbol":    symbol,
+                "direction": direction,
+                "spot":      spot,
+                "price_15m": round(p15, 2) if p15 is not None else "—",
+                "chg_pts":   chg_pts,
+                "chg_pct":   chg_pct,
+                "correct":   correct,
+            })
+
+    _process(chart_log.get("signals", []),      "Chart Bot",  "symbol", "spot",  "direction")
+    _process(cpr_adx_log.get("signals", []),    "CPR+ADX",    "symbol", "price", "direction")
+    _process(agent_flow_log.get("signals", []), "Agent Flow", "symbol", "spot",  "direction")
+    return rows
 
 
 # ── Fetch final premiums for open trades ──────────────────────────────────────
@@ -629,6 +757,82 @@ def _write_chart_bot_sheet(ws, signals: list) -> None:
     ws.freeze_panes = "A2"
 
 
+def _write_performance_sheet(ws, rows: list) -> None:
+    ws.title = "Performance"
+    ws.sheet_properties.tabColor = "4CAF50"
+
+    headers = [
+        "#", "Source", "Time", "Symbol", "Direction",
+        "Spot @ Signal", "Spot +15min", "Chg Pts", "Chg %", "Correct?",
+    ]
+    ws.append(headers)
+    for col, h in enumerate(headers, 1):
+        cell = ws.cell(1, col)
+        cell.font      = Font(bold=True, color=_WHITE, name="Calibri", size=11)
+        cell.fill      = _hdr_fill(_HEADER)
+        cell.alignment = Alignment(horizontal="center")
+        cell.border    = _thin_border()
+
+    correct_count = wrong_count = 0
+    for i, r in enumerate(rows, 1):
+        direction = r["direction"]
+        chg_pts   = r["chg_pts"]
+        chg_pct   = r["chg_pct"]
+        correct   = r["correct"]
+        ws.append([
+            i, r["source"], r["time"], r["symbol"], direction,
+            r["spot"], r["price_15m"], chg_pts, chg_pct, correct,
+        ])
+        row_num = ws.max_row
+
+        dir_cell = ws.cell(row_num, 5)
+        if direction in ("CE", "CALL", "BUY"):
+            dir_cell.font = Font(color=_TEAL, bold=True, name="Calibri")
+        elif direction in ("PE", "PUT", "SHORT"):
+            dir_cell.font = Font(color="FFFF6B6B", bold=True, name="Calibri")
+
+        try:
+            pct_val = float(chg_pct) if chg_pct != "" else None
+        except Exception:
+            pct_val = None
+        if pct_val is not None:
+            ws.cell(row_num, 9).font = Font(
+                color=(_TEAL if pct_val > 0 else "FFFF6B6B"),
+                bold=True, name="Calibri",
+            )
+
+        cor_cell = ws.cell(row_num, 10)
+        if correct == "✓":
+            cor_cell.fill = _hdr_fill("FF1A3A2A")
+            cor_cell.font = Font(color=_TEAL, bold=True, name="Calibri")
+            correct_count += 1
+        elif correct == "✗":
+            cor_cell.fill = _hdr_fill("FF3A1A1A")
+            cor_cell.font = Font(color="FFFF6B6B", bold=True, name="Calibri")
+            wrong_count += 1
+
+        for col in range(1, len(headers) + 1):
+            ws.cell(row_num, col).border    = _thin_border()
+            ws.cell(row_num, col).alignment = Alignment(horizontal="center")
+
+    # Summary row
+    if rows:
+        total = correct_count + wrong_count
+        acc   = f"{correct_count}/{total} correct ({round(correct_count/total*100) if total else 0}%)"
+        sum_row = ws.max_row + 1
+        ws.cell(sum_row, 9).value  = "Accuracy:"
+        ws.cell(sum_row, 10).value = acc
+        for col in [9, 10]:
+            ws.cell(sum_row, col).font = Font(bold=True, color=_WHITE, name="Calibri")
+            ws.cell(sum_row, col).fill = _hdr_fill(_HEADER)
+            ws.cell(sum_row, col).alignment = Alignment(horizontal="center")
+
+    for col_cells in ws.columns:
+        length = max(len(str(c.value or "")) for c in col_cells) + 4
+        ws.column_dimensions[get_column_letter(col_cells[0].column)].width = min(length, 25)
+    ws.freeze_panes = "A2"
+
+
 def _build_excel(
     log: dict,
     rf_log: dict,
@@ -636,10 +840,12 @@ def _build_excel(
     cpr_adx_log: dict,
     rsi_scalp_log: dict,
     agent_flow_log: dict,
+    kite=None,
 ) -> bytes:
     wb = openpyxl.Workbook()
     wb.remove(wb.active)
 
+    ws_perf        = wb.create_sheet("Performance")
     ws_agent       = wb.create_sheet("Agent Flow")
     ws_chart       = wb.create_sheet("Chart Bot")
     ws_cpr         = wb.create_sheet("CPR + ADX")
@@ -649,6 +855,8 @@ def _build_excel(
     ws_all_signals = wb.create_sheet("All Signals")
     ws_rf          = wb.create_sheet("Red Flag Signals")
 
+    perf_rows = _build_perf_rows(chart_log, cpr_adx_log, agent_flow_log, kite, log["date"])
+    _write_performance_sheet(ws_perf, perf_rows)
     _write_agent_flow_sheet(ws_agent, agent_flow_log.get("signals", []))
     _write_chart_bot_sheet(ws_chart, chart_log.get("signals", []))
     _write_cpr_adx_sheet(ws_cpr, cpr_adx_log.get("signals", []))
@@ -739,7 +947,10 @@ if __name__ == "__main__":
     print(f"  Elder Ray    : {len(log['signals'])} signals, {len(log['trades'])} trades")
     print(f"  Red Flag     : {len(rf_log['signals'])} signals")
 
+    kite = None
     if api_key and access_token:
+        kite = KiteConnect(api_key=api_key)
+        kite.set_access_token(access_token)
         print("  Fetching final premiums for open trades...")
         _fill_final_premiums(log["trades"], api_key, access_token)
     else:
@@ -747,7 +958,7 @@ if __name__ == "__main__":
 
     print("  Building Excel...")
     excel_bytes, total_pnl = _build_excel(
-        log, rf_log, chart_log, cpr_adx_log, rsi_scalp_log, agent_flow_log
+        log, rf_log, chart_log, cpr_adx_log, rsi_scalp_log, agent_flow_log, kite=kite
     )
 
     sign = "+" if total_pnl >= 0 else ""
