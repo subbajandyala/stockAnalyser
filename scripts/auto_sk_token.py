@@ -186,7 +186,9 @@ def _exchange_and_save(response_url: str, api_key: str, secret_key: str) -> None
         print(f"  ERROR: no code in responseUrl: {response_url}")
         sys.exit(1)
 
-    print(f"  [3/3] Exchanging code ({len(request_token)} chars) for access token ...")
+    print(f"  DEBUG responseUrl : {response_url}")
+    print(f"  DEBUG code (raw)  : {request_token[:30]}… ({len(request_token)} chars)")
+    print(f"  [3/3] Exchanging code for access token ...")
 
     try:
         from SharekhanApi import SharekhanConnect
@@ -196,7 +198,7 @@ def _exchange_and_save(response_url: str, api_key: str, secret_key: str) -> None
 
     sk = SharekhanConnect(api_key)
     try:
-        enc = sk.generate_session(request_token, secret_key)
+        enc = sk.generate_session_without_versionId(request_token, secret_key)
         token_data = sk.get_access_token(api_key, enc, "12345")
     except Exception as e:
         print(f"  ERROR: Token exchange — {e}")
