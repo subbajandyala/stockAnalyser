@@ -49,16 +49,29 @@ _candle_cache: dict = {}  # "SYMBOL:YYYY-MM-DD" -> list of kite candle dicts
 # ── Credentials ───────────────────────────────────────────────────────────────
 
 def _creds() -> dict:
+    # .env holds the daily-refreshed token written by auto_token.py — always check it first
+    env_vals: dict[str, str] = {}
+    env_path = pathlib.Path(__file__).parent.parent / ".env"
+    if env_path.exists():
+        for line in env_path.read_text().splitlines():
+            line = line.strip()
+            if "=" in line and not line.startswith("#"):
+                k, v = line.split("=", 1)
+                env_vals[k.strip()] = v.strip().strip('"').strip("'")
+
+    # .kite_creds.json for non-credential config (gmail, ntfy topic, etc.)
     p = pathlib.Path.home() / ".kite_creds.json"
     try:
         c = json.loads(p.read_text()) if p.exists() else {}
     except Exception:
         c = {}
-    c.setdefault("api_key",          os.getenv("KITE_API_KEY", ""))
-    c.setdefault("access_token",     os.getenv("KITE_ACCESS_TOKEN", ""))
-    c.setdefault("gmail_user",       os.getenv("GMAIL_USER", ""))
+
+    # Priority for Kite creds: env var > .env file > ~/.kite_creds.json
+    c["api_key"]      = (os.getenv("KITE_API_KEY")      or env_vals.get("KITE_API_KEY")      or c.get("api_key",      ""))
+    c["access_token"] = (os.getenv("KITE_ACCESS_TOKEN") or env_vals.get("KITE_ACCESS_TOKEN") or c.get("access_token", ""))
+    c.setdefault("gmail_user",        os.getenv("GMAIL_USER",        ""))
     c.setdefault("gmail_app_password", os.getenv("GMAIL_APP_PASSWORD", ""))
-    c.setdefault("report_to",        "subba.jandyala@gmail.com")
+    c.setdefault("report_to",         "subba.jandyala@gmail.com")
     return c
 
 
@@ -159,6 +172,7 @@ def _fetch_candles(kite: KiteConnect, symbol: str, date_str: str) -> list:
         return _candle_cache[key]
     token = _get_instrument_token(symbol)
     if not token:
+        print(f"  [perf] no token for {symbol} — skipping candles")
         _candle_cache[key] = []
         return []
     try:
@@ -170,8 +184,9 @@ def _fetch_candles(kite: KiteConnect, symbol: str, date_str: str) -> list:
             "minute",
         )
         _candle_cache[key] = candles
+        print(f"  [perf] {symbol}: {len(candles)} candles fetched (token {token})")
     except Exception as e:
-        print(f"  [perf] candles failed {symbol}: {e}")
+        print(f"  [perf] candles failed {symbol} (token {token}): {e}")
         _candle_cache[key] = []
     return _candle_cache[key]
 
@@ -1032,6 +1047,7 @@ if __name__ == "__main__":
     if api_key and access_token:
         kite = KiteConnect(api_key=api_key)
         kite.set_access_token(access_token)
+        print(f"  Kite token  : ...{access_token[-8:]}")
         print("  Fetching final premiums for open trades...")
         _fill_final_premiums(log["trades"], api_key, access_token)
     else:
