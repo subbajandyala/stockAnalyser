@@ -22,6 +22,10 @@ _STRIKE_STEP  = {"NIFTY": 50,   "BANKNIFTY": 100,  "SENSEX": 100}
 _MASTER_PATH  = pathlib.Path("/tmp/sk_scriptmaster_fno.json")
 _MASTER_TTL   = 24 * 3600
 
+# Exit levels — same as kite_order.py scalp parameters
+_SCALP_STOP_PTS   = {"NIFTY": 7,  "BANKNIFTY": 10, "SENSEX": 14}
+_SCALP_TARGET_PTS = {"NIFTY": 10, "BANKNIFTY": 15, "SENSEX": 20}
+
 
 # ── Credentials ───────────────────────────────────────────────────────────────
 
@@ -222,6 +226,67 @@ def place_sk_order(
         order_id = (result.get("orderId") or result.get("OrderId")
                     or result.get("order_id") or result.get("BrokerOrderId") or "")
         _LOG.info(f"[Sharekhan] Order placed — ID: {order_id}")
+
+        # ── Exit legs: SL sell + Target limit sell ─────────────────────────
+        # Placed immediately after entry. Since we hold only 1 lot, whichever
+        # fires first leaves 0 position — the other auto-rejects (no naked short).
+        entry_price = float(price) if price and price != "0" else option_ltp
+        if entry_price > 0:
+            stop_pts   = _SCALP_STOP_PTS.get(symbol, 7)
+            tgt_pts    = _SCALP_TARGET_PTS.get(symbol, 10)
+            sl_price   = str(round(round(max(entry_price - stop_pts, 0.05) / 0.05) * 0.05, 2))
+            tgt_price  = str(round(round((entry_price + tgt_pts)            / 0.05) * 0.05, 2))
+
+            _exit_base = {
+                "customerId":     customer_id,
+                "scripCode":      scrip_code,
+                "tradingSymbol":  trading_symbol,
+                "exchange":       exchange,
+                "transactionType":"S",
+                "quantity":       lot,
+                "disclosedQty":   0,
+                "triggerPrice":   "0",
+                "rmsCode":        "ANY",
+                "afterHour":      "N",
+                "orderType":      "NORMAL",
+                "channelUser":    login_id,
+                "validity":       "GFD",
+                "requestType":    "NEW",
+                "productType":    "INVESTMENT",
+                "instrumentType": instr_type,
+                "strikePrice":    str(strike),
+                "optionType":     opt_type,
+                "expiry":         expiry_str,
+            }
+
+            # SL: sell market on trigger (SM = Sell Market)
+            try:
+                sl_params = {**_exit_base,
+                             "transactionType": "SM",
+                             "price":           "0",
+                             "triggerPrice":    sl_price}
+                sl_res  = client.placeOrder(sl_params)
+                sl_oid  = (sl_res.get("orderId") or sl_res.get("order_id") or "")
+                _LOG.info(f"[Sharekhan] SL order — trigger=₹{sl_price}  ID={sl_oid}")
+            except Exception as _e:
+                _LOG.warning(f"[Sharekhan] SL order failed: {_e}")
+                sl_oid = ""
+
+            # Target: limit sell
+            try:
+                tgt_params = {**_exit_base,
+                              "transactionType": "S",
+                              "price":           tgt_price,
+                              "triggerPrice":    "0"}
+                tgt_res = client.placeOrder(tgt_params)
+                tgt_oid = (tgt_res.get("orderId") or tgt_res.get("order_id") or "")
+                _LOG.info(f"[Sharekhan] Target order — limit=₹{tgt_price}  ID={tgt_oid}")
+            except Exception as _e:
+                _LOG.warning(f"[Sharekhan] Target order failed: {_e}")
+                tgt_oid = ""
+        else:
+            sl_oid = tgt_oid = sl_price = tgt_price = ""
+
         return {
             "order_id":      str(order_id),
             "tradingsymbol": trading_symbol,
@@ -230,6 +295,10 @@ def place_sk_order(
             "expiry":        expiry_str,
             "qty":           lot,
             "price":         price,
+            "sl_order_id":   sl_oid,
+            "sl_price":      sl_price,
+            "target_order_id": tgt_oid,
+            "target_price":  tgt_price,
         }
     except Exception as e:
         _LOG.error(f"[Sharekhan] placeOrder failed: {e}")
