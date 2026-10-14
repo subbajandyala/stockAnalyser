@@ -426,6 +426,33 @@ def scan_once(symbols: list[str], state_file: str) -> None:
         print(f"  {marker} {symbol:12s} | {PRIMARY_TF} | {verdict:12s} | score {score:+d} | {conf}% conf")
 
         if direction == "WAIT" or abs(score) < MIN_NOTIFY_SCORE:
+            # Log WAIT/weak scans so the EOD Chart Bot sheet is never blank
+            today = now_ist.strftime("%Y%m%d")
+            vdict   = p_res["verdict"]
+            entry_z = vdict.get("entry_zone") or []
+            targets = vdict.get("targets") or []
+            wait_entry: dict = {
+                "_key":       f"{today}:{symbol}:{now_ist.strftime('%H%M')}",
+                "time":       now_ist.strftime("%H:%M IST"),
+                "symbol":     symbol,
+                "direction":  direction,
+                "verdict":    verdict,
+                "score":      score,
+                "conf":       conf,
+                "spot":       p_res["summary"]["close"],
+                "tf_15m":     f"{verdict} ({score:+d})",
+                "tf_5m":      "",
+                "entry_low":  round(entry_z[0], 1) if len(entry_z) >= 1 else "",
+                "entry_high": round(entry_z[1], 1) if len(entry_z) >= 2 else "",
+                "stop_loss":  vdict.get("stop_loss", ""),
+                "targets":    " / ".join(str(round(t, 1)) for t in targets),
+                "rr":         vdict.get("rr", ""),
+                "auto_trade": "no signal",
+                "tradingsymbol": "", "strike": "", "qty": "",
+                "entry_premium": "", "sl_premium": "", "target_premium": "",
+                "order_id": "",
+            }
+            _append_chart_log(today, wait_entry)
             continue
 
         # Confirm on 5m
