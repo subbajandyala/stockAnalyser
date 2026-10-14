@@ -48,7 +48,7 @@ print("\nSharekhanConnect object created")
 # ── Test 1: funds (simplest authenticated call) ───────────────────────────────
 print("\n-- Test 1: funds (simplest auth check) --")
 try:
-    res = client.funds(customer_id)
+    res = client.funds(customerId=customer_id)
     print(f"  Raw: {str(res)[:500]}")
     if isinstance(res, dict):
         status = res.get("status") or res.get("Status") or ""
