@@ -385,7 +385,7 @@ def _monitor_positions(
 
 # ── Single scan ───────────────────────────────────────────────────────────────
 
-def scan_once(symbols: list[str], state_file: str) -> None:
+def scan_once(symbols: list[str], state_file: str, force: bool = False) -> None:
     api_key, access_token = _kite_creds()
     ntfy_topic = _ntfy_topic()
 
@@ -396,7 +396,7 @@ def scan_once(symbols: list[str], state_file: str) -> None:
     now_ist = datetime.datetime.now(_IST)
     print(f"[{now_ist.strftime('%H:%M:%S IST')}] Chart bot scan — {', '.join(symbols)}")
 
-    if not (MARKET_OPEN <= now_ist.time() <= MARKET_CLOSE):
+    if not force and not (MARKET_OPEN <= now_ist.time() <= MARKET_CLOSE):
         print("Market closed — skipping.")
         return
 
@@ -647,6 +647,7 @@ if __name__ == "__main__":
     ap.add_argument("--loop",        action="store_true", help="Run as daemon, scanning every --interval seconds")
     ap.add_argument("--interval",    type=int, default=300, help="Loop interval in seconds (default: 300)")
     ap.add_argument("--test-notify", action="store_true", help="Send test notification and exit")
+    ap.add_argument("--force", action="store_true", help="Run scan even outside market hours")
     args = ap.parse_args()
 
     symbols = [s.upper() for s in args.symbols]
@@ -668,12 +669,12 @@ if __name__ == "__main__":
         ok = send_ntfy(title, body, ntfy_topic)
         print(f"ntfy.sh: {'OK' if ok else 'FAILED — check NTFY_TOPIC in .env'}")
     elif args.once:
-        scan_once(symbols, args.state_file)
+        scan_once(symbols, args.state_file, force=args.force)
     elif args.loop:
         print(f"Chart bot loop started — scanning every {args.interval}s")
         while True:
             try:
-                scan_once(symbols, args.state_file)
+                scan_once(symbols, args.state_file, force=args.force)
             except Exception as e:
                 print(f"[loop] Unhandled error: {e}")
             time.sleep(args.interval)

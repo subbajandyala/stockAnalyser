@@ -242,7 +242,7 @@ def _append_signal_log(date_str: str, entry: dict) -> None:
 
 # ── Single scan ───────────────────────────────────────────────────────────────
 
-def scan_once(symbols: list[str], state_file: str) -> None:
+def scan_once(symbols: list[str], state_file: str, force: bool = False) -> None:
     api_key, access_token = _kite_creds()
     ntfy_topic = _ntfy_topic()
 
@@ -253,7 +253,7 @@ def scan_once(symbols: list[str], state_file: str) -> None:
     now_ist = datetime.datetime.now(_IST)
     print(f"[{now_ist.strftime('%H:%M:%S IST')}] Agent Flow scan — {', '.join(symbols)}")
 
-    if not (MARKET_OPEN <= now_ist.time() <= MARKET_CLOSE):
+    if not force and not (MARKET_OPEN <= now_ist.time() <= MARKET_CLOSE):
         print("Market closed — no scan needed.")
         return
 
@@ -280,6 +280,28 @@ def scan_once(symbols: list[str], state_file: str) -> None:
         print(f"  {marker} {symbol:12s} | {'NO TRADE' if no_trade else direction:8s} | {bias:20s} | {conf}% conf | {rating}★")
 
         if no_trade or rating < MIN_RATING:
+            # Log NO TRADE / weak scans so the EOD Agent Flow sheet is never blank
+            tgt_nt = result.get("targets", {}) or {}
+            _append_signal_log(now_ist.strftime("%Y-%m-%d"), {
+                "time":       now_ist.strftime("%H:%M IST"),
+                "symbol":     symbol,
+                "direction":  direction or "NO TRADE",
+                "bias":       bias,
+                "confidence": conf,
+                "rating":     rating,
+                "strike":     int(result.get("strike", 0)),
+                "spot":       result.get("spot", 0),
+                "ltp":        result.get("ltp", 0),
+                "expiry":     result.get("expiry", ""),
+                "sl":         tgt_nt.get("sl", ""),
+                "t1":         tgt_nt.get("t1", ""),
+                "t2":         tgt_nt.get("t2", ""),
+                "t3":         tgt_nt.get("t3", ""),
+                "rr":         tgt_nt.get("rr", ""),
+                "futures":    result.get("fut_buildup", {}).get("signal", ""),
+                "gex":        result.get("gex", {}).get("regime", ""),
+                "signals":    " | ".join(result.get("signals", [])[:4]),
+            })
             continue
 
         # deduplicate: skip if same direction+strike already alerted
@@ -383,6 +405,8 @@ if __name__ == "__main__":
                     help="State file for dedup (default: /root/stockAnalyser/af_state.json)")
     ap.add_argument("--test-notify", action="store_true",
                     help="Send a test notification and exit")
+    ap.add_argument("--force", action="store_true",
+                    help="Run scan even outside market hours")
     args = ap.parse_args()
 
     symbols = [s.upper() for s in args.symbols]
@@ -405,13 +429,13 @@ if __name__ == "__main__":
         ok = send_ntfy(title, body, ntfy_topic)
         print(f"ntfy.sh: {'OK' if ok else 'FAILED'}")
     elif args.once:
-        scan_once(symbols, args.state_file)
+        scan_once(symbols, args.state_file, force=args.force)
     elif args.loop:
         interval = args.interval
         print(f"Agent Flow bot loop started — scanning every {interval}s")
         while True:
             try:
-                scan_once(symbols, args.state_file)
+                scan_once(symbols, args.state_file, force=args.force)
             except Exception as e:
                 print(f"[loop] Unhandled error: {e}")
             time.sleep(interval)
