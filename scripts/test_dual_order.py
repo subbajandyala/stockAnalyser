@@ -21,13 +21,21 @@ from kiteconnect import KiteConnect
 kite = KiteConnect(api_key=env["KITE_API_KEY"])
 kite.set_access_token(env["KITE_ACCESS_TOKEN"])
 
-# SENSEX spot + ATM strike
+# ── Show enabled segments ──────────────────────────────────────────────────────
+profile = kite.profile()
+print(f"Account     : {profile['user_name']} ({profile['email']})")
+print(f"Exchanges   : {profile.get('exchanges', [])}")
+print(f"Order types : {profile.get('order_types', [])}")
+print(f"Products    : {profile.get('products', [])}")
+print()
+
+# ── SENSEX spot + ATM strike ───────────────────────────────────────────────────
 spot = kite.quote(["BSE:SENSEX"])["BSE:SENSEX"]["last_price"]
 strike = int(round(spot / 100) * 100)
 print(f"SENSEX spot : {spot:.0f}")
 print(f"ATM strike  : {strike}")
 
-# Nearest Thursday expiry
+# ── Nearest Thursday expiry ───────────────────────────────────────────────────
 today = datetime.date.today()
 days = (3 - today.weekday()) % 7
 if days == 0 and datetime.datetime.now().hour >= 15:
@@ -35,7 +43,7 @@ if days == 0 and datetime.datetime.now().hour >= 15:
 expiry = today + datetime.timedelta(days=days)
 print(f"Expiry      : {expiry}")
 
-# Look up exact BFO symbol from Kite instruments
+# ── Look up exact BFO symbol ──────────────────────────────────────────────────
 CACHE = pathlib.Path("/tmp/kite_instr_bfo.json")
 if not CACHE.exists() or _time.time() - CACHE.stat().st_mtime > 86400:
     print("Fetching BFO instruments ...")
@@ -56,35 +64,76 @@ if not candidates:
     sys.exit(1)
 
 kite_sym = candidates[0]["tradingsymbol"]
-print(f"Kite symbol : {kite_sym}")
+print(f"Kite symbol : {kite_sym}\n")
 
-# --- Kite: BUY 20 @ ₹1 MIS ---
-print(f"\n[KITE] BUY 20 x {kite_sym} @ ₹1 LIMIT BFO MIS ...")
-try:
-    oid = kite.place_order(
-        tradingsymbol=kite_sym,
-        exchange="BFO",
-        transaction_type="BUY",
-        quantity=20,
-        order_type="LIMIT",
-        product="MIS",
-        price=1.0,
-        variety="regular",
-    )
-    print(f"[KITE] OK  order_id={oid}")
-except Exception as e:
-    print(f"[KITE] FAIL  {e}")
+# ── KITE: try NRML first, then MIS ───────────────────────────────────────────
+for product in ["NRML", "MIS"]:
+    print(f"[KITE] BUY 20 x {kite_sym} @ ₹1 LIMIT BFO {product} ...")
+    try:
+        oid = kite.place_order(
+            tradingsymbol=kite_sym,
+            exchange="BFO",
+            transaction_type="BUY",
+            quantity=20,
+            order_type="LIMIT",
+            product=product,
+            price=1.0,
+            variety="regular",
+        )
+        print(f"[KITE] OK  order_id={oid}  (product={product})")
+        break
+    except Exception as e:
+        print(f"[KITE] FAIL ({product})  {e}")
 
-# --- Sharekhan: BUY 20 @ ~₹1 MARGIN ---
-print(f"\n[SHAREKHAN] BUY 20 x SENSEX {strike} CE @ ~₹1 MARGIN ...")
+# ── SHAREKHAN: try NRML, then MARGIN ─────────────────────────────────────────
+print()
 from screener.sharekhan_order import place_sk_order
-# option_ltp=0.98 → limit rounds to ₹1.00
-r = place_sk_order("SENSEX", "CE", spot, option_ltp=0.98)
-if "error" in r:
-    print(f"[SHAREKHAN] FAIL  {r['error']}")
-else:
-    print(f"[SHAREKHAN] OK  order_id={r['order_id']}  symbol={r['tradingsymbol']}")
-    print(f"  SL  order_id={r['sl_order_id']}  trigger=₹{r['sl_price']}")
-    print(f"  TGT order_id={r['target_order_id']}  limit=₹{r['target_price']}")
+import screener.sharekhan_order as _sk_mod
 
-print("\n⚠  Orders at ₹1 will NOT fill. Cancel from Kite + Sharekhan apps.")
+for pt in ["NRML", "MARGIN", "MIS"]:
+    print(f"[SHAREKHAN] BUY 20 x SENSEX {strike} CE @ ~₹1  productType={pt} ...")
+    # Temporarily override productType for this test
+    _orig = None
+    try:
+        import screener.sharekhan_order as _m
+        _orig = None  # we'll patch via env override not possible — just call directly
+    except Exception:
+        pass
+
+    # Inline order with patched productType
+    try:
+        from screener.sharekhan_order import _sk_creds, _sk_client, _atm_strike, _nearest_expiry, _load_master, _find_scrip, _LOT_SIZE, _SK_EXCHANGE, _INSTR_TYPE
+        creds = _sk_creds()
+        client = _sk_client(creds["SHAREKHAN_API_KEY"], creds["SHAREKHAN_ACCESS_TOKEN"])
+        sk_strike = _atm_strike(spot, "SENSEX")
+        exp_dt = _nearest_expiry("SENSEX")
+        exp_str = exp_dt.strftime("%d/%m/%Y")
+        master = _load_master(client)
+        scrip = _find_scrip(master, "SENSEX", sk_strike, "CE", exp_dt)
+        scrip_code = (scrip.get("scripCode") or scrip.get("ScripCode") or 0) if scrip else 0
+        ts = (scrip.get("tradingSymbol") or scrip.get("TradingSymbol") or f"SENSEX{exp_dt.strftime('%d%b%y').upper()}{sk_strike}CE") if scrip else f"SENSEX{exp_dt.strftime('%d%b%y').upper()}{sk_strike}CE"
+        cid = creds["SHAREKHAN_CUSTOMER_ID"]
+        lid = creds["SHAREKHAN_LOGIN_ID"] or cid
+        params = {
+            "customerId": cid, "scripCode": scrip_code, "tradingSymbol": ts,
+            "exchange": "BF", "transactionType": "B", "quantity": 20,
+            "disclosedQty": 0, "price": "1.0", "triggerPrice": "0",
+            "rmsCode": "ANY", "afterHour": "N", "orderType": "NORMAL",
+            "channelUser": lid, "validity": "GFD", "requestType": "NEW",
+            "productType": pt, "instrumentType": "OI",
+            "strikePrice": str(sk_strike), "optionType": "CE", "expiry": exp_str,
+        }
+        result = client.placeOrder(params)
+        print(f"  Raw: {result}")
+        oid = result.get("orderId") or result.get("order_id") or result.get("BrokerOrderId") or ""
+        if oid:
+            print(f"[SHAREKHAN] OK  order_id={oid}  (productType={pt})")
+            break
+        elif isinstance(result, dict) and (result.get("status", 0) >= 400 or result.get("message") == "error"):
+            print(f"[SHAREKHAN] FAIL ({pt})  {result}")
+        else:
+            print(f"[SHAREKHAN] FAIL ({pt})  no order_id in response")
+    except Exception as e:
+        print(f"[SHAREKHAN] FAIL ({pt})  {e}")
+
+print("\n⚠  Cancel any placed orders from Kite + Sharekhan apps.")
