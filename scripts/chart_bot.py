@@ -564,6 +564,8 @@ def scan_once(symbols: list[str], state_file: str) -> None:
                     sk_result = _place_sk_order(
                         symbol, direction, spot,
                         option_ltp=trade.get("entry_price", 0),
+                        option_sl=trade.get("sl", 0),
+                        option_target=trade.get("target", 0),
                     )
                     if "error" in sk_result:
                         print(f"  [SHAREKHAN] SKIPPED — {sk_result['error']}")

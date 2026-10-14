@@ -131,11 +131,16 @@ def place_sk_order(
     direction: str,
     spot: float,
     option_ltp: float = 0.0,
+    option_sl: float = 0.0,
+    option_target: float = 0.0,
 ) -> dict:
     """
-    Place ATM option BUY on Sharekhan.
-    direction: "CE" or "PE" (or "CALL"/"PUT")
-    option_ltp: Kite LTP of the option — used as limit price if available.
+    Place ATM option BUY on Sharekhan, then immediately place SL + target exits.
+    direction   : "CE" or "PE" (or "CALL"/"PUT")
+    option_ltp  : Kite entry premium — used as limit price for the buy.
+    option_sl   : Kite chart-based SL premium — used as SL trigger price.
+    option_target: Kite chart-based target premium — used as limit sell price.
+    If option_sl/option_target are 0, falls back to fixed scalp points.
     Returns dict with order_id and details, or {"error": "..."}.
     """
     creds = _sk_creds()
@@ -232,10 +237,22 @@ def place_sk_order(
         # fires first leaves 0 position — the other auto-rejects (no naked short).
         entry_price = float(price) if price and price != "0" else option_ltp
         if entry_price > 0:
-            stop_pts   = _SCALP_STOP_PTS.get(symbol, 7)
-            tgt_pts    = _SCALP_TARGET_PTS.get(symbol, 10)
-            sl_price   = str(round(round(max(entry_price - stop_pts, 0.05) / 0.05) * 0.05, 2))
-            tgt_price  = str(round(round((entry_price + tgt_pts)            / 0.05) * 0.05, 2))
+            # Use chart-based SL/target from Kite signal if available;
+            # fall back to fixed scalp points otherwise.
+            if option_sl > 0:
+                sl_val = option_sl
+            else:
+                stop_pts = _SCALP_STOP_PTS.get(symbol, 7)
+                sl_val   = max(entry_price - stop_pts, 0.05)
+
+            if option_target > 0:
+                tgt_val = option_target
+            else:
+                tgt_pts = _SCALP_TARGET_PTS.get(symbol, 10)
+                tgt_val = entry_price + tgt_pts
+
+            sl_price   = str(round(round(sl_val  / 0.05) * 0.05, 2))
+            tgt_price  = str(round(round(tgt_val / 0.05) * 0.05, 2))
 
             _exit_base = {
                 "customerId":     customer_id,
