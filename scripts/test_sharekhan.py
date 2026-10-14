@@ -34,10 +34,10 @@ login_id     = os.environ.get("SHAREKHAN_LOGIN_ID")     or env.get("SHAREKHAN_LO
 print("=" * 55)
 print("Sharekhan Connection Test")
 print("=" * 55)
-print(f"  API Key       : {'SET (…' + api_key[-6:]  + ')' if api_key      else 'NOT SET ❌'}")
-print(f"  Access Token  : {'SET (…' + access_token[-6:] + ')' if access_token else 'NOT SET ❌'}")
-print(f"  Customer ID   : {customer_id or 'NOT SET ❌'}")
-print(f"  Login ID      : {login_id    or 'NOT SET ❌'}")
+print(f"  API Key       : {'SET (...' + api_key[-6:]  + ')' if api_key      else 'NOT SET'}")
+print(f"  Access Token  : {'SET (...' + access_token[-6:] + ')' if access_token else 'NOT SET'}")
+print(f"  Customer ID   : {customer_id or 'NOT SET'}")
+print(f"  Login ID      : {login_id    or 'NOT SET'}")
 print()
 
 if not (api_key and access_token):
@@ -48,56 +48,72 @@ if not (api_key and access_token):
 # ── Try import ────────────────────────────────────────────────────────────────
 try:
     from SharekhanApi import SharekhanConnect
-    print("✅ SharekhanApi package found")
+    print("SharekhanApi package found")
 except ImportError:
-    print("❌ SharekhanApi not installed — run: pip install shareconnect")
+    print("SharekhanApi not installed -- run: pip install shareconnect")
     sys.exit(1)
 
 # ── Connect ───────────────────────────────────────────────────────────────────
 try:
     client = SharekhanConnect(api_key, access_token)
-    print("✅ SharekhanConnect object created")
+    print("SharekhanConnect object created")
 except Exception as e:
-    print(f"❌ SharekhanConnect failed: {e}")
+    print(f"SharekhanConnect failed: {e}")
     sys.exit(1)
 
-# ── Test 1: Get profile ───────────────────────────────────────────────────────
-print("\n── Test 1: Get user profile ──")
-try:
-    profile = client.get_profile()
-    print(f"  Raw response: {json.dumps(profile, indent=2)[:400]}")
-    if isinstance(profile, dict):
-        status = profile.get("status") or profile.get("Status") or ""
-        name   = (profile.get("clientName") or profile.get("name")
-                  or profile.get("data", {}).get("clientName") if isinstance(profile.get("data"), dict) else "")
-        if isinstance(status, int) and status >= 400:
-            print(f"  ❌ HTTP {status} — token likely expired. Re-run sharekhan_token.py")
-        elif "error" in str(profile).lower() or "invalid" in str(profile).lower():
-            print(f"  ❌ Auth error — token likely expired. Re-run sharekhan_token.py")
-        else:
-            print(f"  ✅ Connected — name: {name or '(see raw above)'}")
-except Exception as e:
-    print(f"  ❌ get_profile failed: {e}")
+# ── Discover available methods ────────────────────────────────────────────────
+print("\n-- Available methods on SharekhanConnect --")
+methods = [m for m in dir(client) if not m.startswith("_")]
+print("  " + ", ".join(methods))
 
-# ── Test 2: Get positions ─────────────────────────────────────────────────────
-print("\n── Test 2: Get positions ──")
+# ── Test 1: Script master (the call used in production) ──────────────────────
+print("\n-- Test 1: FNO script master (production call) --")
 try:
-    pos = client.positions()
-    count = len(pos) if isinstance(pos, list) else "?"
-    print(f"  ✅ Positions response received — {count} positions")
-    if isinstance(pos, list) and pos:
-        print(f"  First: {json.dumps(pos[0], indent=2)[:300]}")
+    master = client.master("FNO")
+    if isinstance(master, list):
+        print(f"  OK: master('FNO') returned {len(master)} instruments")
+    else:
+        print(f"  WARN: master('FNO') returned: {str(master)[:400]}")
 except Exception as e:
-    print(f"  ❌ positions() failed: {e}")
+    print(f"  FAIL: master('FNO'): {e}")
 
-# ── Test 3: Get orders ────────────────────────────────────────────────────────
-print("\n── Test 3: Get today's orders ──")
-try:
-    orders = client.orders()
-    count = len(orders) if isinstance(orders, list) else "?"
-    print(f"  ✅ Orders response received — {count} orders today")
-except Exception as e:
-    print(f"  ❌ orders() failed: {e}")
+# ── Test 2: Try every plausible profile method ────────────────────────────────
+print("\n-- Test 2: User profile --")
+for name in ["getProfile", "get_profile", "profile", "userProfile", "getUserDetails"]:
+    if not hasattr(client, name):
+        continue
+    try:
+        res = getattr(client, name)()
+        print(f"  OK: {name}() -> {str(res)[:300]}")
+        break
+    except Exception as e:
+        print(f"  FAIL: {name}(): {e}")
+
+# ── Test 3: Positions / holdings ──────────────────────────────────────────────
+print("\n-- Test 3: Positions / holdings --")
+for name in ["positions", "getPositions", "holdings", "getHoldings", "get_positions"]:
+    if not hasattr(client, name):
+        continue
+    try:
+        res = getattr(client, name)()
+        count = len(res) if isinstance(res, list) else "?"
+        print(f"  OK: {name}() -> {count} items")
+        break
+    except Exception as e:
+        print(f"  FAIL: {name}(): {e}")
+
+# ── Test 4: Orders ────────────────────────────────────────────────────────────
+print("\n-- Test 4: Today's orders --")
+for name in ["orders", "getOrders", "orderBook", "getOrderBook", "get_orders"]:
+    if not hasattr(client, name):
+        continue
+    try:
+        res = getattr(client, name)()
+        count = len(res) if isinstance(res, list) else "?"
+        print(f"  OK: {name}() -> {count} orders")
+        break
+    except Exception as e:
+        print(f"  FAIL: {name}(): {e}")
 
 print("\n" + "=" * 55)
 print("Done.")
