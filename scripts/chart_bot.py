@@ -308,7 +308,7 @@ def _monitor_positions(
     - If the position is still open AND the current 15m signal has reversed →
       send an ntfy alert prompting the user to review the position.
     """
-    today = now_ist.strftime("%Y%m%d")
+    today = now_ist.strftime("%Y-%m-%d")
 
     kite = KiteConnect(api_key=api_key)
     kite.set_access_token(access_token)
@@ -427,7 +427,7 @@ def scan_once(symbols: list[str], state_file: str, force: bool = False) -> None:
 
         if direction == "WAIT" or abs(score) < MIN_NOTIFY_SCORE:
             # Log WAIT/weak scans so the EOD Chart Bot sheet is never blank
-            today = now_ist.strftime("%Y%m%d")
+            today = now_ist.strftime("%Y-%m-%d")
             vdict   = p_res["verdict"]
             entry_z = vdict.get("entry_zone") or []
             targets = vdict.get("targets") or []
