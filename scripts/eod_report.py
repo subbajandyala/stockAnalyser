@@ -130,14 +130,25 @@ def _get_instrument_token(symbol: str) -> int | None:
     """Return Kite instrument token for a symbol (index or NSE stock)."""
     if symbol in _INDEX_TOKENS:
         return _INDEX_TOKENS[symbol]
-    p = pathlib.Path("/tmp/kite_instr_nse.json")
-    if p.exists():
-        try:
-            for instr in json.loads(p.read_text()):
-                if instr.get("tradingsymbol") == symbol and instr.get("segment") in ("NSE", "NSE-EQ"):
-                    return instr["instrument_token"]
-        except Exception:
-            pass
+    # Try kite_data module first — it manages its own cache and can refresh
+    try:
+        from screener.kite_data import get_token as _get_token
+        tok = _get_token(symbol)
+        if tok:
+            return tok
+    except Exception:
+        pass
+    # Fallback: read the cached instruments file directly
+    for cache_path in ["/tmp/kite_instr_nse.json", "/tmp/kite_instr_bfo.json"]:
+        p = pathlib.Path(cache_path)
+        if p.exists():
+            try:
+                for instr in json.loads(p.read_text()):
+                    if (instr.get("tradingsymbol") == symbol
+                            and instr.get("segment") in ("NSE", "NSE-EQ", "BFO-FO")):
+                        return instr["instrument_token"]
+            except Exception:
+                pass
     return None
 
 
@@ -260,6 +271,41 @@ def _build_perf_rows(
     _process(cpr_adx_log.get("signals", []),    "CPR+ADX",    "symbol", "price", "direction")
     _process(agent_flow_log.get("signals", []), "Agent Flow", "symbol", "spot",  "direction")
     return rows
+
+
+# ── Extract Kite Signals from chart_bot_log ───────────────────────────────────
+
+def _extract_kite_signals(chart_log: dict) -> list:
+    """
+    Build a Kite Signals list from chart_bot_log entries.
+    Includes any signal where auto_trade was attempted (placed, skipped, or failed).
+    Also includes signals where auto_trade == "off" so the EOD report shows all
+    chart signals and their trade status in one sheet.
+    """
+    result = []
+    for i, s in enumerate(chart_log.get("signals", []), 1):
+        auto_trade = s.get("auto_trade", "")
+        placed = auto_trade == "placed"
+        entry = {
+            "id":            i,
+            "time":          s.get("time", ""),
+            "symbol":        s.get("symbol", ""),
+            "direction":     s.get("direction", ""),
+            "signal":        s.get("verdict", ""),
+            "spot":          s.get("spot", ""),
+            "status":        "placed" if placed else ("skipped" if auto_trade.startswith("skipped") else auto_trade),
+            "tradingsymbol": s.get("tradingsymbol", "—") if placed else "—",
+            "strike":        s.get("strike", "—") if placed else "—",
+            "qty":           s.get("qty", "—") if placed else "—",
+            "entry_premium": s.get("entry_premium", "—") if placed else "—",
+            "sl":            s.get("sl_premium", "—") if placed else "—",
+            "target":        s.get("target_premium", "—") if placed else "—",
+            "order_id":      s.get("order_id", "—") if placed else "—",
+            "gtt_id":        s.get("gtt_id", "—") if placed else "—",
+            "error":         auto_trade if not placed and auto_trade else "",
+        }
+        result.append(entry)
+    return result
 
 
 # ── Fetch final premiums for open trades ──────────────────────────────────────
@@ -887,14 +933,15 @@ def _build_excel(
     ws_all_signals = wb.create_sheet("All Signals")
     ws_rf          = wb.create_sheet("Red Flag Signals")
 
-    perf_rows = _build_perf_rows(chart_log, cpr_adx_log, agent_flow_log, kite, log["date"])
+    perf_rows    = _build_perf_rows(chart_log, cpr_adx_log, agent_flow_log, kite, log["date"])
+    kite_signals = _extract_kite_signals(chart_log) or log.get("kite_signals", [])
     _write_performance_sheet(ws_perf, perf_rows)
     _write_agent_flow_sheet(ws_agent, agent_flow_log.get("signals", []))
     _write_chart_bot_sheet(ws_chart, chart_log.get("signals", []))
     _write_cpr_adx_sheet(ws_cpr, cpr_adx_log.get("signals", []))
     _write_rsi_scalp_sheet(ws_rsi, rsi_scalp_log.get("signals", []))
     total_pnl = _write_trades_sheet(ws_trades, log.get("trades", []))
-    _write_kite_signals_sheet(ws_kite, log.get("kite_signals", []))
+    _write_kite_signals_sheet(ws_kite, kite_signals)
     _write_signals_sheet(ws_all_signals, log.get("signals", []), log["date"])
     _write_rf_signals_sheet(ws_rf, rf_log.get("signals", []))
 
@@ -972,8 +1019,10 @@ if __name__ == "__main__":
     rsi_scalp_log  = _load_rsi_scalp_log(date_str)
     agent_flow_log = _load_agent_flow_log(date_str)
 
+    chart_signals  = chart_log.get("signals", [])
+    kite_from_chart = [s for s in chart_signals if s.get("auto_trade", "off") != "off"]
     print(f"  Agent Flow   : {len(agent_flow_log['signals'])} signals")
-    print(f"  Chart Bot    : {len(chart_log['signals'])} signals")
+    print(f"  Chart Bot    : {len(chart_signals)} signals  ({len(kite_from_chart)} with auto_trade)")
     print(f"  CPR+ADX      : {len(cpr_adx_log['signals'])} signals")
     print(f"  RSI Scalp    : {len(rsi_scalp_log['signals'])} signals")
     print(f"  Elder Ray    : {len(log['signals'])} signals, {len(log['trades'])} trades")

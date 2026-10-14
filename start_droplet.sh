@@ -69,12 +69,20 @@ nohup "$PYTHON" scripts/chart_bot.py --loop >> chart_bot.log 2>&1 &
 CHART_PID=$!
 echo "  chart_bot PID: $CHART_PID"
 
+# ── Start Agent Flow bot (OI + momentum, every 5 min) ────────────────────────
+echo "Starting Agent Flow bot..."
+pkill -f agent_flow_bot.py 2>/dev/null || true
+nohup "$PYTHON" -u scripts/agent_flow_bot.py NIFTY BANKNIFTY SENSEX --loop >> agent_flow.log 2>&1 &
+AF_PID=$!
+echo "  agent_flow_bot PID: $AF_PID"
+
 echo ""
 echo "=== Done ==="
-echo "  App:    http://<your-droplet-ip>:8501"
-echo "  Ticker: tail -f $SCRIPT_DIR/ticker.log"
-echo "  App:    tail -f $SCRIPT_DIR/streamlit.log"
-echo "  CPR+ADX:  tail -f $SCRIPT_DIR/cpr_adx.log"
+echo "  App:       http://<your-droplet-ip>:8501"
+echo "  Ticker:    tail -f $SCRIPT_DIR/ticker.log"
+echo "  App:       tail -f $SCRIPT_DIR/streamlit.log"
+echo "  CPR+ADX:   tail -f $SCRIPT_DIR/cpr_adx.log"
 echo "  Chart Bot: tail -f $SCRIPT_DIR/chart_bot.log"
+echo "  Agent Flow: tail -f $SCRIPT_DIR/agent_flow.log"
 echo ""
 echo "To stop:  bash stop_droplet.sh"

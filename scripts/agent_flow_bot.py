@@ -375,8 +375,12 @@ if __name__ == "__main__":
                     help="Symbols to scan")
     ap.add_argument("--once", action="store_true",
                     help="Single scan then exit (GitHub Actions mode)")
-    ap.add_argument("--state-file", default="/tmp/af_state.json",
-                    help="State file for dedup (default: /tmp/af_state.json)")
+    ap.add_argument("--loop", action="store_true",
+                    help="Run as daemon, scanning every --interval seconds")
+    ap.add_argument("--interval", type=int, default=300,
+                    help="Loop interval in seconds (default: 300)")
+    ap.add_argument("--state-file", default="/root/stockAnalyser/af_state.json",
+                    help="State file for dedup (default: /root/stockAnalyser/af_state.json)")
     ap.add_argument("--test-notify", action="store_true",
                     help="Send a test notification and exit")
     args = ap.parse_args()
@@ -402,6 +406,15 @@ if __name__ == "__main__":
         print(f"ntfy.sh: {'OK' if ok else 'FAILED'}")
     elif args.once:
         scan_once(symbols, args.state_file)
+    elif args.loop:
+        interval = args.interval
+        print(f"Agent Flow bot loop started — scanning every {interval}s")
+        while True:
+            try:
+                scan_once(symbols, args.state_file)
+            except Exception as e:
+                print(f"[loop] Unhandled error: {e}")
+            time.sleep(interval)
     else:
-        print("Use --once for GitHub Actions mode.")
+        print("Use --once for a single scan or --loop for daemon mode.")
         sys.exit(1)
