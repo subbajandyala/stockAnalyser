@@ -65,6 +65,11 @@ CONFIRM_TF = "5m"
 MIN_NOTIFY_SCORE = 3
 # Minimum score to auto-execute an order
 MIN_TRADE_SCORE  = 5
+# Minimum R:R ratio on the underlying to fire a signal
+MIN_RR = 1.5
+# Clean signal window: no new signals outside 9:30–15:00 IST
+SIGNAL_OPEN  = datetime.time(9, 30)
+SIGNAL_CLOSE = datetime.time(15, 0)
 
 def _auto_trade_enabled() -> bool:
     """Check KITE_AUTO_TRADE in env vars first, then .env file."""
@@ -540,6 +545,11 @@ def scan_once(symbols: list[str], state_file: str, force: bool = False) -> None:
     _monitor_positions(symbols, state, api_key, access_token, ntfy_topic, now_ist)
     _save_state(state_file, state)  # persist any GTT-hit clearances immediately
 
+    # Time filter: no new signals during opening noise or closing chop
+    if not force and not (SIGNAL_OPEN <= now_ist.time() <= SIGNAL_CLOSE):
+        print(f"Outside clean signal window ({SIGNAL_OPEN}–{SIGNAL_CLOSE} IST) — skipping new signals.")
+        return
+
     for symbol in symbols:
         try:
             p_res = analyze_chart(symbol, PRIMARY_TF, api_key, access_token)
@@ -559,8 +569,16 @@ def scan_once(symbols: list[str], state_file: str, force: bool = False) -> None:
         marker = "🚀" if abs(score) >= 5 else ("⚡" if abs(score) >= 3 else "  ")
         print(f"  {marker} {symbol:12s} | {PRIMARY_TF} | {verdict:12s} | score {score:+d} | {conf}% conf")
 
-        if direction == "WAIT" or abs(score) < MIN_NOTIFY_SCORE:
-            # Log WAIT/weak scans so the EOD Chart Bot sheet is never blank
+        # Gate: R:R must be at least MIN_RR on the underlying
+        rr_val = p_res["verdict"].get("rr")
+        if rr_val is not None and rr_val < MIN_RR:
+            print(f"         R:R {rr_val} < {MIN_RR} — skipping (poor setup)")
+            _skip_reason = f"R:R {rr_val} < {MIN_RR}"
+        else:
+            _skip_reason = None
+
+        if direction == "WAIT" or abs(score) < MIN_NOTIFY_SCORE or _skip_reason:
+            # Log WAIT/weak/filtered scans so the EOD Chart Bot sheet is never blank
             today = now_ist.strftime("%Y-%m-%d")
             vdict   = p_res["verdict"]
             entry_z = vdict.get("entry_zone") or []
@@ -581,7 +599,7 @@ def scan_once(symbols: list[str], state_file: str, force: bool = False) -> None:
                 "stop_loss":  vdict.get("stop_loss", ""),
                 "targets":    " / ".join(str(round(t, 1)) for t in targets),
                 "rr":         vdict.get("rr", ""),
-                "auto_trade": "no signal",
+                "auto_trade": _skip_reason or "no signal",
                 "tradingsymbol": "", "strike": "", "qty": "",
                 "entry_premium": "", "sl_premium": "", "target_premium": "",
                 "order_id": "",
@@ -602,11 +620,14 @@ def scan_once(symbols: list[str], state_file: str, force: bool = False) -> None:
 
         print(f"         {CONFIRM_TF} confirm: {c_verdict} ({c_score:+d})")
 
-        # 5m must NOT actively oppose the primary direction.
-        # WAIT on 5m is acceptable (consolidation before continuation).
-        # Only block when 5m gives a confirmed opposite signal (CE vs PE).
-        if c_direction != "WAIT" and c_direction != direction:
-            print(f"         Confirmed conflict ({direction} vs {c_direction}) — skipping")
+        # 5m confirmation gate: 5m score must not be negative for CE,
+        # and must not be positive for PE. This prevents entering when
+        # the shorter timeframe momentum actively opposes the 15m signal.
+        if direction == "CE" and c_score < 0:
+            print(f"         5m score {c_score:+d} opposes CE — skipping")
+            continue
+        if direction == "PE" and c_score > 0:
+            print(f"         5m score {c_score:+d} opposes PE — skipping")
             continue
 
         # Dedup: skip if same date+direction+verdict already alerted AND order was placed.

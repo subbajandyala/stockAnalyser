@@ -626,9 +626,19 @@ def generate_verdict(df: pd.DataFrame, events: list, obs: list,
             score -= 1
             reasons.append({"text": f"ADX {adx:.0f} — strong downtrend (DI− dominant)", "ok": False})
     elif adx < 20:
-        reasons.append({"text": f"ADX {adx:.0f} — choppy / no trend", "ok": None})
+        score -= 1
+        reasons.append({"text": f"ADX {adx:.0f} — choppy/no trend, signal quality low", "ok": False})
     else:
         reasons.append({"text": f"ADX {adx:.0f} — trend forming", "ok": None})
+
+    # RSI directional alignment — momentum must agree with trend bias
+    trend_bias = summary.get("bias", "NEUTRAL")
+    if trend_bias == "BUY" and rsi < 45:
+        score -= 1
+        reasons.append({"text": f"RSI {rsi:.0f} < 45 on bullish signal — momentum not confirming", "ok": False})
+    elif trend_bias == "SELL" and rsi > 55:
+        score += 1   # weakens the negative score → reduces sell signal strength
+        reasons.append({"text": f"RSI {rsi:.0f} > 55 on bearish signal — momentum not confirming", "ok": None})
 
     # Order Block proximity
     b_obs = [o for o in obs if o["type"] == "bullish"]
@@ -654,7 +664,8 @@ def generate_verdict(df: pd.DataFrame, events: list, obs: list,
             score -= 1
             reasons.append({"text": f"Below CPR ({_bc:,.0f}–{_tc:,.0f}) — bearish day bias", "ok": False})
         else:
-            reasons.append({"text": f"Inside CPR ({_bc:,.0f}–{_tc:,.0f}) — choppy/indecision", "ok": None})
+            score -= 1
+            reasons.append({"text": f"Inside CPR ({_bc:,.0f}–{_tc:,.0f}) — choppy/indecision zone", "ok": False})
 
     # GEX regime + gamma wall
     if gex and gex.get("regime"):
