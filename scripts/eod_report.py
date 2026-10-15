@@ -89,6 +89,16 @@ def _load_agent_flow_log(date_str: str) -> dict:
         return {"date": date_str, "signals": []}
 
 
+def _load_cpr_log(date_str: str) -> dict:
+    p = pathlib.Path(f"/tmp/cpr_scan_log_{date_str}.json")
+    if not p.exists():
+        return {"date": date_str, "signals": []}
+    try:
+        return json.loads(p.read_text())
+    except Exception:
+        return {"date": date_str, "signals": []}
+
+
 # ── Candle / performance helpers ──────────────────────────────────────────────
 
 def _get_instrument_token(symbol: str) -> int | None:
@@ -277,10 +287,84 @@ def _colour_perf(ws, row: int, pts_col: int, ok_col: int, pts, ok) -> None:
         ok_cell.font = Font(color="FFFF6B6B", bold=True, name="Calibri")
 
 
+# ── Sheet: CPR Scan ───────────────────────────────────────────────────────────
+
+_CPR_ORANGE = "FFFF9800"
+
+_CPR_HEADERS = [
+    ("#",             _HEADER), ("Time",          _HEADER), ("Symbol",   _HEADER),
+    ("Direction",     _HEADER), ("Spot @ Signal",  _HEADER),
+    ("TC",            _HEADER), ("BC",             _HEADER), ("PP",      _HEADER),
+    ("Narrow",        _HEADER), ("Width %",        _HEADER),
+    # +15m
+    ("+15m Spot", _15M_H), ("+15m Pts", _15M_H), ("+15m %", _15M_H), ("+15m ✓?", _15M_H),
+    # EOD
+    ("EOD Spot",  _EOD_H), ("EOD Pts",  _EOD_H), ("EOD %",  _EOD_H), ("EOD ✓?",  _EOD_H),
+]
+
+
+def _write_cpr_scan(ws, signals: list, kite, date_str: str) -> dict:
+    ws.title = "CPR Scan"
+    ws.sheet_properties.tabColor = "FF9800"
+    ws.row_dimensions[1].height = 36
+
+    for col, (h, bg) in enumerate(_CPR_HEADERS, 1):
+        _hdr(ws, 1, col, h, bg=bg)
+
+    c15 = w15 = ce = we = 0
+
+    for i, s in enumerate(signals, 1):
+        direction = s.get("direction", "")
+
+        p15_price, p15_pts, p15_pct, p15_ok, \
+        eod_price, eod_pts, eod_pct, eod_ok = _sig_perf(s, kite, date_str)
+
+        if p15_ok == "✓": c15 += 1
+        elif p15_ok == "✗": w15 += 1
+        if eod_ok == "✓": ce += 1
+        elif eod_ok == "✗": we += 1
+
+        row = [
+            i,
+            s.get("time", ""),
+            s.get("symbol", ""),
+            direction,
+            s.get("spot", ""),
+            s.get("tc", ""),
+            s.get("bc", ""),
+            s.get("pp", ""),
+            "✓" if s.get("narrow") else "",
+            s.get("width", ""),
+            # +15m
+            p15_price, p15_pts, p15_pct, p15_ok,
+            # EOD
+            eod_price, eod_pts, eod_pct, eod_ok,
+        ]
+
+        rn = ws.max_row + 1
+        for col, val in enumerate(row, 1):
+            _cell(ws, rn, col, val)
+
+        if direction == "CE":
+            ws.cell(rn, 4).font = Font(color=_TEAL, bold=True, name="Calibri")
+        elif direction == "PE":
+            ws.cell(rn, 4).font = Font(color="FFFF6B6B", bold=True, name="Calibri")
+
+        # pts at col 12, ok at col 14 for +15m
+        _colour_perf(ws, rn, 12, 14, p15_pts, p15_ok)
+        # pts at col 16, ok at col 18 for EOD
+        _colour_perf(ws, rn, 16, 18, eod_pts, eod_ok)
+
+    _autowidth(ws)
+    ws.freeze_panes = "A2"
+    return {"c15": c15, "w15": w15, "ce": ce, "we": we}
+
+
 # ── Sheet: Summary ────────────────────────────────────────────────────────────
 
 def _write_summary(ws, date_str: str, cb_stats: dict, af_stats: dict,
-                   n_chart: int, n_af: int, n_exec: int) -> None:
+                   cpr_stats: dict, n_chart: int, n_af: int, n_cpr: int,
+                   n_exec: int) -> None:
     ws.title = "Summary"
     ws.sheet_properties.tabColor = "00D4AA"
     now_ist = datetime.datetime.now(_IST)
@@ -303,6 +387,7 @@ def _write_summary(ws, date_str: str, cb_stats: dict, af_stats: dict,
     rows = [
         ("Chart Bot",  n_chart, n_exec, cb_stats),
         ("Agent Flow", n_af,    "—",    af_stats),
+        ("CPR Scan",   n_cpr,   "—",    cpr_stats),
     ]
     for r_idx, (label, n_sigs, n_ex, stats) in enumerate(rows, 4):
         c15 = stats.get("c15", 0)
@@ -502,7 +587,8 @@ def _write_agent_flow(ws, signals: list, kite: KiteConnect | None, date_str: str
 def _build_excel(
     chart_log: dict,
     agent_flow_log: dict,
-    kite: KiteConnect | None,
+    cpr_log: dict,
+    kite,
     date_str: str,
 ) -> tuple[bytes, dict]:
     wb = openpyxl.Workbook()
@@ -510,22 +596,25 @@ def _build_excel(
 
     chart_sigs = chart_log.get("signals", [])
     af_sigs    = agent_flow_log.get("signals", [])
+    cpr_sigs   = cpr_log.get("signals", [])
     n_exec     = len([s for s in chart_sigs if s.get("auto_trade") == "placed"])
 
     # Create sheets in display order
     ws_sum   = wb.create_sheet("Summary")
     ws_chart = wb.create_sheet("Chart Bot")
     ws_af    = wb.create_sheet("Agent Flow")
+    ws_cpr   = wb.create_sheet("CPR Scan")
 
     # Write data sheets first so stats are available for Summary
-    cb_stats = _write_chart_bot(ws_chart,   chart_sigs, kite, date_str)
-    af_stats = _write_agent_flow(ws_af,     af_sigs,    kite, date_str)
-    _write_summary(ws_sum, date_str, cb_stats, af_stats,
-                   len(chart_sigs), len(af_sigs), n_exec)
+    cb_stats  = _write_chart_bot(ws_chart, chart_sigs, kite, date_str)
+    af_stats  = _write_agent_flow(ws_af,   af_sigs,    kite, date_str)
+    cpr_stats = _write_cpr_scan(ws_cpr,    cpr_sigs,   kite, date_str)
+    _write_summary(ws_sum, date_str, cb_stats, af_stats, cpr_stats,
+                   len(chart_sigs), len(af_sigs), len(cpr_sigs), n_exec)
 
     buf = io.BytesIO()
     wb.save(buf)
-    return buf.getvalue(), {"cb": cb_stats, "af": af_stats}
+    return buf.getvalue(), {"cb": cb_stats, "af": af_stats, "cpr": cpr_stats}
 
 
 # ── ntfy delivery ──────────────────────────────────────────────────────────────
@@ -592,13 +681,16 @@ if __name__ == "__main__":
 
     chart_log      = _load_chart_log(date_str)
     agent_flow_log = _load_agent_flow_log(date_str)
+    cpr_log        = _load_cpr_log(date_str)
 
     chart_sigs = chart_log.get("signals", [])
     af_sigs    = agent_flow_log.get("signals", [])
+    cpr_sigs   = cpr_log.get("signals", [])
     n_exec     = len([s for s in chart_sigs if s.get("auto_trade") == "placed"])
 
     print(f"  Chart Bot  : {len(chart_sigs)} signals  ({n_exec} executed)")
     print(f"  Agent Flow : {len(af_sigs)} signals")
+    print(f"  CPR Scan   : {len(cpr_sigs)} signals")
 
     kite = None
     if api_key and access_token:
@@ -609,19 +701,24 @@ if __name__ == "__main__":
         print("  No Kite creds — performance columns will show '—'")
 
     print("  Building Excel workbook...")
-    excel_bytes, stats = _build_excel(chart_log, agent_flow_log, kite, date_str)
+    excel_bytes, stats = _build_excel(chart_log, agent_flow_log, cpr_log, kite, date_str)
 
-    cb = stats.get("cb", {})
-    af = stats.get("af", {})
-    t15_cb = cb.get("c15", 0) + cb.get("w15", 0)
-    te_cb  = cb.get("ce",  0) + cb.get("we",  0)
-    t15_af = af.get("c15", 0) + af.get("w15", 0)
-    te_af  = af.get("ce",  0) + af.get("we",  0)
+    cb  = stats.get("cb",  {})
+    af  = stats.get("af",  {})
+    cpr = stats.get("cpr", {})
+    t15_cb  = cb.get("c15", 0)  + cb.get("w15", 0)
+    te_cb   = cb.get("ce",  0)  + cb.get("we",  0)
+    t15_af  = af.get("c15", 0)  + af.get("w15", 0)
+    te_af   = af.get("ce",  0)  + af.get("we",  0)
+    t15_cpr = cpr.get("c15", 0) + cpr.get("w15", 0)
+    te_cpr  = cpr.get("ce",  0) + cpr.get("we",  0)
 
     print(f"  Chart Bot  +15m : {cb.get('c15',0)}/{t15_cb} correct  "
           f"EOD: {cb.get('ce',0)}/{te_cb} correct")
     print(f"  Agent Flow +15m : {af.get('c15',0)}/{t15_af} correct  "
           f"EOD: {af.get('ce',0)}/{te_af} correct")
+    print(f"  CPR Scan   +15m : {cpr.get('c15',0)}/{t15_cpr} correct  "
+          f"EOD: {cpr.get('ce',0)}/{te_cpr} correct")
 
     print(f"  Sending via ntfy '{topic}'...")
     ok = _send_ntfy(topic, date_str, excel_bytes, stats)
