@@ -48,8 +48,8 @@ _STRIKE_STEP = {
 }
 
 # Scalp targets in premium points (GTT levels)
-_SCALP_TARGET_PTS = {"NIFTY": 10, "SENSEX": 20}
-_SCALP_STOP_PTS   = {"NIFTY":  7, "SENSEX": 14}
+_SCALP_TARGET_PTS = {"NIFTY": 15, "SENSEX": 30}
+_SCALP_STOP_PTS   = {"NIFTY": 12, "SENSEX": 25}
 
 # Ride targets — percentage of entry premium (CPR-confirmed trades)
 _RIDE_TARGET_PCT = 0.60   # +60%
@@ -94,7 +94,9 @@ def _spot_to_option_levels(
     option_sl     = round(round((entry_premium - _ATM_DELTA * sl_pts)     / 0.05) * 0.05, 2)
     option_target = round(round((entry_premium + _ATM_DELTA * target_pts) / 0.05) * 0.05, 2)
 
-    # Sanity clamps: SL no lower than 40% of entry, target no higher than 5×
+    # SL ceiling: must be at least 20% below entry (no tighter than 80% of entry)
+    option_sl     = min(round(entry_premium * 0.80, 1), option_sl)
+    # SL floor: no wider than 60% loss (SL at least 40% of entry)
     option_sl     = max(round(entry_premium * 0.40, 1), option_sl)
     option_target = min(round(entry_premium * 5.00, 1), option_target)
     option_sl     = max(0.05, option_sl)
