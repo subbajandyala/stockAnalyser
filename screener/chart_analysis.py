@@ -729,15 +729,16 @@ def generate_verdict(df: pd.DataFrame, events: list, obs: list,
             stop_loss  = round(close * 0.995, 1)
             entry_zone = (round(close, 1), round(close, 1))
         t1_raw = round(float(sh_vals[-1]), 1) if len(sh_vals) else None
-        # If last swing high is at or below current price we're in new-high territory — use pct fallback
-        if t1_raw is None or t1_raw <= close:
-            t1 = round(close * 1.005, 1)
-            t2 = round(close * 1.010, 1)
-        else:
+        if t1_raw is not None and t1_raw > close:
             t1 = t1_raw
             t2 = round(float(max(sh_vals[-2:]) if len(sh_vals) >= 2 else t1 * 1.005), 1)
-        targets = [t1, t2]
-        if stop_loss and entry_zone:
+            targets = [t1, t2]
+        else:
+            # Market is at new highs — no valid swing target above price.
+            # Return empty targets so chart_bot falls back to _SCALP_TARGET_PTS.
+            targets = []
+            t1 = None
+        if stop_loss and entry_zone and t1:
             risk   = entry_zone[1] - stop_loss
             reward = t1 - entry_zone[1]
             rr = round(reward / risk, 1) if (risk > 0 and reward > 0) else None
@@ -754,15 +755,16 @@ def generate_verdict(df: pd.DataFrame, events: list, obs: list,
             stop_loss  = round(close * 1.005, 1)
             entry_zone = (round(close, 1), round(close, 1))
         t1_raw = round(float(sl_vals[-1]), 1) if len(sl_vals) else None
-        # If last swing low is at or above current price we're in new-low territory — use pct fallback
-        if t1_raw is None or t1_raw >= close:
-            t1 = round(close * 0.995, 1)
-            t2 = round(close * 0.990, 1)
-        else:
+        if t1_raw is not None and t1_raw < close:
             t1 = t1_raw
             t2 = round(float(min(sl_vals[-2:]) if len(sl_vals) >= 2 else t1 * 0.995), 1)
-        targets = [t1, t2]
-        if stop_loss and entry_zone:
+            targets = [t1, t2]
+        else:
+            # Market is at new lows — no valid swing target below price.
+            # Return empty targets so chart_bot falls back to _SCALP_TARGET_PTS.
+            targets = []
+            t1 = None
+        if stop_loss and entry_zone and t1:
             risk   = stop_loss - entry_zone[0]
             reward = entry_zone[0] - t1
             rr = round(reward / risk, 1) if (risk > 0 and reward > 0) else None
