@@ -37,8 +37,8 @@ LOT_SIZE = {
     "SENSEX": 20,
 }
 
-# Signal bot never exceeds this many lots per trade regardless of available balance
-_MAX_LOTS_PER_SIGNAL = 1
+# Fraction of available capital to risk per signal (option premium = full loss if SL hit)
+_RISK_PCT_PER_TRADE = 0.10   # deploy at most 10% of free balance per trade
 
 _EXCHANGE = {
     "NIFTY":  "NFO",
@@ -162,10 +162,11 @@ def _resolve_tradingsymbol(
 
 
 def _calc_qty(kite: KiteConnect, symbol: str, ltp: float, capital_fraction: float = 1.0) -> int:
-    """Return total units to buy based on available cash (95% utilisation, min 1 lot).
+    """Return total units to buy based on available cash.
 
-    capital_fraction: 0.5 when splitting between two symbols, 1.0 for single trade.
-    Falls back to 1 lot on zero balance or API error so order always fires.
+    Sizes to _RISK_PCT_PER_TRADE of free balance so one trade never over-commits
+    capital. capital_fraction halves the allocation when two symbols trade together.
+    Falls back to 1 lot on API error or zero balance so the order always fires.
     """
     lot = LOT_SIZE[symbol]
     cost_per_lot = ltp * lot
@@ -177,12 +178,12 @@ def _calc_qty(kite: KiteConnect, symbol: str, ltp: float, capital_fraction: floa
         return lot
     if available <= 0 or cost_per_lot <= 0:
         return lot
-    usable = available * 0.95 * capital_fraction
+    usable   = available * _RISK_PCT_PER_TRADE * capital_fraction
     max_lots = int(usable / cost_per_lot)
-    lots = max(1, min(max_lots, _MAX_LOTS_PER_SIGNAL))
+    lots     = max(1, max_lots)
     _LOG.info(
-        f"Balance ₹{available:.0f} × {capital_fraction:.0%} → "
-        f"{lots} lot(s) of {symbol} @ ₹{ltp} (₹{cost_per_lot:.0f}/lot)"
+        f"Balance ₹{available:.0f} × {_RISK_PCT_PER_TRADE:.0%} risk → "
+        f"₹{usable:.0f} usable → {lots} lot(s) of {symbol} @ ₹{ltp} (₹{cost_per_lot:.0f}/lot)"
     )
     return lots * lot
 
