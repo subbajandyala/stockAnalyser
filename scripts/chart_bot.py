@@ -452,17 +452,21 @@ def _monitor_positions(
         position_open = has_open_position(kite, symbol, only_ts=bot_ts)
 
         if not position_open:
-            print(f"  [MONITOR] {symbol}: position closed (GTT hit) — re-entry unlocked")
+            print(f"  [MONITOR] {symbol}: position closed (GTT hit)")
             for _k in (trade_key, f"{trade_key}:ts", f"{trade_key}:gtt_id",
                        f"{trade_key}:entry_price", f"{trade_key}:target_price",
                        f"{trade_key}:qty", f"{trade_key}:sl_step"):
                 state.pop(_k, None)
+            # Clear the alerted key too — prevents falling through to immediate re-entry
+            state.pop(symbol, None)
+            # Set a 30-min cooldown so the bot doesn't re-enter right away
+            state[f"{today}:{symbol}:sl_cooldown"] = now_ist.strftime("%H:%M")
             if ntfy_topic:
                 send_ntfy(
                     f"Chart Bot: {symbol} position closed",
                     (
                         f"The GTT was triggered (SL or Target hit).\n"
-                        f"Re-entry unlocked — bot will enter again on the next strong signal."
+                        f"30-min cooldown active — next re-entry earliest in 30 min."
                     ),
                     ntfy_topic,
                     priority="default",
