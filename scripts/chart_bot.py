@@ -526,6 +526,39 @@ def _monitor_positions(
                 )
 
 
+# ── Profit target helpers ─────────────────────────────────────────────────────
+
+def _profit_target_pct() -> float:
+    """Read CHART_PROFIT_TARGET_PCT from env / .env. Default 100 (= 100% of opening balance)."""
+    v = os.environ.get("CHART_PROFIT_TARGET_PCT", "")
+    if not v:
+        env_path = pathlib.Path(__file__).parent.parent / ".env"
+        if env_path.exists():
+            for line in env_path.read_text().splitlines():
+                line = line.strip()
+                if "=" in line and not line.startswith("#"):
+                    k, val = line.split("=", 1)
+                    if k.strip() == "CHART_PROFIT_TARGET_PCT":
+                        v = val.strip().strip('"').strip("'")
+                        break
+    try:
+        return float(v) if v else 100.0
+    except ValueError:
+        return 100.0
+
+
+def _day_pnl(api_key: str, access_token: str) -> float:
+    """Return total day P&L (realised + unrealised) across all net positions."""
+    try:
+        _k = KiteConnect(api_key=api_key)
+        _k.set_access_token(access_token)
+        net = _k.positions().get("net", [])
+        return sum(float(p.get("pnl", 0)) for p in net)
+    except Exception as e:
+        print(f"  [PNL] Could not fetch day P&L: {e}")
+        return 0.0
+
+
 # ── Single scan ───────────────────────────────────────────────────────────────
 
 def scan_once(symbols: list[str], state_file: str, force: bool = False) -> None:
@@ -546,9 +579,7 @@ def scan_once(symbols: list[str], state_file: str, force: bool = False) -> None:
     state = _load_state(state_file)
 
     # Opening balance snapshot — taken once per day on the first scan.
-    # All lot sizing today uses min(opening_balance, live_balance) so that:
-    #   profits don't compound into larger positions, AND
-    #   losses don't cause order rejections from insufficient funds.
+    # Used only as baseline for the daily profit target; lot sizing uses live balance.
     today  = now_ist.strftime("%Y-%m-%d")
     ob_key = f"{today}:opening_balance"
     if ob_key not in state:
@@ -565,12 +596,42 @@ def scan_once(symbols: list[str], state_file: str, force: bool = False) -> None:
         except Exception as _e:
             print(f"  [BALANCE] Could not snapshot opening balance: {_e}")
     opening_balance = float(state.get(ob_key, 0))
-    if opening_balance > 0:
-        print(f"  [BALANCE] Using opening balance ₹{opening_balance:,.0f} for lot sizing")
 
     # Monitor existing open positions before scanning for new signals
     _monitor_positions(symbols, state, api_key, access_token, ntfy_topic, now_ist)
     _save_state(state_file, state)  # persist any GTT-hit clearances immediately
+
+    # Daily profit target gate — stop new trades once P&L >= target% of opening balance.
+    # Existing GTTs remain active; only new entries are blocked.
+    profit_paused_key = f"{today}:profit_target_hit"
+    if not state.get(profit_paused_key) and opening_balance > 0:
+        target_pct = _profit_target_pct()
+        target_amt = opening_balance * target_pct / 100
+        day_pnl    = _day_pnl(api_key, access_token)
+        print(
+            f"  [PROFIT] Day P&L ₹{day_pnl:,.0f} | "
+            f"Target ₹{target_amt:,.0f} ({target_pct:.0f}% of ₹{opening_balance:,.0f})"
+        )
+        if day_pnl >= target_amt:
+            state[profit_paused_key] = True
+            _save_state(state_file, state)
+            print(f"  [PROFIT TARGET] Hit — pausing new trades for today.")
+            if ntfy_topic:
+                send_ntfy(
+                    "🎯 Chart Bot: Daily profit target hit!",
+                    (
+                        f"Day P&L  : ₹{day_pnl:,.0f}\n"
+                        f"Target   : ₹{target_amt:,.0f} ({target_pct:.0f}% of ₹{opening_balance:,.0f})\n"
+                        f"Status   : No new trades for the rest of the day.\n"
+                        f"Existing GTTs remain active."
+                    ),
+                    ntfy_topic,
+                    priority="high",
+                )
+            return
+    elif state.get(profit_paused_key):
+        print(f"  [PROFIT TARGET] Already hit today — skipping new signals.")
+        return
 
     # Time filter: no new signals during opening noise or closing chop
     if not force and not (SIGNAL_OPEN <= now_ist.time() <= SIGNAL_CLOSE):
@@ -759,7 +820,6 @@ def scan_once(symbols: list[str], state_file: str, force: bool = False) -> None:
             trade = _place_order(
                 symbol, direction, spot, api_key, access_token,
                 chart_sl=chart_sl, chart_target=chart_tgt,
-                opening_balance=opening_balance,
             )
             if "error" in trade:
                 print(f"  [AUTO-TRADE] SKIPPED — {trade['error']}")

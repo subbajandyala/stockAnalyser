@@ -159,20 +159,10 @@ def _resolve_tradingsymbol(
     return str(filtered.iloc[0]["tradingsymbol"])
 
 
-def _calc_qty(
-    kite: KiteConnect,
-    symbol: str,
-    ltp: float,
-    capital_fraction: float = 1.0,
-    opening_balance: float = 0.0,
-) -> int:
+def _calc_qty(kite: KiteConnect, symbol: str, ltp: float, capital_fraction: float = 1.0) -> int:
     """Return total units to buy based on available cash (95% utilisation, min 1 lot).
 
     capital_fraction: 0.5 when splitting between two symbols, 1.0 for single trade.
-    opening_balance:  when > 0, caps the sizing base so profits from earlier trades
-                      don't inflate the lot count. If losses have pushed live_balance
-                      below opening_balance, live_balance is used instead to avoid
-                      order rejections from insufficient funds.
     Falls back to 1 lot on zero balance or API error so order always fires.
     """
     lot = LOT_SIZE[symbol]
@@ -182,30 +172,18 @@ def _calc_qty(
         # margins() returns {"equity": {...}, "commodity": {...}}
         # F&O trades (NFO/BFO) draw from the equity segment's live balance
         eq = margins.get("equity", {})
-        live_balance = float(eq.get("available", {}).get("live_balance", 0))
+        available = float(eq.get("available", {}).get("live_balance", 0))
     except Exception as e:
         _LOG.warning(f"Margin fetch failed ({e}) — defaulting to 1 lot")
         return lot
-    if live_balance <= 0 or cost_per_lot <= 0:
+    if available <= 0 or cost_per_lot <= 0:
         return lot
-
-    # Cap at opening_balance to prevent profit compounding into larger positions.
-    # If losses reduced live_balance below opening_balance, use live_balance so
-    # the order doesn't get rejected for insufficient funds.
-    if opening_balance > 0:
-        available = min(opening_balance, live_balance)
-        _LOG.info(
-            f"Live ₹{live_balance:.0f} | Opening ₹{opening_balance:.0f} → using ₹{available:.0f}"
-        )
-    else:
-        available = live_balance
-
     usable   = available * 0.95 * capital_fraction
     max_lots = int(usable / cost_per_lot)
     lots     = max(1, max_lots)
     _LOG.info(
-        f"₹{available:.0f} × 95% → ₹{usable:.0f} usable → "
-        f"{lots} lot(s) of {symbol} @ ₹{ltp} (₹{cost_per_lot:.0f}/lot)"
+        f"Balance ₹{available:.0f} × 95% → "
+        f"₹{usable:.0f} usable → {lots} lot(s) of {symbol} @ ₹{ltp} (₹{cost_per_lot:.0f}/lot)"
     )
     return lots * lot
 
@@ -363,7 +341,6 @@ def place_order_for_signal(
     trade_mode: str = "scalp",
     chart_sl: float | None = None,
     chart_target: float | None = None,
-    opening_balance: float = 0.0,
 ) -> dict:
     """
     Place ATM option order + GTT for the given signal.
@@ -407,7 +384,7 @@ def place_order_for_signal(
         limit_price = round(round(option_ltp * 1.01 / 0.05) * 0.05, 2)
 
         # Dynamic lot sizing based on available balance and capital fraction
-        qty = _calc_qty(kite, symbol, option_ltp, capital_fraction, opening_balance)
+        qty = _calc_qty(kite, symbol, option_ltp, capital_fraction)
 
         _LOG.info(f"Placing order: BUY {qty} x {ts} @ LIMIT {limit_price} (NRML)")
 
