@@ -37,6 +37,9 @@ LOT_SIZE = {
     "SENSEX": 20,
 }
 
+# Signal bot never exceeds this many lots per trade regardless of available balance
+_MAX_LOTS_PER_SIGNAL = 1
+
 _EXCHANGE = {
     "NIFTY":  "NFO",
     "SENSEX": "BFO",
@@ -176,7 +179,7 @@ def _calc_qty(kite: KiteConnect, symbol: str, ltp: float, capital_fraction: floa
         return lot
     usable = available * 0.95 * capital_fraction
     max_lots = int(usable / cost_per_lot)
-    lots = max(1, max_lots)
+    lots = max(1, min(max_lots, _MAX_LOTS_PER_SIGNAL))
     _LOG.info(
         f"Balance ₹{available:.0f} × {capital_fraction:.0%} → "
         f"{lots} lot(s) of {symbol} @ ₹{ltp} (₹{cost_per_lot:.0f}/lot)"
