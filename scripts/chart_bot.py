@@ -545,6 +545,29 @@ def scan_once(symbols: list[str], state_file: str, force: bool = False) -> None:
 
     state = _load_state(state_file)
 
+    # Opening balance snapshot — taken once per day on the first scan.
+    # All lot sizing today uses min(opening_balance, live_balance) so that:
+    #   profits don't compound into larger positions, AND
+    #   losses don't cause order rejections from insufficient funds.
+    today  = now_ist.strftime("%Y-%m-%d")
+    ob_key = f"{today}:opening_balance"
+    if ob_key not in state:
+        try:
+            _kite = KiteConnect(api_key=api_key)
+            _kite.set_access_token(access_token)
+            _m  = _kite.margins()
+            _eq = _m.get("equity", {})
+            _ob = float(_eq.get("available", {}).get("live_balance", 0))
+            if _ob > 0:
+                state[ob_key] = _ob
+                _save_state(state_file, state)
+                print(f"  [BALANCE] Opening balance snapshot: ₹{_ob:,.0f}")
+        except Exception as _e:
+            print(f"  [BALANCE] Could not snapshot opening balance: {_e}")
+    opening_balance = float(state.get(ob_key, 0))
+    if opening_balance > 0:
+        print(f"  [BALANCE] Using opening balance ₹{opening_balance:,.0f} for lot sizing")
+
     # Monitor existing open positions before scanning for new signals
     _monitor_positions(symbols, state, api_key, access_token, ntfy_topic, now_ist)
     _save_state(state_file, state)  # persist any GTT-hit clearances immediately
@@ -736,6 +759,7 @@ def scan_once(symbols: list[str], state_file: str, force: bool = False) -> None:
             trade = _place_order(
                 symbol, direction, spot, api_key, access_token,
                 chart_sl=chart_sl, chart_target=chart_tgt,
+                opening_balance=opening_balance,
             )
             if "error" in trade:
                 print(f"  [AUTO-TRADE] SKIPPED — {trade['error']}")
