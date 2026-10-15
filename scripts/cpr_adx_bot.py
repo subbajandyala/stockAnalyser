@@ -250,15 +250,8 @@ def _should_alert(sym: str, result: dict, state: dict) -> tuple[bool, bool]:
     prev      = state.get(sym, {})
     prev_date = prev.get("date", "")
 
-    # New trading day — only alert if direction actually changed from yesterday.
-    # Carrying the same BUY/SHORT signal overnight is not worth re-alerting.
+    # New trading day — always fire a fresh alert regardless of yesterday's direction.
     if prev_date != today:
-        prev_dir = prev.get("direction", "WAIT")
-        if prev_dir == direction:
-            # Same signal continues from yesterday — update date silently, no alert
-            state[sym] = {"direction": direction, "strength": strength, "date": today}
-            return False, False
-        # Direction changed overnight (or no prior signal) — fire
         return True, False
 
     prev_dir      = prev.get("direction", "WAIT")
