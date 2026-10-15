@@ -728,13 +728,19 @@ def generate_verdict(df: pd.DataFrame, events: list, obs: list,
         else:
             stop_loss  = round(close * 0.995, 1)
             entry_zone = (round(close, 1), round(close, 1))
-        t1 = round(float(sh_vals[-1]), 1) if len(sh_vals) else round(close * 1.005, 1)
-        t2 = round(float(max(sh_vals[-2:]) if len(sh_vals) >= 2 else t1 * 1.005), 1)
+        t1_raw = round(float(sh_vals[-1]), 1) if len(sh_vals) else None
+        # If last swing high is at or below current price we're in new-high territory — use pct fallback
+        if t1_raw is None or t1_raw <= close:
+            t1 = round(close * 1.005, 1)
+            t2 = round(close * 1.010, 1)
+        else:
+            t1 = t1_raw
+            t2 = round(float(max(sh_vals[-2:]) if len(sh_vals) >= 2 else t1 * 1.005), 1)
         targets = [t1, t2]
         if stop_loss and entry_zone:
             risk   = entry_zone[1] - stop_loss
             reward = t1 - entry_zone[1]
-            rr = round(reward / risk, 1) if risk > 0 else None
+            rr = round(reward / risk, 1) if (risk > 0 and reward > 0) else None
 
     elif verdict in ("SELL", "STRONG SELL"):
         if s_obs:
@@ -747,13 +753,19 @@ def generate_verdict(df: pd.DataFrame, events: list, obs: list,
         else:
             stop_loss  = round(close * 1.005, 1)
             entry_zone = (round(close, 1), round(close, 1))
-        t1 = round(float(sl_vals[-1]), 1) if len(sl_vals) else round(close * 0.995, 1)
-        t2 = round(float(min(sl_vals[-2:]) if len(sl_vals) >= 2 else t1 * 0.995), 1)
+        t1_raw = round(float(sl_vals[-1]), 1) if len(sl_vals) else None
+        # If last swing low is at or above current price we're in new-low territory — use pct fallback
+        if t1_raw is None or t1_raw >= close:
+            t1 = round(close * 0.995, 1)
+            t2 = round(close * 0.990, 1)
+        else:
+            t1 = t1_raw
+            t2 = round(float(min(sl_vals[-2:]) if len(sl_vals) >= 2 else t1 * 0.995), 1)
         targets = [t1, t2]
         if stop_loss and entry_zone:
             risk   = stop_loss - entry_zone[0]
             reward = entry_zone[0] - t1
-            rr = round(reward / risk, 1) if risk > 0 else None
+            rr = round(reward / risk, 1) if (risk > 0 and reward > 0) else None
 
     return {
         "verdict": verdict, "color": v_col, "score": score,
