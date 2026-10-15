@@ -625,9 +625,45 @@ def scan_once(symbols: list[str], state_file: str, force: bool = False) -> None:
         # the shorter timeframe momentum actively opposes the 15m signal.
         if direction == "CE" and c_score < 0:
             print(f"         5m score {c_score:+d} opposes CE — skipping")
+            vdict2 = p_res["verdict"]
+            entry_z2 = vdict2.get("entry_zone") or []
+            today2 = now_ist.strftime("%Y-%m-%d")
+            _append_chart_log(today2, {
+                "_key": f"{today2}:{symbol}:{now_ist.strftime('%H%M')}",
+                "time": now_ist.strftime("%H:%M IST"), "symbol": symbol,
+                "direction": direction, "verdict": verdict, "score": score, "conf": conf,
+                "spot": p_res["summary"]["close"],
+                "tf_15m": f"{verdict} ({score:+d})", "tf_5m": f"{c_verdict} ({c_score:+d})",
+                "entry_low": round(entry_z2[0], 1) if len(entry_z2) >= 1 else "",
+                "entry_high": round(entry_z2[1], 1) if len(entry_z2) >= 2 else "",
+                "stop_loss": vdict2.get("stop_loss", ""),
+                "targets": " / ".join(str(round(t, 1)) for t in (vdict2.get("targets") or [])),
+                "rr": vdict2.get("rr", ""),
+                "auto_trade": f"blocked: 5m score {c_score:+d} opposes CE",
+                "tradingsymbol": "", "strike": "", "qty": "",
+                "entry_premium": "", "sl_premium": "", "target_premium": "", "order_id": "",
+            })
             continue
         if direction == "PE" and c_score > 0:
             print(f"         5m score {c_score:+d} opposes PE — skipping")
+            vdict2 = p_res["verdict"]
+            entry_z2 = vdict2.get("entry_zone") or []
+            today2 = now_ist.strftime("%Y-%m-%d")
+            _append_chart_log(today2, {
+                "_key": f"{today2}:{symbol}:{now_ist.strftime('%H%M')}",
+                "time": now_ist.strftime("%H:%M IST"), "symbol": symbol,
+                "direction": direction, "verdict": verdict, "score": score, "conf": conf,
+                "spot": p_res["summary"]["close"],
+                "tf_15m": f"{verdict} ({score:+d})", "tf_5m": f"{c_verdict} ({c_score:+d})",
+                "entry_low": round(entry_z2[0], 1) if len(entry_z2) >= 1 else "",
+                "entry_high": round(entry_z2[1], 1) if len(entry_z2) >= 2 else "",
+                "stop_loss": vdict2.get("stop_loss", ""),
+                "targets": " / ".join(str(round(t, 1)) for t in (vdict2.get("targets") or [])),
+                "rr": vdict2.get("rr", ""),
+                "auto_trade": f"blocked: 5m score {c_score:+d} opposes PE",
+                "tradingsymbol": "", "strike": "", "qty": "",
+                "entry_premium": "", "sl_premium": "", "target_premium": "", "order_id": "",
+            })
             continue
 
         # Dedup: skip if same date+direction+verdict already alerted AND order was placed.

@@ -625,20 +625,22 @@ def generate_verdict(df: pd.DataFrame, events: list, obs: list,
         else:
             score -= 1
             reasons.append({"text": f"ADX {adx:.0f} — strong downtrend (DI− dominant)", "ok": False})
-    elif adx < 20:
+    elif adx < 15:
         score -= 1
-        reasons.append({"text": f"ADX {adx:.0f} — choppy/no trend, signal quality low", "ok": False})
+        reasons.append({"text": f"ADX {adx:.0f} — very weak/no trend, signal quality low", "ok": False})
+    elif adx < 20:
+        reasons.append({"text": f"ADX {adx:.0f} — below 20, mild chop (no penalty)", "ok": None})
     else:
         reasons.append({"text": f"ADX {adx:.0f} — trend forming", "ok": None})
 
-    # RSI directional alignment — momentum must agree with trend bias
+    # RSI directional alignment — only penalise when momentum is clearly misaligned
     trend_bias = summary.get("bias", "NEUTRAL")
-    if trend_bias == "BUY" and rsi < 45:
+    if trend_bias == "BUY" and rsi < 40:
         score -= 1
-        reasons.append({"text": f"RSI {rsi:.0f} < 45 on bullish signal — momentum not confirming", "ok": False})
-    elif trend_bias == "SELL" and rsi > 55:
+        reasons.append({"text": f"RSI {rsi:.0f} < 40 on bullish signal — momentum clearly not confirming", "ok": False})
+    elif trend_bias == "SELL" and rsi > 60:
         score += 1   # weakens the negative score → reduces sell signal strength
-        reasons.append({"text": f"RSI {rsi:.0f} > 55 on bearish signal — momentum not confirming", "ok": None})
+        reasons.append({"text": f"RSI {rsi:.0f} > 60 on bearish signal — momentum clearly not confirming", "ok": None})
 
     # Order Block proximity
     b_obs = [o for o in obs if o["type"] == "bullish"]
