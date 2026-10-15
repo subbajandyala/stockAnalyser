@@ -37,8 +37,6 @@ LOT_SIZE = {
     "SENSEX": 20,
 }
 
-# Fraction of available capital to risk per signal (option premium = full loss if SL hit)
-_RISK_PCT_PER_TRADE = 0.10   # deploy at most 10% of free balance per trade
 
 _EXCHANGE = {
     "NIFTY":  "NFO",
@@ -162,27 +160,29 @@ def _resolve_tradingsymbol(
 
 
 def _calc_qty(kite: KiteConnect, symbol: str, ltp: float, capital_fraction: float = 1.0) -> int:
-    """Return total units to buy based on available cash.
+    """Return total units to buy based on available cash (95% utilisation, min 1 lot).
 
-    Sizes to _RISK_PCT_PER_TRADE of free balance so one trade never over-commits
-    capital. capital_fraction halves the allocation when two symbols trade together.
-    Falls back to 1 lot on API error or zero balance so the order always fires.
+    capital_fraction: 0.5 when splitting between two symbols, 1.0 for single trade.
+    Falls back to 1 lot on zero balance or API error so order always fires.
     """
     lot = LOT_SIZE[symbol]
     cost_per_lot = ltp * lot
     try:
-        margins = kite.margins("equity")
-        available = float(margins.get("available", {}).get("live_balance", 0))
+        margins = kite.margins()
+        # margins() returns {"equity": {...}, "commodity": {...}}
+        # F&O trades (NFO/BFO) draw from the equity segment's live balance
+        eq = margins.get("equity", {})
+        available = float(eq.get("available", {}).get("live_balance", 0))
     except Exception as e:
         _LOG.warning(f"Margin fetch failed ({e}) — defaulting to 1 lot")
         return lot
     if available <= 0 or cost_per_lot <= 0:
         return lot
-    usable   = available * _RISK_PCT_PER_TRADE * capital_fraction
+    usable   = available * 0.95 * capital_fraction
     max_lots = int(usable / cost_per_lot)
     lots     = max(1, max_lots)
     _LOG.info(
-        f"Balance ₹{available:.0f} × {_RISK_PCT_PER_TRADE:.0%} risk → "
+        f"Balance ₹{available:.0f} × 95% → "
         f"₹{usable:.0f} usable → {lots} lot(s) of {symbol} @ ₹{ltp} (₹{cost_per_lot:.0f}/lot)"
     )
     return lots * lot
