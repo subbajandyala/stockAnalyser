@@ -63,8 +63,8 @@ CONFIRM_TF = "5m"
 
 # Minimum score to send a notification (BUY=3, STRONG BUY=5)
 MIN_NOTIFY_SCORE = 3
-# Minimum score to auto-execute an order
-MIN_TRADE_SCORE  = 5
+# Minimum score to auto-execute an order (same as notify — trade on any BUY/SELL signal)
+MIN_TRADE_SCORE  = 3
 # Minimum R:R ratio on the underlying to fire a signal
 MIN_RR = 1.5
 # Clean signal window: no new signals outside 9:30–15:00 IST
@@ -810,8 +810,8 @@ def scan_once(symbols: list[str], state_file: str, force: bool = False) -> None:
             "order_id": "",
         }
 
-        # Auto-execute order — also gate on R:R here
-        if _AUTO_TRADE and symbol in _TRADE_SYMBOLS and abs(score) >= MIN_TRADE_SCORE and not _rr_warn:
+        # Auto-execute order
+        if _AUTO_TRADE and symbol in _TRADE_SYMBOLS and abs(score) >= MIN_TRADE_SCORE:
             spot      = p_res["summary"]["close"]
             chart_sl  = p_res["verdict"].get("stop_loss")
             chart_tgt = (p_res["verdict"].get("targets") or [None])[0]
