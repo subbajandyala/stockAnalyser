@@ -180,12 +180,17 @@ def _calc_qty(kite: KiteConnect, symbol: str, ltp: float, capital_fraction: floa
         return lot
     usable   = available * 0.95 * capital_fraction
     max_lots = int(usable / cost_per_lot)
-    lots     = max(1, max_lots)
+    if max_lots == 0:
+        _LOG.warning(
+            f"Insufficient balance: ₹{available:.0f} available, "
+            f"₹{cost_per_lot:.0f} needed for 1 lot of {symbol} @ ₹{ltp:.1f}"
+        )
+        return 0
     _LOG.info(
         f"Balance ₹{available:.0f} × 95% → "
-        f"₹{usable:.0f} usable → {lots} lot(s) of {symbol} @ ₹{ltp} (₹{cost_per_lot:.0f}/lot)"
+        f"₹{usable:.0f} usable → {max_lots} lot(s) of {symbol} @ ₹{ltp} (₹{cost_per_lot:.0f}/lot)"
     )
-    return lots * lot
+    return max_lots * lot
 
 
 def _fill_price(kite: KiteConnect, order_id: str, exchange: str, ts: str) -> float:
@@ -385,6 +390,13 @@ def place_order_for_signal(
 
         # Dynamic lot sizing based on available balance and capital fraction
         qty = _calc_qty(kite, symbol, option_ltp, capital_fraction)
+        if qty == 0:
+            return {
+                "error": (
+                    f"Insufficient balance for {symbol} option at ₹{option_ltp:.1f} "
+                    f"(need ₹{option_ltp * LOT_SIZE[symbol]:.0f} for 1 lot)"
+                )
+            }
 
         _LOG.info(f"Placing order: BUY {qty} x {ts} @ LIMIT {limit_price} (NRML)")
 

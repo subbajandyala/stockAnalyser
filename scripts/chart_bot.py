@@ -754,9 +754,30 @@ def scan_once(symbols: list[str], state_file: str, force: bool = False) -> None:
             })
             continue
 
+        # Cooldown gate: 30-min wait after an SL or target hit before re-entering.
+        today = now_ist.strftime("%Y-%m-%d")
+        cooldown_key = f"{today}:{symbol}:sl_cooldown"
+        cooldown_str = state.get(cooldown_key)
+        if cooldown_str:
+            try:
+                cd_time = datetime.datetime.strptime(
+                    f"{today} {cooldown_str}", "%Y-%m-%d %H:%M"
+                ).replace(tzinfo=_IST)
+                cd_end = cd_time + datetime.timedelta(minutes=30)
+                if now_ist < cd_end:
+                    remaining = int((cd_end - now_ist).total_seconds() / 60)
+                    print(
+                        f"         [{symbol}] SL cooldown active — "
+                        f"{remaining}min remaining (re-entry after {cd_end.strftime('%H:%M')})"
+                    )
+                    continue
+                else:
+                    state.pop(cooldown_key, None)  # cooldown expired
+            except Exception:
+                state.pop(cooldown_key, None)
+
         # Dedup: skip if same date+direction+verdict already alerted AND order was placed.
         # Prefix with today's date so stale state from yesterday never blocks today.
-        today     = now_ist.strftime("%Y-%m-%d")
         state_key = f"{today}:{symbol}:{direction}:{verdict}"
         trade_key = f"{today}:{symbol}:trade"
         already_alerted = state.get(symbol) == state_key
