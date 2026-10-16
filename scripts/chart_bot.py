@@ -770,6 +770,21 @@ def scan_once(symbols: list[str], state_file: str, force: bool = False) -> None:
         elif already_alerted:
             print(f"         Already alerted (no trade yet) — will retry order if conditions met")
 
+        # If a trade was placed for this symbol today (even for a different direction),
+        # block a new order until _monitor_positions clears the trade_key.
+        # This prevents double-entry when the signal flips CE→PE while a position is open.
+        if already_traded:
+            bot_ts_check = state.get(f"{trade_key}:ts")
+            try:
+                _chk_kite = KiteConnect(api_key=api_key)
+                _chk_kite.set_access_token(access_token)
+                _pos_open = has_open_position(_chk_kite, symbol, only_ts=bot_ts_check)
+            except Exception:
+                _pos_open = True  # assume open on error — safer than double-entering
+            if _pos_open:
+                print(f"         [{symbol}] Position still open from earlier trade — waiting for GTT")
+                continue
+
         # Format and send notification
         title, message = _fmt_alert(symbol, p_res, c_res)
         print(f"\n{'='*55}\n{message}\n{'='*55}\n")
