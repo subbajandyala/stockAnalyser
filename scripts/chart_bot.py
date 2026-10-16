@@ -657,16 +657,14 @@ def scan_once(symbols: list[str], state_file: str, force: bool = False) -> None:
         marker = "🚀" if abs(score) >= 5 else ("⚡" if abs(score) >= 3 else "  ")
         print(f"  {marker} {symbol:12s} | {PRIMARY_TF} | {verdict:12s} | score {score:+d} | {conf}% conf")
 
-        # Gate: R:R must be at least MIN_RR on the underlying
+        # R:R check — logged but does NOT block notification; only blocks auto-trade
         rr_val = p_res["verdict"].get("rr")
-        if rr_val is not None and rr_val < MIN_RR:
-            print(f"         R:R {rr_val} < {MIN_RR} — skipping (poor setup)")
-            _skip_reason = f"R:R {rr_val} < {MIN_RR}"
-        else:
-            _skip_reason = None
+        _rr_warn = f"R:R {rr_val} < {MIN_RR} (notify-only)" if (rr_val is not None and rr_val < MIN_RR) else None
+        if _rr_warn:
+            print(f"         {_rr_warn}")
 
-        if direction == "WAIT" or abs(score) < MIN_NOTIFY_SCORE or _skip_reason:
-            # Log WAIT/weak/filtered scans so the EOD Chart Bot sheet is never blank
+        if direction == "WAIT" or abs(score) < MIN_NOTIFY_SCORE:
+            # Log WAIT/weak scans so the EOD Chart Bot sheet is never blank
             today = now_ist.strftime("%Y-%m-%d")
             vdict   = p_res["verdict"]
             entry_z = vdict.get("entry_zone") or []
@@ -687,7 +685,7 @@ def scan_once(symbols: list[str], state_file: str, force: bool = False) -> None:
                 "stop_loss":  vdict.get("stop_loss", ""),
                 "targets":    " / ".join(str(round(t, 1)) for t in targets),
                 "rr":         vdict.get("rr", ""),
-                "auto_trade": _skip_reason or "no signal",
+                "auto_trade": "no signal",
                 "tradingsymbol": "", "strike": "", "qty": "",
                 "entry_premium": "", "sl_premium": "", "target_premium": "",
                 "order_id": "",
@@ -802,7 +800,7 @@ def scan_once(symbols: list[str], state_file: str, force: bool = False) -> None:
             "stop_loss":  vdict.get("stop_loss", ""),
             "targets":    " / ".join(str(round(t, 1)) for t in targets),
             "rr":         vdict.get("rr", ""),
-            "auto_trade": "off",
+            "auto_trade": f"skipped: {_rr_warn}" if _rr_warn else "off",
             "tradingsymbol": "",
             "strike": "",
             "qty": "",
@@ -812,8 +810,8 @@ def scan_once(symbols: list[str], state_file: str, force: bool = False) -> None:
             "order_id": "",
         }
 
-        # Auto-execute order
-        if _AUTO_TRADE and symbol in _TRADE_SYMBOLS and abs(score) >= MIN_TRADE_SCORE:
+        # Auto-execute order — also gate on R:R here
+        if _AUTO_TRADE and symbol in _TRADE_SYMBOLS and abs(score) >= MIN_TRADE_SCORE and not _rr_warn:
             spot      = p_res["summary"]["close"]
             chart_sl  = p_res["verdict"].get("stop_loss")
             chart_tgt = (p_res["verdict"].get("targets") or [None])[0]
