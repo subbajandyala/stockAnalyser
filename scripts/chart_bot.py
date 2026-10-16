@@ -578,9 +578,23 @@ def scan_once(symbols: list[str], state_file: str, force: bool = False) -> None:
 
     state = _load_state(state_file)
 
+    today  = now_ist.strftime("%Y-%m-%d")
+
+    # Prune state entries from previous days so the file doesn't grow unbounded.
+    # Keep only keys that either have no date prefix (e.g. symbol→state_key which
+    # embeds today's date in its value) or whose date prefix matches today.
+    stale_keys = [
+        k for k in list(state.keys())
+        if k[:10].count("-") == 2 and k[:10] < today   # looks like "YYYY-MM-DD:…"
+    ]
+    if stale_keys:
+        for k in stale_keys:
+            del state[k]
+        _save_state(state_file, state)
+        print(f"  [STATE] Pruned {len(stale_keys)} stale entries from previous days")
+
     # Opening balance snapshot — taken once per day on the first scan.
     # Used only as baseline for the daily profit target; lot sizing uses live balance.
-    today  = now_ist.strftime("%Y-%m-%d")
     ob_key = f"{today}:opening_balance"
     if ob_key not in state:
         try:
