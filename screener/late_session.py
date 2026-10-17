@@ -17,6 +17,7 @@ Scoring (sum capped at -10 … +10):
   F3  Volume surge × price direction       max ±2
   F4  Price velocity (pts per 5-min bar)   max ±2
   F5  Elder Ray Bull/Bear Power            max ±1
+  F7  First-30-min return (9:15–9:45)      max ±1
   F6  CAS amplifier (SENSEX only)          max ±2  [only when score already ≥±4]
 """
 
@@ -73,6 +74,26 @@ def _vwap_today(df: pd.DataFrame) -> float:
         return float((tp * vol).sum() / vol.sum())
     except Exception:
         return float("nan")
+
+
+def opening_momentum(df: pd.DataFrame) -> Optional[float]:
+    """Today's 9:15→9:45 return in %, or None if those bars aren't available."""
+    try:
+        idx = df.index
+        if idx.tz is None:
+            idx = idx.tz_localize(_IST)
+        idx = idx.tz_convert(_IST)
+        today = datetime.datetime.now(_IST).date()
+        d = df[(idx.date == today)]
+        d_idx = idx[idx.date == today]
+        first = d[(d_idx.time >= datetime.time(9, 15)) & (d_idx.time < datetime.time(9, 45))]
+        if len(first) < 2 or d_idx[-1].time() < datetime.time(9, 45):
+            return None
+        o = float(first["Open"].iloc[0])
+        c = float(first["Close"].iloc[-1])
+        return (c / o - 1) * 100 if o > 0 else None
+    except Exception:
+        return None
 
 
 def atm_strike(spot: float, step: int) -> int:
@@ -211,6 +232,19 @@ def score_signal(
         score += s
     except Exception:
         pass
+
+    # ── F7: First-30-min momentum (Gao et al. 2018)  (max ±1) ───────────────
+    # The 9:15–9:45 return tends to predict the last half hour's direction.
+    om = opening_momentum(df_5m)
+    if om is not None:
+        if om >= 0.15:
+            s = 1;  bias = "CE"
+        elif om <= -0.15:
+            s = -1; bias = "PE"
+        else:
+            s = 0;  bias = "—"
+        factors.append({"name": "First 30 min", "value": f"{om:+.2f}% (9:15–9:45)", "bias": bias, "pts": s})
+        score += s
 
     # ── F6: CAS amplifier (SENSEX, 3–4 PM only)  (max ±2) ───────────────────
     if is_cas:

@@ -556,10 +556,16 @@ def generate_verdict(df: pd.DataFrame, events: list, obs: list,
     vwap   = float(last.get("VWAP",   0) or 0)
     if np.isnan(vwap): vwap = 0
 
-    score   = 0
     reasons = []
+    if np.isnan(rsi): rsi = 50
+    if np.isnan(adx): adx = 0
 
-    # Recent structure (last 3 events carry the most weight)
+    # Indicators are scored in four groups, each capped, so one idea (e.g. "trend")
+    # can't be counted three times. Total range is ±7: trend ±3, momentum ±1,
+    # location ±2, options flow ±1.
+
+    # ── Group 1: Trend — structure + EMA alignment + ADX/DI ─────────────────
+    trend = 0
     recent_types = [e["type"] for e in events[-8:]] if events else []
     last3_types  = recent_types[-3:] if recent_types else []
     has_bull = any(t in ("BOS_UP",   "CHOCH_UP")   for t in last3_types)
@@ -567,147 +573,151 @@ def generate_verdict(df: pd.DataFrame, events: list, obs: list,
     last_ev  = recent_types[-1] if recent_types else ""
 
     if has_bull and not has_bear:
-        score += 2
+        trend += 2
         reasons.append({"text": f"Bullish structure — {last_ev.replace('_',' ')}", "ok": True})
     elif has_bear and not has_bull:
-        score -= 2
+        trend -= 2
         reasons.append({"text": f"Bearish structure — {last_ev.replace('_',' ')}", "ok": False})
     else:
         reasons.append({"text": "Mixed / unclear structure", "ok": None})
 
-    # EMA alignment
     if ema20 > ema50 > ema200 and close > ema20:
-        score += 2
+        trend += 2
         reasons.append({"text": "EMA aligned bullish (20 > 50 > 200, price above all)", "ok": True})
     elif ema20 < ema50 < ema200 and close < ema20:
-        score -= 2
+        trend -= 2
         reasons.append({"text": "EMA aligned bearish (20 < 50 < 200, price below all)", "ok": False})
     elif ema20 > ema50 and close > ema50:
-        score += 1
+        trend += 1
         reasons.append({"text": "EMA20 > EMA50, price above EMA50", "ok": True})
     elif ema20 < ema50 and close < ema50:
-        score -= 1
+        trend -= 1
         reasons.append({"text": "EMA20 < EMA50, price below EMA50", "ok": False})
     else:
         reasons.append({"text": "EMA alignment mixed", "ok": None})
 
-    # VWAP
+    if adx > 25:
+        if di_pos > di_neg:
+            trend += 1
+            reasons.append({"text": f"ADX {adx:.0f} — strong uptrend (DI+ dominant)", "ok": True})
+        else:
+            trend -= 1
+            reasons.append({"text": f"ADX {adx:.0f} — strong downtrend (DI− dominant)", "ok": False})
+    elif adx >= 20:
+        reasons.append({"text": f"ADX {adx:.0f} — trend forming", "ok": None})
+
+    trend = int(np.clip(trend, -3, 3))
+    if adx < 15 and trend != 0:
+        # Weak trend shrinks the score toward zero instead of pushing it bearish
+        trend -= int(np.sign(trend))
+        reasons.append({"text": f"ADX {adx:.0f} — very weak trend, conviction reduced", "ok": None})
+    elif adx < 20:
+        reasons.append({"text": f"ADX {adx:.0f} — below 20, mild chop", "ok": None})
+
+    d = int(np.sign(trend))
+
+    # ── Group 2: Momentum — RSI judged relative to the trend direction ──────
+    momentum = 0
+    if d != 0:
+        x = (rsi - 50) * d   # positive = RSI agrees with trend
+        side = "bullish" if d > 0 else "bearish"
+        if x > 22:
+            reasons.append({"text": f"RSI {rsi:.0f} — stretched in {side} direction, late entry risk", "ok": None})
+        elif x >= 5:
+            momentum = d
+            reasons.append({"text": f"RSI {rsi:.0f} — momentum confirms {side} trend", "ok": d > 0})
+        elif x < -10:
+            momentum = -d
+            reasons.append({"text": f"RSI {rsi:.0f} — momentum contradicts {side} trend", "ok": d < 0})
+        else:
+            reasons.append({"text": f"RSI {rsi:.0f} — neutral momentum", "ok": None})
+    else:
+        reasons.append({"text": f"RSI {rsi:.0f} — no trend to confirm", "ok": None})
+
+    # ── Group 3: Location — VWAP, Order Blocks, CPR ─────────────────────────
+    location = 0
     if vwap > 0:
         if close > vwap * 1.001:
-            score += 1
+            location += 1
             reasons.append({"text": f"Above VWAP ({vwap:,.0f}) — bulls in control", "ok": True})
         elif close < vwap * 0.999:
-            score -= 1
+            location -= 1
             reasons.append({"text": f"Below VWAP ({vwap:,.0f}) — bears in control", "ok": False})
         else:
             reasons.append({"text": "At VWAP — neutral zone", "ok": None})
 
-    # RSI
-    if np.isnan(rsi): rsi = 50
-    if rsi > 70:
-        score -= 1
-        reasons.append({"text": f"RSI {rsi:.0f} — overbought, potential fall", "ok": False})
-    elif rsi < 30:
-        score += 1
-        reasons.append({"text": f"RSI {rsi:.0f} — oversold, watch for bounce", "ok": None})
-    elif 35 <= rsi <= 60:
-        score += 1
-        reasons.append({"text": f"RSI {rsi:.0f} — healthy zone, room to move", "ok": True})
-    else:
-        reasons.append({"text": f"RSI {rsi:.0f} — neutral", "ok": None})
-
-    # ADX + DI
-    if np.isnan(adx): adx = 0
-    if adx > 25:
-        if di_pos > di_neg:
-            score += 1
-            reasons.append({"text": f"ADX {adx:.0f} — strong uptrend (DI+ dominant)", "ok": True})
-        else:
-            score -= 1
-            reasons.append({"text": f"ADX {adx:.0f} — strong downtrend (DI− dominant)", "ok": False})
-    elif adx < 15:
-        score -= 1
-        reasons.append({"text": f"ADX {adx:.0f} — very weak/no trend, signal quality low", "ok": False})
-    elif adx < 20:
-        reasons.append({"text": f"ADX {adx:.0f} — below 20, mild chop (no penalty)", "ok": None})
-    else:
-        reasons.append({"text": f"ADX {adx:.0f} — trend forming", "ok": None})
-
-    # RSI directional alignment — only penalise when momentum is clearly misaligned
-    trend_bias = summary.get("bias", "NEUTRAL")
-    if trend_bias == "BUY" and rsi < 40:
-        score -= 1
-        reasons.append({"text": f"RSI {rsi:.0f} < 40 on bullish signal — momentum clearly not confirming", "ok": False})
-    elif trend_bias == "SELL" and rsi > 60:
-        score += 1   # weakens the negative score → reduces sell signal strength
-        reasons.append({"text": f"RSI {rsi:.0f} > 60 on bearish signal — momentum clearly not confirming", "ok": None})
-
-    # Order Block proximity
     b_obs = [o for o in obs if o["type"] == "bullish"]
     s_obs = [o for o in obs if o["type"] == "bearish"]
     near_bull_ob = any(o["bottom"] * 0.997 <= close <= o["top"] * 1.005 for o in b_obs)
     near_bear_ob = any(o["bottom"] * 0.995 <= close <= o["top"] * 1.003 for o in s_obs)
     if near_bull_ob:
-        score += 1
+        location += 1
         reasons.append({"text": "Price at Bullish Order Block — institutional buy zone", "ok": True})
     if near_bear_ob:
-        score -= 1
+        location -= 1
         reasons.append({"text": "Price at Bearish Order Block — institutional sell zone", "ok": False})
 
-    # CPR position
+    inside_cpr = False
     if cpr:
         _cp = cpr.get("price_position", "")
         _tc = cpr.get("tc", 0)
         _bc = cpr.get("bc", 0)
         if _cp == "above":
-            score += 1
+            location += 1
             reasons.append({"text": f"Above CPR ({_bc:,.0f}–{_tc:,.0f}) — bullish day bias", "ok": True})
         elif _cp == "below":
-            score -= 1
+            location -= 1
             reasons.append({"text": f"Below CPR ({_bc:,.0f}–{_tc:,.0f}) — bearish day bias", "ok": False})
         else:
-            score -= 1
-            reasons.append({"text": f"Inside CPR ({_bc:,.0f}–{_tc:,.0f}) — choppy/indecision zone", "ok": False})
+            inside_cpr = True
+            reasons.append({"text": f"Inside CPR ({_bc:,.0f}–{_tc:,.0f}) — choppy/indecision zone", "ok": None})
+    location = int(np.clip(location, -2, 2))
 
-    # GEX regime + gamma wall
+    # ── Group 4: Options flow — GEX regime + gamma wall ─────────────────────
+    flow = 0
     if gex and gex.get("regime"):
         regime     = gex["regime"]
         gamma_wall = gex.get("gamma_wall", 0)
         wall_pct   = gex.get("wall_pct", 0)
         if regime == "Negative":
-            # Amplifying environment: dealers chase moves → boost leading direction
-            if score > 0:
-                score += 1
-                reasons.append({"text": "Negative GEX — trending environment amplifies the upside", "ok": True})
-            elif score < 0:
-                score -= 1
-                reasons.append({"text": "Negative GEX — trending environment amplifies the downside", "ok": False})
-            else:
-                reasons.append({"text": "Negative GEX — volatile/trending, wait for direction", "ok": None})
+            flow += d
+            reasons.append({"text": "Negative GEX — dealers amplify moves (trending)", "ok": None if d == 0 else d > 0})
         else:
             reasons.append({"text": "Positive GEX — dealers pin price, expect mean-reversion/range", "ok": None})
-
         if gamma_wall > 0:
             if wall_pct > 0.5:
-                score -= 1
+                flow -= 1
                 reasons.append({"text": f"Gamma Wall {int(gamma_wall):,} above price — dealer resistance", "ok": False})
             elif wall_pct < -0.5:
-                score += 1
+                flow += 1
                 reasons.append({"text": f"Gamma Wall {int(gamma_wall):,} below price — dealer support", "ok": True})
             else:
                 reasons.append({"text": f"Gamma Wall {int(gamma_wall):,} — ATM pin zone", "ok": None})
+    flow = int(np.clip(flow, -1, 1))
 
-    # Verdict
-    if score >= 5:
+    score = trend + momentum + location + flow
+    if inside_cpr and score != 0:
+        score -= int(np.sign(score))
+
+    groups = {"trend": trend, "momentum": momentum, "location": location, "flow": flow}
+
+    # A directional verdict needs the trend group plus at least one other group on its side
+    sgn   = int(np.sign(score))
+    agree = sum(1 for g in (momentum, location, flow) if g != 0 and int(np.sign(g)) == sgn)
+    groups_ok = sgn != 0 and int(np.sign(trend)) == sgn and agree >= 1
+
+    if groups_ok and score >= 5:
         verdict, v_col = "STRONG BUY",  "#00d4aa"
-    elif score >= 3:
+    elif groups_ok and score >= 3:
         verdict, v_col = "BUY",         "#3fb950"
-    elif score <= -5:
+    elif groups_ok and score <= -5:
         verdict, v_col = "STRONG SELL", "#f85149"
-    elif score <= -3:
+    elif groups_ok and score <= -3:
         verdict, v_col = "SELL",        "#f0883e"
     else:
         verdict, v_col = "WAIT",        "#8b949e"
+        if abs(score) >= 3 and not groups_ok:
+            reasons.append({"text": "Score is high but trend and confirmations disagree", "ok": None})
 
     confidence = min(100, max(0, int((abs(score) / 7) * 100)))
 
@@ -771,7 +781,7 @@ def generate_verdict(df: pd.DataFrame, events: list, obs: list,
 
     return {
         "verdict": verdict, "color": v_col, "score": score,
-        "confidence": confidence, "reasons": reasons,
+        "confidence": confidence, "reasons": reasons, "groups": groups,
         "entry_zone": entry_zone, "stop_loss": stop_loss,
         "targets": targets, "rr": rr,
     }
@@ -856,23 +866,72 @@ def compute_cpr(df: pd.DataFrame, interval_key: str) -> dict:
 
 # ── Main entry point ──────────────────────────────────────────────────────────
 
-def analyze_chart(symbol: str, interval: str,
-                  api_key: str, access_token: str) -> dict:
-    try:
-        token, display_name = resolve_token(symbol, api_key, access_token)
-    except ValueError as e:
-        return {"error": str(e)}
+_INTERVAL_MINUTES = {"1m": 1, "2m": 2, "5m": 5, "10m": 10, "15m": 15, "1H": 60}
 
+# Index spot data has no volume, so VWAP is weighted by the front-month future's volume
+_FUT_SOURCE = {"NIFTY": ("NFO", "NIFTY"), "BANKNIFTY": ("NFO", "BANKNIFTY"), "SENSEX": ("BFO", "SENSEX")}
+_FUT_TOKEN_CACHE: dict[tuple[str, str], int | None] = {}
+
+
+def drop_open_candle(df: pd.DataFrame, interval_key: str,
+                     now: datetime.datetime | None = None) -> pd.DataFrame:
+    """Drop the last candle if it hasn't closed yet (Kite timestamps are candle starts)."""
+    mins = _INTERVAL_MINUTES.get(interval_key)
+    if not mins or df.empty:
+        return df
+    now = now or datetime.datetime.now(_IST)
+    if df.index[-1] + pd.Timedelta(minutes=mins) > now:
+        return df.iloc[:-1]
+    return df
+
+
+def front_future_token(symbol: str, api_key: str, access_token: str) -> int | None:
+    src = _FUT_SOURCE.get(symbol.upper())
+    if not src:
+        return None
+    key = (symbol.upper(), datetime.date.today().isoformat())
+    if key in _FUT_TOKEN_CACHE:
+        return _FUT_TOKEN_CACHE[key]
+    exchange, name = src
+    tok = None
+    try:
+        r = requests.get(f"{_KITE_BASE}/instruments/{exchange}",
+                         headers=_hdrs(api_key, access_token), timeout=30)
+        if r.ok:
+            df = pd.read_csv(StringIO(r.text))
+            m = df[(df["name"] == name) & (df["instrument_type"] == "FUT")].copy()
+            m["expiry"] = pd.to_datetime(m["expiry"]).dt.date
+            m = m[m["expiry"] >= datetime.date.today()].sort_values("expiry")
+            if not m.empty:
+                tok = int(m.iloc[0]["instrument_token"])
+    except Exception:
+        tok = None
+    _FUT_TOKEN_CACHE[key] = tok
+    return tok
+
+
+def _with_futures_volume(df: pd.DataFrame, symbol: str, interval: str,
+                         api_key: str, access_token: str) -> pd.DataFrame:
+    if df["Volume"].sum() > 0:
+        return df
+    fut_tok = front_future_token(symbol, api_key, access_token)
+    if not fut_tok:
+        return df
+    try:
+        fut = fetch_candles(fut_tok, interval, api_key, access_token)
+    except Exception:
+        return df
+    vol = fut["Volume"].reindex(df.index).fillna(0)
+    if vol.sum() <= 0:
+        return df
+    df = df.copy()
+    df["Volume"] = vol.values
+    return df
+
+
+def analyze_df(df: pd.DataFrame, interval: str, gex: dict | None = None) -> dict:
+    """Run the full indicator/SMC/verdict pipeline on an already-fetched DataFrame."""
     intraday = interval != "1D"
-
-    try:
-        df = fetch_candles(token, interval, api_key, access_token)
-    except RuntimeError as e:
-        return {"error": str(e)}
-
-    if df.empty or len(df) < 30:
-        return {"error": "Not enough data — try a longer timeframe or check the symbol"}
-
     df       = compute_indicators(df, intraday=intraday)
     df       = detect_swings(df, n=3)
     df, evts = detect_structure(df)
@@ -881,15 +940,38 @@ def analyze_chart(symbol: str, interval: str,
     df       = generate_signals(df, obs, evts)
     summary  = build_summary(df, evts)
     cpr      = compute_cpr(df, interval)
+    verdict  = generate_verdict(df, evts, obs, fvgs, summary, cpr=cpr, gex=gex)
+    return {
+        "df": df, "events": evts, "obs": obs, "fvgs": fvgs,
+        "summary": summary, "verdict": verdict, "cpr": cpr, "gex": gex,
+    }
+
+
+def analyze_chart(symbol: str, interval: str,
+                  api_key: str, access_token: str,
+                  closed_only: bool = False) -> dict:
+    """closed_only=True scores only completed candles (use for signal bots, not charts)."""
+    try:
+        token, display_name = resolve_token(symbol, api_key, access_token)
+    except ValueError as e:
+        return {"error": str(e)}
+
+    try:
+        df = fetch_candles(token, interval, api_key, access_token)
+    except RuntimeError as e:
+        return {"error": str(e)}
+
+    if interval != "1D":
+        df = _with_futures_volume(df, display_name, interval, api_key, access_token)
+    if closed_only:
+        df = drop_open_candle(df, interval)
+
+    if df.empty or len(df) < 30:
+        return {"error": "Not enough data — try a longer timeframe or check the symbol"}
 
     spot = float(df["Close"].iloc[-1])
     gex  = _fetch_index_gex(display_name, spot, api_key, access_token)
 
-    verdict  = generate_verdict(df, evts, obs, fvgs, summary, cpr=cpr, gex=gex)
-
-    return {
-        "df": df, "events": evts, "obs": obs, "fvgs": fvgs,
-        "summary": summary, "verdict": verdict, "cpr": cpr,
-        "gex": gex, "symbol": display_name, "interval": interval,
-        "error": None,
-    }
+    res = analyze_df(df, interval, gex=gex)
+    res.update({"symbol": display_name, "interval": interval, "error": None})
+    return res

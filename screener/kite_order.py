@@ -132,10 +132,15 @@ def _atm_strike(spot: float, symbol: str) -> int:
     return int(round(spot / step) * step)
 
 
-def _resolve_tradingsymbol(
-    kite: KiteConnect, symbol: str, strike: int, opt_type: str
-) -> str | None:
-    """Return the nearest-expiry tradingsymbol for symbol+strike+type, or None."""
+def _resolve_contract(
+    kite: KiteConnect, symbol: str, strike: int, opt_type: str,
+    skip_expiry_day: bool = False,
+) -> dict | None:
+    """Return {"ts", "token", "expiry", "is_expiry_day"} for the nearest expiry.
+
+    skip_expiry_day=True picks the next expiry when the nearest one expires today
+    (avoids 0DTE gamma/theta). Expiry dates come from Kite, so holiday shifts are handled.
+    """
     exchange = _EXCHANGE[symbol]
     try:
         instruments = kite.instruments(exchange)
@@ -156,13 +161,140 @@ def _resolve_tradingsymbol(
     if filtered.empty:
         _LOG.error(f"No instrument found: {symbol} {strike} {opt_type} on {exchange}")
         return None
-    return str(filtered.iloc[0]["tradingsymbol"])
+    row = filtered.iloc[0]
+    is_expiry_day = row["expiry"] == today
+    if is_expiry_day and skip_expiry_day and len(filtered) > 1:
+        row = filtered.iloc[1]
+        _LOG.info(f"{symbol} expiry day — using next expiry {row['expiry']}")
+    return {
+        "ts":            str(row["tradingsymbol"]),
+        "token":         int(row["instrument_token"]),
+        "expiry":        row["expiry"],
+        "is_expiry_day": bool(is_expiry_day),
+    }
 
 
-def _calc_qty(kite: KiteConnect, symbol: str, ltp: float, capital_fraction: float = 1.0) -> int:
-    """Return total units to buy based on available cash (95% utilisation).
+def _resolve_tradingsymbol(
+    kite: KiteConnect, symbol: str, strike: int, opt_type: str
+) -> str | None:
+    """Return the nearest-expiry tradingsymbol for symbol+strike+type, or None."""
+    c = _resolve_contract(kite, symbol, strike, opt_type)
+    return c["ts"] if c else None
 
-    Returns 0 when balance is insufficient — caller must check before placing order.
+
+def is_expiry_day(kite: KiteConnect, symbol: str) -> bool:
+    """True if the symbol's nearest weekly option expires today."""
+    exchange = _EXCHANGE.get(symbol)
+    if not exchange:
+        return False
+    try:
+        df = pd.DataFrame(kite.instruments(exchange))
+        exp = df[(df["name"] == symbol) & (df["instrument_type"].isin(["CE", "PE"]))]["expiry"]
+        today = datetime.date.today()
+        upcoming = exp[exp >= today]
+        return bool(not upcoming.empty and upcoming.min() == today)
+    except Exception as e:
+        _LOG.warning(f"Expiry check failed for {symbol}: {e}")
+        return False
+
+
+def _tick(x: float) -> float:
+    return round(round(x / 0.05) * 0.05, 2)
+
+
+def _option_atr(kite: KiteConnect, token: int, period: int = 14) -> float | None:
+    """ATR of the option's own 5-minute candles (last few sessions)."""
+    now = datetime.datetime.now(_IST).replace(tzinfo=None)
+    try:
+        candles = kite.historical_data(token, now - datetime.timedelta(days=5), now, "5minute")
+    except Exception as e:
+        _LOG.warning(f"Option ATR fetch failed for {token}: {e}")
+        return None
+    if len(candles) < period + 1:
+        return None
+    df = pd.DataFrame(candles)
+    pc = df["close"].shift(1)
+    tr = pd.concat([df["high"] - df["low"], (df["high"] - pc).abs(), (df["low"] - pc).abs()], axis=1).max(axis=1)
+    atr = float(tr.tail(period).mean())
+    return atr if atr > 0 else None
+
+
+def compute_option_levels(
+    symbol: str,
+    entry: float,
+    opt_type: str,
+    spot: float | None = None,
+    chart_sl: float | None = None,
+    chart_target: float | None = None,
+    atr: float | None = None,
+    trade_mode: str = "scalp",
+) -> dict:
+    """Return {"sl", "t1", "source"} in option-premium terms.
+
+    With both chart levels and option ATR, the SL is the WIDER of the two (fewer
+    noise stop-outs; position sizing absorbs the extra distance), and T1 is at
+    least 1.5× the risk.
+    """
+    chart = None
+    if chart_sl and chart_target and spot:
+        chart = _spot_to_option_levels(spot, entry, chart_sl, chart_target, opt_type)
+    atr_sl = entry - 1.5 * atr if atr else None
+
+    if chart or atr_sl:
+        candidates = [x for x in ((chart[0] if chart else None), atr_sl) if x]
+        sl = min(candidates)
+        sl = max(entry * 0.40, min(entry * 0.85, sl))
+        risk = entry - sl
+        t1 = chart[1] if chart else entry + 2.5 * atr
+        t1 = min(entry * 5.0, max(t1, entry + 1.5 * risk))
+        source = "chart+atr" if (chart and atr_sl) else ("chart" if chart else "atr")
+    elif trade_mode == "ride":
+        sl, t1, source = entry * (1 - _RIDE_STOP_PCT), entry * (1 + _RIDE_TARGET_PCT), "ride"
+    else:
+        sl = entry - _SCALP_STOP_PTS.get(symbol, 7)
+        t1 = entry + _SCALP_TARGET_PTS.get(symbol, 10)
+        source = "scalp"
+    sl = max(0.05, _tick(sl))
+    return {"sl": sl, "t1": _tick(t1), "source": source}
+
+
+def place_oco_gtt(kite: KiteConnect, symbol: str, ts: str, qty: int,
+                  sl: float, target: float, last_price: float):
+    """Place a two-leg (SL / target) GTT for a long option position. Returns GTT id."""
+    exchange = _EXCHANGE.get(symbol, "NFO")
+    return kite.place_gtt(
+        trigger_type=kite.GTT_TYPE_OCO,
+        tradingsymbol=ts,
+        exchange=exchange,
+        trigger_values=[sl, target],
+        last_price=last_price,
+        orders=[
+            {"transaction_type": kite.TRANSACTION_TYPE_SELL, "quantity": qty,
+             "product": kite.PRODUCT_NRML, "order_type": kite.ORDER_TYPE_LIMIT, "price": sl},
+            {"transaction_type": kite.TRANSACTION_TYPE_SELL, "quantity": qty,
+             "product": kite.PRODUCT_NRML, "order_type": kite.ORDER_TYPE_LIMIT, "price": target},
+        ],
+    )
+
+
+def _calc_qty(
+    kite: KiteConnect,
+    symbol: str,
+    ltp: float,
+    capital_fraction: float = 1.0,
+    risk_per_unit: float | None = None,
+    risk_pct: float | None = None,
+    max_one_lot_risk_pct: float = 5.0,
+) -> int:
+    """Return total units to buy.
+
+    Without risk_pct: as many lots as 95% of available cash allows (legacy).
+    With risk_pct + risk_per_unit: lots sized so a stop-loss hit loses about
+    risk_pct % of available balance, still capped by affordability. If even
+    1 lot exceeds the budget, 1 lot is allowed only while its risk is within
+    max_one_lot_risk_pct %; otherwise returns 0.
+
+    Returns 0 when the trade can't be sized — caller must check before ordering.
     Falls back to 1 lot only when the margins API itself errors (can't read balance).
     """
     lot = LOT_SIZE[symbol]
@@ -189,6 +321,27 @@ def _calc_qty(kite: KiteConnect, symbol: str, ltp: float, capital_fraction: floa
             f"₹{cost_per_lot:.0f} needed for 1 lot of {symbol} @ ₹{ltp:.1f}"
         )
         return 0
+
+    if risk_pct and risk_per_unit and risk_per_unit > 0:
+        risk_per_lot = risk_per_unit * lot
+        budget       = available * risk_pct / 100
+        risk_lots    = int(budget / risk_per_lot)
+        if risk_lots == 0:
+            one_lot_pct = risk_per_lot / available * 100
+            if one_lot_pct > max_one_lot_risk_pct:
+                _LOG.warning(
+                    f"1 lot of {symbol} risks ₹{risk_per_lot:.0f} ({one_lot_pct:.1f}% of balance) "
+                    f"> {max_one_lot_risk_pct}% limit — skipping"
+                )
+                return 0
+            risk_lots = 1
+        lots = min(max_lots, risk_lots)
+        _LOG.info(
+            f"Risk sizing: balance ₹{available:.0f} × {risk_pct}% = ₹{budget:.0f} budget, "
+            f"₹{risk_per_lot:.0f} risk/lot → {lots} lot(s) (affordable {max_lots})"
+        )
+        return lots * lot
+
     _LOG.info(
         f"Balance ₹{available:.0f} × 95% → "
         f"₹{usable:.0f} usable → {max_lots} lot(s) of {symbol} @ ₹{ltp} (₹{cost_per_lot:.0f}/lot)"
@@ -259,19 +412,55 @@ def has_open_position(
     return False
 
 
-def position_pnl_pct(kite: KiteConnect, symbol: str) -> float | None:
-    """Return unrealised P&L % for the open option position, or None if not found."""
+def position_pnl_pct(kite: KiteConnect, symbol: str, only_ts: str | None = None) -> float | None:
+    """Return unrealised P&L % for the open option position, or None if not found.
+
+    only_ts: check only that exact contract (so manual positions are never read).
+    """
     try:
         for pos in kite.positions().get("net", []):
             ts  = pos.get("tradingsymbol", "")
             qty = int(pos.get("quantity", 0))
-            if ts.startswith(symbol) and qty != 0:
+            if qty == 0:
+                continue
+            if (only_ts and ts == only_ts) or (not only_ts and ts.startswith(symbol)):
                 avg = float(pos.get("average_price", 0))
                 cur = float(pos.get("last_price", avg))
                 return (cur - avg) / avg if avg > 0 else 0.0
     except Exception as e:
         _LOG.warning(f"P&L fetch failed: {e}")
     return None
+
+
+def contract_pnl(kite: KiteConnect, ts: str) -> float | None:
+    """Total day P&L (₹, realised + unrealised) for one contract, or None if not found."""
+    try:
+        for pos in kite.positions().get("net", []):
+            if pos.get("tradingsymbol") == ts:
+                return float(pos.get("pnl", 0))
+    except Exception as e:
+        _LOG.warning(f"Contract P&L fetch failed for {ts}: {e}")
+    return None
+
+
+def sell_partial(kite: KiteConnect, symbol: str, ts: str, qty: int) -> str | None:
+    """LIMIT SELL qty units of a long NRML position at LTP × 0.99. Returns order id."""
+    exchange = _EXCHANGE.get(symbol, "NFO")
+    try:
+        ltp = float(kite.ltp([f"{exchange}:{ts}"])[f"{exchange}:{ts}"]["last_price"])
+        return kite.place_order(
+            variety=kite.VARIETY_REGULAR,
+            exchange=exchange,
+            tradingsymbol=ts,
+            transaction_type=kite.TRANSACTION_TYPE_SELL,
+            quantity=qty,
+            product=kite.PRODUCT_NRML,
+            order_type=kite.ORDER_TYPE_LIMIT,
+            price=_tick(ltp * 0.99),
+        )
+    except Exception as e:
+        _LOG.error(f"Partial sell failed for {ts}: {e}")
+        return None
 
 
 def exit_position(symbol: str, api_key: str, access_token: str,
@@ -361,6 +550,11 @@ def place_order_for_signal(
     trade_mode: str = "scalp",
     chart_sl: float | None = None,
     chart_target: float | None = None,
+    risk_pct: float | None = None,
+    expiry_day_mode: str = "same",
+    partial_booking: bool = False,
+    use_option_atr: bool = False,
+    max_one_lot_risk_pct: float = 5.0,
 ) -> dict:
     """
     Place ATM option order + GTT for the given signal.
@@ -373,9 +567,14 @@ def place_order_for_signal(
         api_key:          Kite API key
         access_token:     Kite access token (daily)
         capital_fraction: fraction of available balance to use (0.5 = 50/50 split)
+        risk_pct:         size so an SL hit loses ~this % of balance (None = legacy 95% sizing)
+        expiry_day_mode:  "same" (nearest expiry), "next" (skip 0DTE), "skip" (no trade on expiry day)
+        partial_booking:  GTT targets T2; caller books half at T1 (needs ≥ 2 lots)
+        use_option_atr:   widen SL using the option's own 5m ATR
 
     Returns dict with keys:
-        order_id, tradingsymbol, strike, opt_type, qty, entry_price, sl, target, gtt_id
+        order_id, tradingsymbol, strike, opt_type, qty, entry_price, sl, target, gtt_id,
+        t1, partial_qty, expiry, is_expiry_day, levels_source
     On error: {"error": "<reason>"}
     """
     if symbol not in LOT_SIZE:
@@ -383,35 +582,48 @@ def place_order_for_signal(
 
     opt_type = "CE" if any(x in direction.upper() for x in ("CE", "CALL", "BUY CE")) else "PE"
     exchange = _EXCHANGE[symbol]
+    lot      = LOT_SIZE[symbol]
 
     kite = _kite_client(api_key, access_token)
 
     with _order_lock():
-        # 1. Resolve ATM tradingsymbol
-        strike = _atm_strike(spot, symbol)
-        ts = _resolve_tradingsymbol(kite, symbol, strike, opt_type)
-        if not ts:
+        # 1. Resolve ATM contract (optionally skipping today's expiry)
+        strike   = _atm_strike(spot, symbol)
+        contract = _resolve_contract(kite, symbol, strike, opt_type,
+                                     skip_expiry_day=(expiry_day_mode == "next"))
+        if not contract:
             return {"error": f"Could not find tradingsymbol for {symbol} {strike} {opt_type}"}
+        if expiry_day_mode == "skip" and contract["is_expiry_day"]:
+            return {"error": f"{symbol} expiry day — new entries disabled (expiry_day_mode=skip)"}
+        ts = contract["ts"]
 
-        # 3. Fetch option LTP and compute limit price (1% above to ensure fill)
+        # 2. Fetch option LTP and compute limit price (1% above to ensure fill)
         try:
             ltp_data = kite.ltp([f"{exchange}:{ts}"])
             option_ltp = float(ltp_data[f"{exchange}:{ts}"]["last_price"])
         except Exception as e:
             return {"error": f"Could not fetch option LTP for {ts}: {e}"}
 
-        # Round to nearest 0.05 (NSE tick size for options)
-        limit_price = round(round(option_ltp * 1.01 / 0.05) * 0.05, 2)
+        limit_price = _tick(option_ltp * 1.01)
 
-        # Dynamic lot sizing based on available balance and capital fraction
-        qty = _calc_qty(kite, symbol, option_ltp, capital_fraction)
+        # 3. Levels estimated at LTP (shifted to the real fill below) — needed for risk sizing
+        atr    = _option_atr(kite, contract["token"]) if use_option_atr else None
+        levels = compute_option_levels(symbol, option_ltp, opt_type, spot,
+                                       chart_sl, chart_target, atr, trade_mode)
+
+        qty = _calc_qty(kite, symbol, option_ltp, capital_fraction,
+                        risk_per_unit=option_ltp - levels["sl"], risk_pct=risk_pct,
+                        max_one_lot_risk_pct=max_one_lot_risk_pct)
         if qty == 0:
             return {
                 "error": (
-                    f"Insufficient balance for {symbol} option at ₹{option_ltp:.1f} "
-                    f"(need ₹{option_ltp * LOT_SIZE[symbol]:.0f} for 1 lot)"
+                    f"Position size 0 for {symbol} option at ₹{option_ltp:.1f} — "
+                    f"insufficient balance or 1-lot risk above limit "
+                    f"(1 lot = ₹{option_ltp * lot:.0f}, SL distance ₹{option_ltp - levels['sl']:.1f})"
                 )
             }
+        lots        = qty // lot
+        partial_qty = (lots // 2) * lot if (partial_booking and lots >= 2) else 0
 
         _LOG.info(f"Placing order: BUY {qty} x {ts} @ LIMIT {limit_price} (NRML)")
 
@@ -442,53 +654,23 @@ def place_order_for_signal(
             )
         }
 
-    # 6. SL and target — chart-derived levels preferred; fall back to scalp/ride
-    chart_levels = None
-    if chart_sl and chart_target and spot:
-        chart_levels = _spot_to_option_levels(spot, entry_price, chart_sl, chart_target, opt_type)
-        if chart_levels:
-            sl_price, target_price = chart_levels
-            _LOG.info(
-                f"GTT levels from chart: SL={sl_price} Target={target_price}"
-                f" (spot SL={chart_sl:.1f} T={chart_target:.1f})"
-            )
-
-    if not chart_levels:
-        if trade_mode == "ride":
-            sl_price     = round(entry_price * (1 - _RIDE_STOP_PCT), 1)
-            target_price = round(entry_price * (1 + _RIDE_TARGET_PCT), 1)
-        else:
-            tgt_pts      = _SCALP_TARGET_PTS.get(symbol, 10)
-            stop_pts     = _SCALP_STOP_PTS.get(symbol, 7)
-            sl_price     = round(entry_price - stop_pts, 1)
-            target_price = round(entry_price + tgt_pts, 1)
+    # 6. Shift the LTP-based levels by the fill slippage so distances are preserved
+    diff         = entry_price - option_ltp
+    sl_price     = max(0.05, _tick(levels["sl"] + diff))
+    t1_price     = _tick(levels["t1"] + diff)
+    target_price = t1_price
+    if partial_qty:
+        # GTT holds the runner target; the bot books partial_qty at T1 itself
+        target_price = _tick(min(entry_price * 5.0, entry_price + 2 * (t1_price - entry_price)))
+    _LOG.info(
+        f"Levels ({levels['source']}): entry={entry_price} SL={sl_price} "
+        f"T1={t1_price} GTT target={target_price} partial_qty={partial_qty}"
+    )
 
     # 7. GTT two-leg (OCO): [sl_trigger, target_trigger]
     gtt_id = None
     try:
-        gtt_id = kite.place_gtt(
-            trigger_type=kite.GTT_TYPE_OCO,
-            tradingsymbol=ts,
-            exchange=exchange,
-            trigger_values=[sl_price, target_price],
-            last_price=entry_price,
-            orders=[
-                {
-                    "transaction_type": kite.TRANSACTION_TYPE_SELL,
-                    "quantity":         qty,
-                    "product":          kite.PRODUCT_NRML,
-                    "order_type":       kite.ORDER_TYPE_LIMIT,
-                    "price":            sl_price,
-                },
-                {
-                    "transaction_type": kite.TRANSACTION_TYPE_SELL,
-                    "quantity":         qty,
-                    "product":          kite.PRODUCT_NRML,
-                    "order_type":       kite.ORDER_TYPE_LIMIT,
-                    "price":            target_price,
-                },
-            ],
-        )
+        gtt_id = place_oco_gtt(kite, symbol, ts, qty, sl_price, target_price, entry_price)
         _LOG.info(f"GTT placed: {gtt_id}  SL={sl_price}  Target={target_price}")
     except Exception as e:
         _LOG.warning(f"GTT failed (order {order_id} is live, set SL manually): {e}")
@@ -502,8 +684,13 @@ def place_order_for_signal(
         "entry_price":   entry_price,
         "sl":            sl_price,
         "target":        target_price,
+        "t1":            t1_price,
+        "partial_qty":   partial_qty,
         "gtt_id":        gtt_id,
         "trade_mode":    trade_mode,
+        "expiry":        str(contract["expiry"]),
+        "is_expiry_day": contract["is_expiry_day"],
+        "levels_source": levels["source"],
     }
 
 
