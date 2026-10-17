@@ -496,7 +496,8 @@ def _close_out(state: dict, symbol: str, trade_key: str, today: str,
           f"consecutive losses {state.get(consec_key, 0)}")
     send_ntfy(
         f"Chart Bot: {symbol} position closed ({pnl_txt})",
-        f"Reason   : {reason}\nP&L      : {pnl_txt}\n30-min cooldown before the next entry.",
+        f"Reason   : {reason}\nP&L      : {pnl_txt}\n"
+        f"Re-entry : immediate on STRONG BUY/SELL, otherwise after 30 min.",
         ntfy_topic,
         priority="default",
     )
@@ -820,13 +821,15 @@ def scan_once(symbols: list[str], state_file: str, force: bool = False) -> None:
                 symbol, p_res, now_ist, tf_5m, f"blocked: 5m score {c_score:+d} is actual opposing signal"))
             continue
 
-        # Cooldown after a closed trade
+        # 30-min cooldown after a closed trade — skipped for STRONG BUY / STRONG SELL
         cooldown_key = f"{today}:{symbol}:sl_cooldown"
         if state.get(cooldown_key):
             left = 30 - _minutes_since(state[cooldown_key], now_ist)
-            if left > 0:
+            if left > 0 and abs(score) < 5:
                 print(f"         [{symbol}] cooldown active — {left:.0f} min remaining")
                 continue
+            if left > 0:
+                print(f"         [{symbol}] {verdict} — skipping cooldown, re-entry allowed")
             state.pop(cooldown_key, None)
 
         state_key = f"{today}:{symbol}:{direction}:{verdict}"
