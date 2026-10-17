@@ -116,8 +116,6 @@ def _cfg_bool(name: str, default: bool) -> bool:
     return default if not v else v.lower() in ("1", "true", "yes", "on")
 
 
-RISK_PCT             = _cfg_float("CHART_RISK_PCT", 1.5)              # % of balance lost if SL hits
-MAX_ONE_LOT_RISK_PCT = _cfg_float("CHART_MAX_ONE_LOT_RISK_PCT", 5.0)  # allow 1 lot up to this risk
 MAX_DAILY_LOSS_PCT   = _cfg_float("CHART_MAX_DAILY_LOSS_PCT", 3.0)    # stop new trades at −3% day P&L
 PROFIT_TARGET_PCT    = _cfg_float("CHART_PROFIT_TARGET_PCT", 5.0)     # stop new trades at +5% day P&L
 MAX_TRADES_PER_DAY   = int(_cfg_float("CHART_MAX_TRADES", 4))
@@ -883,27 +881,24 @@ def scan_once(symbols: list[str], state_file: str, force: bool = False) -> None:
                 print(f"  [AUTO-TRADE] SKIPPED — {skip}")
                 log_entry["auto_trade"] = f"skipped: {skip}"
             else:
-                full = abs(score) >= 5 or af == direction
-                risk = RISK_PCT if full else RISK_PCT * 0.7
                 spot      = p_res["summary"]["close"]
                 chart_sl  = p_res["verdict"].get("stop_loss")
                 chart_tgt = (p_res["verdict"].get("targets") or [None])[0]
 
                 if _SHADOW:
-                    print(f"  [SHADOW] would place {direction} for {symbol} @ {spot:.0f} (risk {risk:.2f}%)")
-                    log_entry["auto_trade"] = f"shadow: would place (risk {risk:.2f}%)"
+                    print(f"  [SHADOW] would place {direction} for {symbol} @ {spot:.0f}")
+                    log_entry["auto_trade"] = "shadow: would place"
                     state[trade_key] = "shadow"
                     state[f"{trade_key}:entry_time"] = now_ist.strftime("%H:%M")
                     state[f"{today}:trades"] = trades_today + 1
                 else:
                     print(f"  [AUTO-TRADE] {direction} order for {symbol} @ {spot:.0f} "
-                          f"(chart SL={chart_sl} T={chart_tgt}, risk {risk:.2f}%)")
+                          f"(chart SL={chart_sl} T={chart_tgt})")
                     trade = _place_order(
                         symbol, direction, spot, api_key, access_token,
                         chart_sl=chart_sl, chart_target=chart_tgt,
-                        risk_pct=risk, expiry_day_mode=EXPIRY_DAY_MODE,
+                        expiry_day_mode=EXPIRY_DAY_MODE,
                         partial_booking=PARTIAL_BOOKING, use_option_atr=True,
-                        max_one_lot_risk_pct=MAX_ONE_LOT_RISK_PCT,
                     )
                     if "error" in trade:
                         print(f"  [AUTO-TRADE] SKIPPED — {trade['error']}")
@@ -926,7 +921,7 @@ def scan_once(symbols: list[str], state_file: str, force: bool = False) -> None:
                             "expiry":         trade.get("expiry", ""),
                             "order_id":       trade.get("order_id", ""),
                         })
-                        _notify_order(symbol, trade, risk, ntfy_topic)
+                        _notify_order(symbol, trade, ntfy_topic)
                         _mirror_sharekhan(symbol, direction, spot, trade, log_entry, ntfy_topic)
 
         elif _AUTO_TRADE and symbol not in _TRADE_SYMBOLS:
@@ -961,7 +956,7 @@ def _record_trade(state: dict, trade_key: str, trade: dict, direction: str,
     state[f"{trade_key}:entry_time"]   = now_ist.strftime("%H:%M")
 
 
-def _notify_order(symbol: str, trade: dict, risk: float, ntfy_topic: str) -> None:
+def _notify_order(symbol: str, trade: dict, ntfy_topic: str) -> None:
     print(f"  [AUTO-TRADE] ORDER — {trade['tradingsymbol']} | Entry ₹{trade['entry_price']} "
           f"| SL ₹{trade['sl']} | T1 ₹{trade.get('t1')} | Target ₹{trade['target']}")
     partial = (f"Book    : {trade['partial_qty']} at T1 ₹{trade['t1']}\n" if trade.get("partial_qty") else "")
@@ -970,7 +965,7 @@ def _notify_order(symbol: str, trade: dict, risk: float, ntfy_topic: str) -> Non
         (
             f"Symbol  : {symbol} {trade['opt_type']}\n"
             f"Strike  : {trade['strike']}  (expiry {trade.get('expiry', '')})\n"
-            f"Qty     : {trade['qty']}  (risk {risk:.2f}% of balance)\n"
+            f"Qty     : {trade['qty']}\n"
             f"Entry   : ₹{trade['entry_price']}\n"
             f"SL      : ₹{trade['sl']}  ({trade.get('levels_source', '')})\n"
             f"{partial}"
@@ -1036,7 +1031,7 @@ if __name__ == "__main__":
 
     print(
         f"[chart_bot] AUTO_TRADE={'ON' if _AUTO_TRADE else 'OFF'}{' | SHADOW MODE' if _SHADOW else ''} | "
-        f"risk {RISK_PCT}%/trade | loss cap {MAX_DAILY_LOSS_PCT}% | profit lock {PROFIT_TARGET_PCT}% | "
+        f"qty: 95% of balance | loss cap {MAX_DAILY_LOSS_PCT}% | profit lock {PROFIT_TARGET_PCT}% | "
         f"max {MAX_TRADES_PER_DAY} trades | {MAX_CONSEC_LOSSES} losses → stop | "
         f"time stop {TIME_STOP_MIN:.0f}m | expiry {EXPIRY_DAY_MODE} | partial {PARTIAL_BOOKING} | "
         f"noise gate {NOISE_GATE} | vwap exit {VWAP_EXIT} | ensemble {ENSEMBLE}",
@@ -1051,7 +1046,7 @@ if __name__ == "__main__":
             f"Time     : {now}\n"
             f"Watching : {', '.join(symbols)}\n"
             f"Strategy : closed 15m candles + 5m confirmation + Noise Area breakout\n"
-            f"Risk     : {RISK_PCT}% per trade, stop at −{MAX_DAILY_LOSS_PCT}% day\n\n"
+            f"Quantity : 95% of available balance, stop at −{MAX_DAILY_LOSS_PCT}% day\n\n"
             f"Signals fire during market hours (09:30–15:00 IST)."
         )
         print(body)

@@ -277,24 +277,10 @@ def place_oco_gtt(kite: KiteConnect, symbol: str, ts: str, qty: int,
     )
 
 
-def _calc_qty(
-    kite: KiteConnect,
-    symbol: str,
-    ltp: float,
-    capital_fraction: float = 1.0,
-    risk_per_unit: float | None = None,
-    risk_pct: float | None = None,
-    max_one_lot_risk_pct: float = 5.0,
-) -> int:
-    """Return total units to buy.
+def _calc_qty(kite: KiteConnect, symbol: str, ltp: float, capital_fraction: float = 1.0) -> int:
+    """Return total units to buy based on available cash (95% utilisation).
 
-    Without risk_pct: as many lots as 95% of available cash allows (legacy).
-    With risk_pct + risk_per_unit: lots sized so a stop-loss hit loses about
-    risk_pct % of available balance, still capped by affordability. If even
-    1 lot exceeds the budget, 1 lot is allowed only while its risk is within
-    max_one_lot_risk_pct %; otherwise returns 0.
-
-    Returns 0 when the trade can't be sized — caller must check before ordering.
+    Returns 0 when balance is insufficient — caller must check before placing order.
     Falls back to 1 lot only when the margins API itself errors (can't read balance).
     """
     lot = LOT_SIZE[symbol]
@@ -321,27 +307,6 @@ def _calc_qty(
             f"₹{cost_per_lot:.0f} needed for 1 lot of {symbol} @ ₹{ltp:.1f}"
         )
         return 0
-
-    if risk_pct and risk_per_unit and risk_per_unit > 0:
-        risk_per_lot = risk_per_unit * lot
-        budget       = available * risk_pct / 100
-        risk_lots    = int(budget / risk_per_lot)
-        if risk_lots == 0:
-            one_lot_pct = risk_per_lot / available * 100
-            if one_lot_pct > max_one_lot_risk_pct:
-                _LOG.warning(
-                    f"1 lot of {symbol} risks ₹{risk_per_lot:.0f} ({one_lot_pct:.1f}% of balance) "
-                    f"> {max_one_lot_risk_pct}% limit — skipping"
-                )
-                return 0
-            risk_lots = 1
-        lots = min(max_lots, risk_lots)
-        _LOG.info(
-            f"Risk sizing: balance ₹{available:.0f} × {risk_pct}% = ₹{budget:.0f} budget, "
-            f"₹{risk_per_lot:.0f} risk/lot → {lots} lot(s) (affordable {max_lots})"
-        )
-        return lots * lot
-
     _LOG.info(
         f"Balance ₹{available:.0f} × 95% → "
         f"₹{usable:.0f} usable → {max_lots} lot(s) of {symbol} @ ₹{ltp} (₹{cost_per_lot:.0f}/lot)"
@@ -550,11 +515,9 @@ def place_order_for_signal(
     trade_mode: str = "scalp",
     chart_sl: float | None = None,
     chart_target: float | None = None,
-    risk_pct: float | None = None,
     expiry_day_mode: str = "same",
     partial_booking: bool = False,
     use_option_atr: bool = False,
-    max_one_lot_risk_pct: float = 5.0,
 ) -> dict:
     """
     Place ATM option order + GTT for the given signal.
@@ -567,7 +530,6 @@ def place_order_for_signal(
         api_key:          Kite API key
         access_token:     Kite access token (daily)
         capital_fraction: fraction of available balance to use (0.5 = 50/50 split)
-        risk_pct:         size so an SL hit loses ~this % of balance (None = legacy 95% sizing)
         expiry_day_mode:  "same" (nearest expiry), "next" (skip 0DTE), "skip" (no trade on expiry day)
         partial_booking:  GTT targets T2; caller books half at T1 (needs ≥ 2 lots)
         use_option_atr:   widen SL using the option's own 5m ATR
@@ -606,20 +568,18 @@ def place_order_for_signal(
 
         limit_price = _tick(option_ltp * 1.01)
 
-        # 3. Levels estimated at LTP (shifted to the real fill below) — needed for risk sizing
+        # 3. SL/target levels at LTP (shifted to the real fill below)
         atr    = _option_atr(kite, contract["token"]) if use_option_atr else None
         levels = compute_option_levels(symbol, option_ltp, opt_type, spot,
                                        chart_sl, chart_target, atr, trade_mode)
 
-        qty = _calc_qty(kite, symbol, option_ltp, capital_fraction,
-                        risk_per_unit=option_ltp - levels["sl"], risk_pct=risk_pct,
-                        max_one_lot_risk_pct=max_one_lot_risk_pct)
+        # Quantity: as many lots as 95% of the available balance buys
+        qty = _calc_qty(kite, symbol, option_ltp, capital_fraction)
         if qty == 0:
             return {
                 "error": (
-                    f"Position size 0 for {symbol} option at ₹{option_ltp:.1f} — "
-                    f"insufficient balance or 1-lot risk above limit "
-                    f"(1 lot = ₹{option_ltp * lot:.0f}, SL distance ₹{option_ltp - levels['sl']:.1f})"
+                    f"Insufficient balance for {symbol} option at ₹{option_ltp:.1f} "
+                    f"(need ₹{option_ltp * lot:.0f} for 1 lot)"
                 )
             }
         lots        = qty // lot
