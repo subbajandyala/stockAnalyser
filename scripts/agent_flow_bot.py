@@ -253,6 +253,10 @@ def scan_once(symbols: list[str], state_file: str, force: bool = False) -> None:
     now_ist = datetime.datetime.now(_IST)
     print(f"[{now_ist.strftime('%H:%M:%S IST')}] Agent Flow scan — {', '.join(symbols)}")
 
+    if not force and now_ist.weekday() >= 5:
+        print("Weekend — market closed, skipping.")
+        return
+
     if not force and not (MARKET_OPEN <= now_ist.time() <= MARKET_CLOSE):
         print("Market closed — no scan needed.")
         return

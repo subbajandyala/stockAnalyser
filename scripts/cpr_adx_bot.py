@@ -362,6 +362,11 @@ def run_worker(symbols: list[str]) -> None:
         now_ist = datetime.datetime.now(_IST)
         t       = now_ist.time()
 
+        if now_ist.weekday() >= 5:  # Saturday / Sunday
+            print(f"[{now_ist.strftime('%H:%M IST')}] Weekend — market closed, sleeping 1h")
+            time.sleep(3600)
+            continue
+
         if t < MARKET_OPEN:
             wait_sec = (
                 datetime.datetime.combine(now_ist.date(), MARKET_OPEN, _IST) - now_ist
@@ -425,6 +430,10 @@ def scan_once(symbols: list[str]) -> None:
 
     now_ist = datetime.datetime.now(_IST)
     print(f"[{now_ist.strftime('%H:%M:%S IST')}] CPR+ADX one-shot scan — {len(symbols)} stocks")
+
+    if now_ist.weekday() >= 5:
+        print("Weekend — market closed, skipping.")
+        return
 
     if not (MARKET_OPEN <= now_ist.time() <= MARKET_CLOSE):
         print("Outside scan window (09:20–14:30) — skipping.")

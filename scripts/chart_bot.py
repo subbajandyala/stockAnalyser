@@ -572,6 +572,10 @@ def scan_once(symbols: list[str], state_file: str, force: bool = False) -> None:
     now_ist = datetime.datetime.now(_IST)
     print(f"[{now_ist.strftime('%H:%M:%S IST')}] Chart bot scan — {', '.join(symbols)}")
 
+    if not force and now_ist.weekday() >= 5:  # 5=Saturday, 6=Sunday
+        print("Weekend — market closed, skipping.")
+        return
+
     if not force and not (MARKET_OPEN <= now_ist.time() <= MARKET_CLOSE):
         print("Market closed — skipping.")
         return
