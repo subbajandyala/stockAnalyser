@@ -11,7 +11,8 @@ Signal → Option direction:
 Signals are scored on CLOSED 15m candles and confirmed on closed 5m candles.
 
 Auto-trade (KITE_AUTO_TRADE=1) gates, in order:
-  score ≥ MIN_TRADE_SCORE → 5m confirms → Noise Area breakout → agent_flow veto
+  score ≥ MIN_TRADE_SCORE → 5m confirms → Noise Area breakout
+Orders are based on chart analysis only.
 
 Position management each scan:
   partial booking at T1 → time stop → VWAP-cross exit → trailing SL → reversal alert
@@ -121,7 +122,6 @@ EXPIRY_DAY_MODE      = _env_value("CHART_EXPIRY_DAY_MODE") or "next"  # next | s
 PARTIAL_BOOKING      = _cfg_bool("CHART_PARTIAL_BOOKING", True)
 NOISE_GATE           = _cfg_bool("CHART_NOISE_GATE", True)
 VWAP_EXIT            = _cfg_bool("CHART_VWAP_EXIT", True)
-ENSEMBLE             = _cfg_bool("CHART_ENSEMBLE", True)
 VWAP_EXIT_MIN_HOLD   = 10   # minutes before the VWAP-cross exit is allowed
 
 
@@ -218,29 +218,6 @@ def _stars(score: int) -> str:
     if abs_s >= 4: return "★★★★"
     if abs_s >= 3: return "★★★"
     return "★★"
-
-
-def _agent_flow_direction(symbol: str, now_ist: datetime.datetime,
-                          max_age_min: int = 15) -> str | None:
-    """Latest agent_flow view for symbol ("CE"/"PE"), if fresh and rated ≥ 3★."""
-    path = pathlib.Path(f"/tmp/agent_flow_log_{now_ist.strftime('%Y-%m-%d')}.json")
-    try:
-        entries = [e for e in json.loads(path.read_text()).get("signals", []) if e.get("symbol") == symbol]
-    except Exception:
-        return None
-    if not entries:
-        return None
-    last = entries[-1]
-    try:
-        hh, mm = last.get("time", "").split()[0].split(":")
-        t = now_ist.replace(hour=int(hh), minute=int(mm), second=0, microsecond=0)
-        if (now_ist - t).total_seconds() > max_age_min * 60:
-            return None
-    except Exception:
-        return None
-    if int(last.get("rating", 0) or 0) < 3:
-        return None
-    return {"CALL": "CE", "PUT": "PE"}.get(str(last.get("direction", "")).upper())
 
 
 # ── Alert formatter ───────────────────────────────────────────────────────────
@@ -767,11 +744,8 @@ def scan_once(symbols: list[str], state_file: str, force: bool = False) -> None:
             continue
 
         ns = noise_state(symbol, api_key, access_token) if symbol in _TRADE_SYMBOLS else {"state": "n/a"}
-        af = _agent_flow_direction(symbol, now_ist) if ENSEMBLE else None
         extra = [f"Noise    : {ns.get('state', 'unknown')}"
                  + (f" (band {ns['lower']:,.0f}–{ns['upper']:,.0f}, VWAP {ns['vwap']:,.0f})" if ns.get("upper") else "")]
-        if af:
-            extra.append(f"AgentFlow: {af}")
 
         if alerted:
             print(f"         Already alerted — re-checking trade gates (noise={ns.get('state')})")
@@ -782,7 +756,7 @@ def scan_once(symbols: list[str], state_file: str, force: bool = False) -> None:
                 print(f"  ntfy.sh: {'OK' if send_ntfy(title, message, ntfy_topic) else 'FAILED'}")
 
         log_entry = _base_log_entry(symbol, p_res, now_ist, tf_5m, "off")
-        log_entry.update({"noise": ns.get("state", ""), "agent_flow": af or ""})
+        log_entry["noise"] = ns.get("state", "")
 
         if (_AUTO_TRADE or _SHADOW) and symbol in _TRADE_SYMBOLS and abs(score) >= MIN_TRADE_SCORE:
             skip = None
@@ -795,8 +769,6 @@ def scan_once(symbols: list[str], state_file: str, force: bool = False) -> None:
             elif p_res["summary"].get("adx", 0) < 20:
                 # Noise data unavailable (or gate disabled) — fall back to the ADX trend filter
                 skip = f"ADX {p_res['summary'].get('adx', 0):.0f} < 20 — no trend"
-            if not skip and af and af != direction:
-                skip = f"agent_flow disagrees ({af})"
 
             if skip:
                 print(f"  [AUTO-TRADE] SKIPPED — {skip}")
@@ -952,7 +924,7 @@ if __name__ == "__main__":
         f"[chart_bot] AUTO_TRADE={'ON' if _AUTO_TRADE else 'OFF'}{' | SHADOW MODE' if _SHADOW else ''} | "
         f"qty: 95% of balance | no daily limits | "
         f"time stop {TIME_STOP_MIN:.0f}m | expiry {EXPIRY_DAY_MODE} | partial {PARTIAL_BOOKING} | "
-        f"noise gate {NOISE_GATE} | vwap exit {VWAP_EXIT} | ensemble {ENSEMBLE}",
+        f"noise gate {NOISE_GATE} | vwap exit {VWAP_EXIT}",
         flush=True,
     )
 

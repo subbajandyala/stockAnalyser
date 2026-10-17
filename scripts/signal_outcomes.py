@@ -156,7 +156,7 @@ def process(date_str: str) -> int:
             "key": f"{s['source']}:{s.get('_key', '')}", "date": date_str, "time": s.get("time", ""),
             "source": s["source"], "symbol": sym, "direction": s["direction"], "verdict": s.get("verdict", ""),
             "score": s.get("score", ""), "tf_5m": s.get("tf_5m", ""), "adx": s.get("adx", ""),
-            "noise": s.get("noise", ""), "agent_flow": s.get("agent_flow", ""),
+            "noise": s.get("noise", ""),
             "g_trend": g.get("trend", ""), "g_momentum": g.get("momentum", ""),
             "g_location": g.get("location", ""), "g_flow": g.get("flow", ""),
             "auto_trade": s.get("auto_trade", ""), "stop_loss": s.get("stop_loss", ""),
