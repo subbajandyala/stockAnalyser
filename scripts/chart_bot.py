@@ -63,8 +63,8 @@ CONFIRM_TF = "5m"
 
 # Minimum score to send a notification (BUY=3, STRONG BUY=5)
 MIN_NOTIFY_SCORE = 3
-# Minimum score to auto-execute an order (same as notify — trade on any BUY/SELL signal)
-MIN_TRADE_SCORE  = 3
+# Minimum score to auto-execute an order (4 = at least 4/7 conditions must agree)
+MIN_TRADE_SCORE  = 4
 # Minimum R:R ratio on the underlying to fire a signal
 MIN_RR = 1.5
 # Clean signal window: no new signals outside 9:30–15:00 IST
@@ -298,8 +298,8 @@ def _append_chart_log(date_str: str, entry: dict) -> None:
 
 # ── Trailing GTT adjuster ────────────────────────────────────────────────────
 
-_BREAKEVEN_THRESHOLD = 0.30   # 30% premium gain → move SL to entry (breakeven)
-_TRAIL1_THRESHOLD    = 0.55   # 55% premium gain → move SL to entry + 20%
+_BREAKEVEN_THRESHOLD = 0.40   # 40% premium gain → move SL to entry (breakeven)
+_TRAIL1_THRESHOLD    = 0.65   # 65% premium gain → move SL to entry + 20%
 _TRAIL1_SL_BUFFER    = 0.20   # locks in 20% of entry premium as profit
 _EXCHANGE_MAP = {"NIFTY": "NFO", "SENSEX": "BFO", "BANKNIFTY": "NFO"}
 
@@ -845,104 +845,123 @@ def scan_once(symbols: list[str], state_file: str, force: bool = False) -> None:
 
         # Auto-execute order
         if _AUTO_TRADE and symbol in _TRADE_SYMBOLS and abs(score) >= MIN_TRADE_SCORE:
-            spot      = p_res["summary"]["close"]
-            chart_sl  = p_res["verdict"].get("stop_loss")
-            chart_tgt = (p_res["verdict"].get("targets") or [None])[0]
-            print(
-                f"  [AUTO-TRADE] {direction} order for {symbol} @ {spot:.0f}"
-                f"  (chart SL={chart_sl}  T={chart_tgt})"
-            )
-            trade = _place_order(
-                symbol, direction, spot, api_key, access_token,
-                chart_sl=chart_sl, chart_target=chart_tgt,
-            )
-            if "error" in trade:
-                print(f"  [AUTO-TRADE] SKIPPED — {trade['error']}")
-                log_entry["auto_trade"] = f"skipped: {trade['error']}"
-                if ntfy_topic:
-                    send_ntfy(
-                        f"Chart Auto-Trade SKIPPED: {symbol}",
-                        f"Signal: {verdict}\nReason: {trade['error']}",
-                        ntfy_topic,
-                        priority="default",
-                    )
-            else:
-                print(
-                    f"  [AUTO-TRADE] ORDER — {trade['tradingsymbol']}"
-                    f" | Entry ₹{trade['entry_price']}"
-                    f" | SL ₹{trade['sl']}"
-                    f" | Target ₹{trade['target']}"
-                )
-                log_entry.update({
-                    "auto_trade":    "placed",
-                    "tradingsymbol": trade["tradingsymbol"],
-                    "strike":        trade.get("strike", ""),
-                    "qty":           trade.get("qty", ""),
-                    "entry_premium": trade.get("entry_price", ""),
-                    "sl_premium":    trade.get("sl", ""),
-                    "target_premium":trade.get("target", ""),
-                    "order_id":      trade.get("order_id", ""),
-                })
-                if ntfy_topic:
-                    send_ntfy(
-                        f"Chart ORDER PLACED: {trade['tradingsymbol']}",
-                        (
-                            f"Symbol  : {symbol} {trade['opt_type']}\n"
-                            f"Strike  : {trade['strike']}\n"
-                            f"Qty     : {trade['qty']}\n"
-                            f"Entry   : ₹{trade['entry_price']}\n"
-                            f"SL      : ₹{trade['sl']}\n"
-                            f"Target  : ₹{trade['target']}\n"
-                            f"Order ID: {trade['order_id']}"
-                        ),
-                        ntfy_topic,
-                    )
-                state[trade_key]                      = trade["order_id"]
-                state[f"{trade_key}:ts"]             = trade["tradingsymbol"]
-                state[f"{trade_key}:gtt_id"]         = trade.get("gtt_id") or ""
-                state[f"{trade_key}:entry_price"]    = trade.get("entry_price", 0)
-                state[f"{trade_key}:target_price"]   = trade.get("target", 0)
-                state[f"{trade_key}:qty"]            = trade.get("qty", 0)
-                state[f"{trade_key}:sl_step"]        = 0
+            # Hard gates — must all pass before placing an order
+            adx_val    = p_res["summary"].get("adx", 0)
+            cpr_pos    = p_res.get("cpr", {}).get("price_position", "")
+            # 5m must confirm direction: CE needs 5m score >= +1, PE needs 5m score <= -1
+            c_confirms = (direction == "CE" and c_score >= 1) or (direction == "PE" and c_score <= -1)
 
-                # Mirror on Sharekhan
-                try:
-                    sk_result = _place_sk_order(
-                        symbol, direction, spot,
-                        option_ltp=trade.get("entry_price", 0),
-                        option_sl=trade.get("sl", 0),
-                        option_target=trade.get("target", 0),
-                    )
-                    if "error" in sk_result:
-                        print(f"  [SHAREKHAN] SKIPPED — {sk_result['error']}")
-                        if ntfy_topic:
-                            send_ntfy(
-                                f"Sharekhan SKIPPED: {symbol}",
-                                f"Kite order placed but Sharekhan failed.\nReason: {sk_result['error']}",
-                                ntfy_topic,
-                                priority="default",
-                            )
-                    else:
-                        print(
-                            f"  [SHAREKHAN] ORDER — {sk_result['tradingsymbol']}"
-                            f" | ID: {sk_result['order_id']}"
+            if adx_val < 20:
+                _skip = f"ADX {adx_val:.0f} < 20 — ranging market, no trend"
+                print(f"  [AUTO-TRADE] SKIPPED — {_skip}")
+                log_entry["auto_trade"] = f"skipped: {_skip}"
+            elif cpr_pos == "inside":
+                _skip = "price inside CPR — indecision/choppy zone"
+                print(f"  [AUTO-TRADE] SKIPPED — {_skip}")
+                log_entry["auto_trade"] = f"skipped: {_skip}"
+            elif not c_confirms:
+                _skip = f"5m score {c_score:+d} not confirming {direction} direction"
+                print(f"  [AUTO-TRADE] SKIPPED — {_skip}")
+                log_entry["auto_trade"] = f"skipped: {_skip}"
+            else:
+                spot      = p_res["summary"]["close"]
+                chart_sl  = p_res["verdict"].get("stop_loss")
+                chart_tgt = (p_res["verdict"].get("targets") or [None])[0]
+                print(
+                    f"  [AUTO-TRADE] {direction} order for {symbol} @ {spot:.0f}"
+                    f"  (chart SL={chart_sl}  T={chart_tgt})"
+                )
+                trade = _place_order(
+                    symbol, direction, spot, api_key, access_token,
+                    chart_sl=chart_sl, chart_target=chart_tgt,
+                )
+                if "error" in trade:
+                    print(f"  [AUTO-TRADE] SKIPPED — {trade['error']}")
+                    log_entry["auto_trade"] = f"skipped: {trade['error']}"
+                    if ntfy_topic:
+                        send_ntfy(
+                            f"Chart Auto-Trade SKIPPED: {symbol}",
+                            f"Signal: {verdict}\nReason: {trade['error']}",
+                            ntfy_topic,
+                            priority="default",
                         )
-                        log_entry["sk_order_id"]       = sk_result["order_id"]
-                        log_entry["sk_tradingsymbol"]  = sk_result["tradingsymbol"]
-                        if ntfy_topic:
-                            send_ntfy(
-                                f"Sharekhan ORDER: {sk_result['tradingsymbol']}",
-                                (
-                                    f"Symbol : {symbol} {sk_result['opt_type']}\n"
-                                    f"Strike : {sk_result['strike']}\n"
-                                    f"Qty    : {sk_result['qty']}\n"
-                                    f"Price  : ₹{sk_result['price']}\n"
-                                    f"Order  : {sk_result['order_id']}"
-                                ),
-                                ntfy_topic,
+                else:
+                    print(
+                        f"  [AUTO-TRADE] ORDER — {trade['tradingsymbol']}"
+                        f" | Entry ₹{trade['entry_price']}"
+                        f" | SL ₹{trade['sl']}"
+                        f" | Target ₹{trade['target']}"
+                    )
+                    log_entry.update({
+                        "auto_trade":    "placed",
+                        "tradingsymbol": trade["tradingsymbol"],
+                        "strike":        trade.get("strike", ""),
+                        "qty":           trade.get("qty", ""),
+                        "entry_premium": trade.get("entry_price", ""),
+                        "sl_premium":    trade.get("sl", ""),
+                        "target_premium":trade.get("target", ""),
+                        "order_id":      trade.get("order_id", ""),
+                    })
+                    if ntfy_topic:
+                        send_ntfy(
+                            f"Chart ORDER PLACED: {trade['tradingsymbol']}",
+                            (
+                                f"Symbol  : {symbol} {trade['opt_type']}\n"
+                                f"Strike  : {trade['strike']}\n"
+                                f"Qty     : {trade['qty']}\n"
+                                f"Entry   : ₹{trade['entry_price']}\n"
+                                f"SL      : ₹{trade['sl']}\n"
+                                f"Target  : ₹{trade['target']}\n"
+                                f"Order ID: {trade['order_id']}"
+                            ),
+                            ntfy_topic,
+                        )
+                    state[trade_key]                    = trade["order_id"]
+                    state[f"{trade_key}:ts"]           = trade["tradingsymbol"]
+                    state[f"{trade_key}:gtt_id"]       = trade.get("gtt_id") or ""
+                    state[f"{trade_key}:entry_price"]  = trade.get("entry_price", 0)
+                    state[f"{trade_key}:target_price"] = trade.get("target", 0)
+                    state[f"{trade_key}:qty"]          = trade.get("qty", 0)
+                    state[f"{trade_key}:sl_step"]      = 0
+
+                    # Mirror on Sharekhan
+                    try:
+                        sk_result = _place_sk_order(
+                            symbol, direction, spot,
+                            option_ltp=trade.get("entry_price", 0),
+                            option_sl=trade.get("sl", 0),
+                            option_target=trade.get("target", 0),
+                        )
+                        if "error" in sk_result:
+                            print(f"  [SHAREKHAN] SKIPPED — {sk_result['error']}")
+                            if ntfy_topic:
+                                send_ntfy(
+                                    f"Sharekhan SKIPPED: {symbol}",
+                                    f"Kite order placed but Sharekhan failed.\nReason: {sk_result['error']}",
+                                    ntfy_topic,
+                                    priority="default",
+                                )
+                        else:
+                            print(
+                                f"  [SHAREKHAN] ORDER — {sk_result['tradingsymbol']}"
+                                f" | ID: {sk_result['order_id']}"
                             )
-                except Exception as _sk_err:
-                    print(f"  [SHAREKHAN] ERROR — {_sk_err}")
+                            log_entry["sk_order_id"]      = sk_result["order_id"]
+                            log_entry["sk_tradingsymbol"] = sk_result["tradingsymbol"]
+                            if ntfy_topic:
+                                send_ntfy(
+                                    f"Sharekhan ORDER: {sk_result['tradingsymbol']}",
+                                    (
+                                        f"Symbol : {symbol} {sk_result['opt_type']}\n"
+                                        f"Strike : {sk_result['strike']}\n"
+                                        f"Qty    : {sk_result['qty']}\n"
+                                        f"Price  : ₹{sk_result['price']}\n"
+                                        f"Order  : {sk_result['order_id']}"
+                                    ),
+                                    ntfy_topic,
+                                )
+                    except Exception as _sk_err:
+                        print(f"  [SHAREKHAN] ERROR — {_sk_err}")
 
         elif _AUTO_TRADE and symbol not in _TRADE_SYMBOLS:
             log_entry["auto_trade"] = "signal only (no auto-trade for this symbol)"
