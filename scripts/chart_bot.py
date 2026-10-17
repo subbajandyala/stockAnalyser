@@ -11,7 +11,6 @@ Signal → Option direction:
 Signals are scored on CLOSED 15m candles and confirmed on closed 5m candles.
 
 Auto-trade (KITE_AUTO_TRADE=1) gates, in order:
-  daily halt (loss cap / profit lock / consecutive losses) → max trades/day →
   score ≥ MIN_TRADE_SCORE → 5m confirms → Noise Area breakout → agent_flow veto
 
 Position management each scan:
@@ -116,10 +115,6 @@ def _cfg_bool(name: str, default: bool) -> bool:
     return default if not v else v.lower() in ("1", "true", "yes", "on")
 
 
-MAX_DAILY_LOSS_PCT   = _cfg_float("CHART_MAX_DAILY_LOSS_PCT", 3.0)    # stop new trades at −3% day P&L
-PROFIT_TARGET_PCT    = _cfg_float("CHART_PROFIT_TARGET_PCT", 5.0)     # stop new trades at +5% day P&L
-MAX_TRADES_PER_DAY   = int(_cfg_float("CHART_MAX_TRADES", 4))
-MAX_CONSEC_LOSSES    = int(_cfg_float("CHART_MAX_CONSEC_LOSSES", 2))
 TIME_STOP_MIN        = _cfg_float("CHART_TIME_STOP_MIN", 30)          # exit if flat after N minutes
 TIME_STOP_MIN_GAIN   = _cfg_float("CHART_TIME_STOP_MIN_GAIN", 10)     # "flat" = premium gain below N%
 EXPIRY_DAY_MODE      = _env_value("CHART_EXPIRY_DAY_MODE") or "next"  # next | same | skip
@@ -482,18 +477,14 @@ def _clear_trade(state: dict, symbol: str, trade_key: str) -> None:
 
 def _close_out(state: dict, symbol: str, trade_key: str, today: str,
                now_ist: datetime.datetime, kite, ntfy_topic: str) -> None:
-    """Record the result of a closed trade, clear its state and start the cooldown."""
+    """Report a closed trade, clear its state and start the cooldown."""
     bot_ts = state.get(f"{trade_key}:ts")
     pnl    = contract_pnl(kite, bot_ts) if (kite and bot_ts) else None
-    consec_key = f"{today}:consec_losses"
-    if pnl is not None:
-        state[consec_key] = int(state.get(consec_key, 0)) + 1 if pnl < 0 else 0
     reason = state.get(f"{trade_key}:exit_reason", "GTT triggered (SL or target)")
     _clear_trade(state, symbol, trade_key)
     state[f"{today}:{symbol}:sl_cooldown"] = now_ist.strftime("%H:%M")
     pnl_txt = f"₹{pnl:,.0f}" if pnl is not None else "unknown"
-    print(f"  [MONITOR] {symbol}: position closed — {reason} | P&L {pnl_txt} | "
-          f"consecutive losses {state.get(consec_key, 0)}")
+    print(f"  [MONITOR] {symbol}: position closed — {reason} | P&L {pnl_txt}")
     send_ntfy(
         f"Chart Bot: {symbol} position closed ({pnl_txt})",
         f"Reason   : {reason}\nP&L      : {pnl_txt}\n"
@@ -664,55 +655,6 @@ def _monitor_positions(symbols: list[str], state: dict, api_key: str, access_tok
             )
 
 
-# ── Day P&L ───────────────────────────────────────────────────────────────────
-
-def _day_pnl(api_key: str, access_token: str) -> float | None:
-    """Total day P&L (realised + unrealised) across all net positions."""
-    try:
-        _k = KiteConnect(api_key=api_key)
-        _k.set_access_token(access_token)
-        net = _k.positions().get("net", [])
-        return sum(float(p.get("pnl", 0)) for p in net)
-    except Exception as e:
-        print(f"  [PNL] Could not fetch day P&L: {e}")
-        return None
-
-
-def _check_halt(state: dict, today: str, opening_balance: float,
-                api_key: str, access_token: str, ntfy_topic: str) -> str | None:
-    """Return a reason string when new entries must stop for the day."""
-    halt_key = f"{today}:halt"
-    if state.get(halt_key):
-        return state[halt_key]
-    if _SHADOW:
-        return None
-
-    reason = None
-    consec = int(state.get(f"{today}:consec_losses", 0))
-    if consec >= MAX_CONSEC_LOSSES:
-        reason = f"{consec} losing trades in a row (limit {MAX_CONSEC_LOSSES})"
-    elif opening_balance > 0:
-        pnl = _day_pnl(api_key, access_token)
-        if pnl is not None:
-            loss_cap   = opening_balance * MAX_DAILY_LOSS_PCT / 100
-            profit_tgt = opening_balance * PROFIT_TARGET_PCT / 100
-            print(f"  [RISK] Day P&L ₹{pnl:,.0f} | loss cap −₹{loss_cap:,.0f} | profit lock ₹{profit_tgt:,.0f}")
-            if pnl <= -loss_cap:
-                reason = f"daily loss ₹{pnl:,.0f} hit the −{MAX_DAILY_LOSS_PCT:g}% cap"
-            elif pnl >= profit_tgt:
-                reason = f"daily profit ₹{pnl:,.0f} hit the +{PROFIT_TARGET_PCT:g}% target"
-
-    if reason:
-        state[halt_key] = reason
-        send_ntfy(
-            "🛑 Chart Bot: new trades stopped for today",
-            f"Reason : {reason}\nOpen positions keep their GTT stop/target.",
-            ntfy_topic,
-            priority="high",
-        )
-    return reason
-
-
 # ── Single scan ───────────────────────────────────────────────────────────────
 
 def scan_once(symbols: list[str], state_file: str, force: bool = False) -> None:
@@ -745,30 +687,9 @@ def scan_once(symbols: list[str], state_file: str, force: bool = False) -> None:
         _save_state(state_file, state)
         print(f"  [STATE] Pruned {len(stale_keys)} stale entries from previous days")
 
-    # Opening balance snapshot — baseline for the daily loss cap / profit lock
-    ob_key = f"{today}:opening_balance"
-    if ob_key not in state and not _SHADOW:
-        try:
-            _kite = KiteConnect(api_key=api_key)
-            _kite.set_access_token(access_token)
-            _ob = float(_kite.margins().get("equity", {}).get("available", {}).get("live_balance", 0))
-            if _ob > 0:
-                state[ob_key] = _ob
-                _save_state(state_file, state)
-                print(f"  [BALANCE] Opening balance snapshot: ₹{_ob:,.0f}")
-        except Exception as _e:
-            print(f"  [BALANCE] Could not snapshot opening balance: {_e}")
-    opening_balance = float(state.get(ob_key, 0))
-
     # Manage open positions before looking for new signals
     _monitor_positions(symbols, state, api_key, access_token, ntfy_topic, now_ist)
     _save_state(state_file, state)
-
-    halt = _check_halt(state, today, opening_balance, api_key, access_token, ntfy_topic)
-    _save_state(state_file, state)
-    if halt:
-        print(f"  [HALT] No new trades today — {halt}")
-        return
 
     if not force and not (SIGNAL_OPEN <= now_ist.time() <= SIGNAL_CLOSE):
         print(f"Outside clean signal window ({SIGNAL_OPEN}–{SIGNAL_CLOSE} IST) — skipping new signals.")
@@ -863,12 +784,9 @@ def scan_once(symbols: list[str], state_file: str, force: bool = False) -> None:
         log_entry = _base_log_entry(symbol, p_res, now_ist, tf_5m, "off")
         log_entry.update({"noise": ns.get("state", ""), "agent_flow": af or ""})
 
-        trades_today = int(state.get(f"{today}:trades", 0))
         if (_AUTO_TRADE or _SHADOW) and symbol in _TRADE_SYMBOLS and abs(score) >= MIN_TRADE_SCORE:
             skip = None
-            if trades_today >= MAX_TRADES_PER_DAY:
-                skip = f"max {MAX_TRADES_PER_DAY} trades/day reached"
-            elif not ((direction == "CE" and c_score >= 1) or (direction == "PE" and c_score <= -1)):
+            if not ((direction == "CE" and c_score >= 1) or (direction == "PE" and c_score <= -1)):
                 skip = f"5m score {c_score:+d} not confirming {direction}"
             elif NOISE_GATE and ns.get("state") in ("above", "below", "inside"):
                 want = "above" if direction == "CE" else "below"
@@ -893,7 +811,6 @@ def scan_once(symbols: list[str], state_file: str, force: bool = False) -> None:
                     log_entry["auto_trade"] = "shadow: would place"
                     state[trade_key] = "shadow"
                     state[f"{trade_key}:entry_time"] = now_ist.strftime("%H:%M")
-                    state[f"{today}:trades"] = trades_today + 1
                 else:
                     print(f"  [AUTO-TRADE] {direction} order for {symbol} @ {spot:.0f} "
                           f"(chart SL={chart_sl} T={chart_tgt})")
@@ -911,7 +828,6 @@ def scan_once(symbols: list[str], state_file: str, force: bool = False) -> None:
                                       f"Signal: {verdict}\nReason: {trade['error']}", ntfy_topic, priority="default")
                     else:
                         _record_trade(state, trade_key, trade, direction, now_ist)
-                        state[f"{today}:trades"] = trades_today + 1
                         log_entry.update({
                             "auto_trade":     "placed",
                             "tradingsymbol":  trade["tradingsymbol"],
@@ -1034,8 +950,7 @@ if __name__ == "__main__":
 
     print(
         f"[chart_bot] AUTO_TRADE={'ON' if _AUTO_TRADE else 'OFF'}{' | SHADOW MODE' if _SHADOW else ''} | "
-        f"qty: 95% of balance | loss cap {MAX_DAILY_LOSS_PCT}% | profit lock {PROFIT_TARGET_PCT}% | "
-        f"max {MAX_TRADES_PER_DAY} trades | {MAX_CONSEC_LOSSES} losses → stop | "
+        f"qty: 95% of balance | no daily limits | "
         f"time stop {TIME_STOP_MIN:.0f}m | expiry {EXPIRY_DAY_MODE} | partial {PARTIAL_BOOKING} | "
         f"noise gate {NOISE_GATE} | vwap exit {VWAP_EXIT} | ensemble {ENSEMBLE}",
         flush=True,
@@ -1049,7 +964,7 @@ if __name__ == "__main__":
             f"Time     : {now}\n"
             f"Watching : {', '.join(symbols)}\n"
             f"Strategy : closed 15m candles + 5m confirmation + Noise Area breakout\n"
-            f"Quantity : 95% of available balance, stop at −{MAX_DAILY_LOSS_PCT}% day\n\n"
+            f"Quantity : 95% of available balance\n\n"
             f"Signals fire during market hours (09:30–15:00 IST)."
         )
         print(body)

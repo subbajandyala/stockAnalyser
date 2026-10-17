@@ -7,7 +7,7 @@ Noise Area state) every 5 minutes of past sessions, then simulates trades on
 
   old       score ≥ 3, no 5m requirement, no noise gate, SL/target/EOD exits
   new       score ≥ 4, 5m confirms, noise breakout, time stop, partial at T1,
-            2-loss halt, max 4 trades/day   (what chart_bot does now)
+            (what chart_bot does now)
   new_adx   like "new" but ADX ≥ 20 instead of the noise gate
 
 Results are in R (1R = distance from entry to the chart stop loss, on the
@@ -48,8 +48,8 @@ SIGNAL_OPEN, SIGNAL_CLOSE, EOD_EXIT = "09:30", "15:00", "15:20"
 # equivalent of the live bot's option-ATR stop (option ATR ≈ delta × spot ATR).
 VARIANTS = {
     "old":     dict(min_score=3, need_5m=False, gate="none",  time_stop=False, partial=False, halt=99, max_trades=99, atr_sl=False),
-    "new":     dict(min_score=4, need_5m=True,  gate="noise", time_stop=True,  partial=True,  halt=2,  max_trades=4,  atr_sl=True),
-    "new_adx": dict(min_score=4, need_5m=True,  gate="adx",   time_stop=True,  partial=True,  halt=2,  max_trades=4,  atr_sl=True),
+    "new":     dict(min_score=4, need_5m=True,  gate="noise", time_stop=True,  partial=True,  halt=99, max_trades=99, atr_sl=True),
+    "new_adx": dict(min_score=4, need_5m=True,  gate="adx",   time_stop=True,  partial=True,  halt=99, max_trades=99, atr_sl=True),
 }
 
 
