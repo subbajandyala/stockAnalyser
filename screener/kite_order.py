@@ -258,10 +258,23 @@ def compute_option_levels(
     return {"sl": sl, "t1": _tick(t1), "source": source}
 
 
+# Limit price of each GTT leg, relative to its trigger. A sell limit exactly at the
+# trigger can stay unfilled when the premium gaps through it, so both legs sit below.
+_GTT_SL_LIMIT_BUFFER     = 0.05   # SL leg sells at trigger − 5%
+_GTT_TARGET_LIMIT_BUFFER = 0.01   # target leg sells at trigger − 1%
+
+
+def gtt_leg_prices(sl: float, target: float) -> tuple[float, float]:
+    """Limit prices for the (SL, target) legs of an OCO GTT."""
+    return (max(0.05, _tick(sl * (1 - _GTT_SL_LIMIT_BUFFER))),
+            max(0.05, _tick(target * (1 - _GTT_TARGET_LIMIT_BUFFER))))
+
+
 def place_oco_gtt(kite: KiteConnect, symbol: str, ts: str, qty: int,
                   sl: float, target: float, last_price: float):
     """Place a two-leg (SL / target) GTT for a long option position. Returns GTT id."""
     exchange = _EXCHANGE.get(symbol, "NFO")
+    sl_limit, tgt_limit = gtt_leg_prices(sl, target)
     return kite.place_gtt(
         trigger_type=kite.GTT_TYPE_OCO,
         tradingsymbol=ts,
@@ -270,9 +283,9 @@ def place_oco_gtt(kite: KiteConnect, symbol: str, ts: str, qty: int,
         last_price=last_price,
         orders=[
             {"transaction_type": kite.TRANSACTION_TYPE_SELL, "quantity": qty,
-             "product": kite.PRODUCT_NRML, "order_type": kite.ORDER_TYPE_LIMIT, "price": sl},
+             "product": kite.PRODUCT_NRML, "order_type": kite.ORDER_TYPE_LIMIT, "price": sl_limit},
             {"transaction_type": kite.TRANSACTION_TYPE_SELL, "quantity": qty,
-             "product": kite.PRODUCT_NRML, "order_type": kite.ORDER_TYPE_LIMIT, "price": target},
+             "product": kite.PRODUCT_NRML, "order_type": kite.ORDER_TYPE_LIMIT, "price": tgt_limit},
         ],
     )
 
