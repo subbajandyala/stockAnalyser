@@ -39,10 +39,29 @@ import pandas as pd
 import requests
 from kiteconnect import KiteConnect
 
-from scripts.chart_bot import _env_value, _kite_creds
+from scripts.chart_bot import _kite_creds
 import scripts.signal_outcomes as outcomes
 
+_ROOT = pathlib.Path(__file__).parent.parent
 _IST = datetime.timezone(datetime.timedelta(hours=5, minutes=30))
+
+
+def _env_value(name: str) -> str:
+    import os
+    v = os.environ.get(name, "")
+    if v:
+        return v
+    env_path = _ROOT / ".env"
+    if env_path.exists():
+        for line in env_path.read_text().splitlines():
+            line = line.strip()
+            if "=" in line and not line.startswith("#"):
+                k, val = line.split("=", 1)
+                if k.strip() == name:
+                    return val.strip().strip('"').strip("'")
+    return ""
+
+
 _API = "https://api.notion.com/v1"
 DAILY_DB  = _env_value("NOTION_DAILY_DB") or "7f3c5ed1148144e1bc954a9670fa9ec1"
 TRADES_DB = _env_value("NOTION_TRADES_DB") or "48fc8a2c491c4204a12d8a7172fa0116"
