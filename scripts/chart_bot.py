@@ -760,7 +760,10 @@ def scan_once(symbols: list[str], state_file: str, force: bool = False) -> None:
 
         if (_AUTO_TRADE or _SHADOW) and symbol in _TRADE_SYMBOLS and abs(score) >= MIN_TRADE_SCORE:
             skip = None
-            if not ((direction == "CE" and c_score >= 1) or (direction == "PE" and c_score <= -1)):
+            sent_key = f"{state_key}:sent"
+            if state.get(sent_key):
+                skip = f"order for this signal already sent to Kite at {state[sent_key]} (rejected/unfilled)"
+            elif not ((direction == "CE" and c_score >= 1) or (direction == "PE" and c_score <= -1)):
                 skip = f"5m score {c_score:+d} not confirming {direction}"
             elif NOISE_GATE and ns.get("state") in ("above", "below", "inside"):
                 want = "above" if direction == "CE" else "below"
@@ -793,10 +796,14 @@ def scan_once(symbols: list[str], state_file: str, force: bool = False) -> None:
                         partial_booking=PARTIAL_BOOKING, use_option_atr=True,
                     )
                     if "error" in trade:
-                        print(f"  [AUTO-TRADE] SKIPPED — {trade['error']}")
+                        print(f"  [AUTO-TRADE] FAILED — {trade['error']}")
                         log_entry["auto_trade"] = f"skipped: {trade['error']}"
-                        if not alerted:
-                            send_ntfy(f"Chart Auto-Trade SKIPPED: {symbol}",
+                        if trade.get("sent"):
+                            # Sent to Kite but rejected/unfilled — don't resend for the same signal
+                            state[sent_key] = now_ist.strftime("%H:%M")
+                            log_entry["order_id"] = trade.get("order_id", "")
+                        if trade.get("sent") or not alerted:
+                            send_ntfy(f"Chart Auto-Trade FAILED: {symbol}",
                                       f"Signal: {verdict}\nReason: {trade['error']}", ntfy_topic, priority="default")
                     else:
                         _record_trade(state, trade_key, trade, direction, now_ist)

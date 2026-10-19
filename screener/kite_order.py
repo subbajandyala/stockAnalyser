@@ -280,8 +280,8 @@ def place_oco_gtt(kite: KiteConnect, symbol: str, ts: str, qty: int,
 def _calc_qty(kite: KiteConnect, symbol: str, ltp: float, capital_fraction: float = 1.0) -> int:
     """Return total units to buy based on available cash (95% utilisation).
 
-    Returns 0 when balance is insufficient — caller must check before placing order.
-    Falls back to 1 lot only when the margins API itself errors (can't read balance).
+    Never returns less than 1 lot: with zero or insufficient balance the order is
+    still sent so Kite records it (and rejects it) in the order book.
     """
     lot = LOT_SIZE[symbol]
     cost_per_lot = ltp * lot
@@ -296,17 +296,14 @@ def _calc_qty(kite: KiteConnect, symbol: str, ltp: float, capital_fraction: floa
         return lot
     if cost_per_lot <= 0:
         return lot  # degenerate LTP; shouldn't happen
-    if available <= 0:
-        _LOG.warning(f"Zero available balance for {symbol} — skipping order")
-        return 0
-    usable   = available * 0.95 * capital_fraction
+    usable   = max(available, 0) * 0.95 * capital_fraction
     max_lots = int(usable / cost_per_lot)
     if max_lots == 0:
         _LOG.warning(
             f"Insufficient balance: ₹{available:.0f} available, "
-            f"₹{cost_per_lot:.0f} needed for 1 lot of {symbol} @ ₹{ltp:.1f}"
+            f"₹{cost_per_lot:.0f} needed for 1 lot of {symbol} @ ₹{ltp:.1f} — sending 1 lot anyway"
         )
-        return 0
+        return lot
     _LOG.info(
         f"Balance ₹{available:.0f} × 95% → "
         f"₹{usable:.0f} usable → {max_lots} lot(s) of {symbol} @ ₹{ltp} (₹{cost_per_lot:.0f}/lot)"
@@ -314,13 +311,12 @@ def _calc_qty(kite: KiteConnect, symbol: str, ltp: float, capital_fraction: floa
     return max_lots * lot
 
 
-def _fill_price(kite: KiteConnect, order_id: str, exchange: str, ts: str) -> float:
-    """Wait up to 8s for limit fill; cancel and return 0.0 if order stays open.
+def _fill_price(kite: KiteConnect, order_id: str, exchange: str, ts: str) -> tuple[float, str]:
+    """Wait up to 8s for limit fill. Returns (avg_price, "") on fill, else (0.0, reason).
 
-    Returning 0.0 tells the caller the order was not filled — caller must handle
-    this gracefully (return an error, do NOT place GTT against an unfilled order).
-    Leaving an unfilled LIMIT order open blocks margin and causes false 'GTT hit'
-    detections on the next position check.
+    An order still open after 8s is cancelled: leaving it open blocks margin and
+    causes false 'GTT hit' detections on the next position check. The caller must
+    not place a GTT when the price is 0.
     """
     for attempt in range(4):
         time.sleep(2)
@@ -328,10 +324,11 @@ def _fill_price(kite: KiteConnect, order_id: str, exchange: str, ts: str) -> flo
             for h in reversed(kite.order_history(order_id)):
                 status = h.get("status", "")
                 if status == "COMPLETE" and h.get("average_price", 0) > 0:
-                    return float(h["average_price"])
+                    return float(h["average_price"]), ""
                 if status in ("REJECTED", "CANCELLED"):
-                    _LOG.warning(f"Order {order_id} {status}")
-                    return 0.0
+                    reason = h.get("status_message") or h.get("status_message_raw") or ""
+                    _LOG.warning(f"Order {order_id} {status}: {reason}")
+                    return 0.0, f"Kite {status}: {reason}".strip(": ")
         except Exception:
             pass
     # Order still open after 8s — cancel it to avoid zombie pending orders
@@ -340,7 +337,7 @@ def _fill_price(kite: KiteConnect, order_id: str, exchange: str, ts: str) -> flo
         _LOG.warning(f"Order {order_id} not filled in 8s — cancelled to prevent margin lock")
     except Exception as e:
         _LOG.warning(f"Could not cancel unfilled order {order_id}: {e}")
-    return 0.0
+    return 0.0, "not filled within 8s — cancelled to avoid margin lock"
 
 
 # ── Public API ───────────────────────────────────────────────────────────────
@@ -573,15 +570,8 @@ def place_order_for_signal(
         levels = compute_option_levels(symbol, option_ltp, opt_type, spot,
                                        chart_sl, chart_target, atr, trade_mode)
 
-        # Quantity: as many lots as 95% of the available balance buys
-        qty = _calc_qty(kite, symbol, option_ltp, capital_fraction)
-        if qty == 0:
-            return {
-                "error": (
-                    f"Insufficient balance for {symbol} option at ₹{option_ltp:.1f} "
-                    f"(need ₹{option_ltp * lot:.0f} for 1 lot)"
-                )
-            }
+        # Quantity: as many lots as 95% of the available balance buys (min 1 lot)
+        qty         = _calc_qty(kite, symbol, option_ltp, capital_fraction)
         lots        = qty // lot
         partial_qty = (lots // 2) * lot if (partial_booking and lots >= 2) else 0
 
@@ -600,19 +590,14 @@ def place_order_for_signal(
                 price=limit_price,
             )
         except Exception as e:
-            return {"error": f"Order placement failed: {e}"}
+            return {"error": f"Order rejected by Kite for {qty} × {ts}: {e}", "sent": True}
 
     _LOG.info(f"Order placed: {order_id}")
 
     # 5. Get fill price (wait up to 8s; cancel order if still not filled)
-    entry_price = _fill_price(kite, order_id, exchange, ts)
+    entry_price, reason = _fill_price(kite, order_id, exchange, ts)
     if not entry_price:
-        return {
-            "error": (
-                f"Order for {ts} not filled within 8s — cancelled to avoid margin lock. "
-                f"Will retry on next signal."
-            )
-        }
+        return {"error": f"Order {order_id} for {qty} × {ts} {reason}", "sent": True, "order_id": order_id}
 
     # 6. Shift the LTP-based levels by the fill slippage so distances are preserved
     diff         = entry_price - option_ltp
