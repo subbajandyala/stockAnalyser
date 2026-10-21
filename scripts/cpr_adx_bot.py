@@ -289,6 +289,7 @@ def _scan(symbols: list[str], api_key: str, access_token: str,
         results = list(pool.map(_analyse, symbols))
 
     alerts_fired = 0
+    active: list[dict] = []
     for result in results:
         sym = result["symbol"]
 
@@ -303,6 +304,10 @@ def _scan(symbols: list[str], api_key: str, access_token: str,
 
         marker = "🚀" if abs(score) >= STRONG_SCORE else ("⚡" if abs(score) >= MIN_SIGNAL_SCORE else "  ")
         print(f"  {marker} {sym:14s} | {direction:5s} | score {score:+d} | ADX {adx:4.0f} | {stars}")
+
+        _track_wait(sym, result, state, now_ist)
+        if direction != "WAIT":
+            active.append(result)
 
         should_alert, is_upgrade = _should_alert(sym, result, state)
         if not should_alert:
@@ -341,7 +346,66 @@ def _scan(symbols: list[str], api_key: str, access_token: str,
             "reasons":   " | ".join(result.get("reasons", [])[:3]),
         })
 
+    _send_digest_if_due(active, state, ntfy_topic, now_ist)
+    _save_state(_STATE_FILE, state)
     print(f"  [{now_ist.strftime('%H:%M:%S')}] Scan done — {alerts_fired} alert(s) fired")
+
+
+REARM_AFTER_WAIT_MIN = 15   # a stock must sit at WAIT this long before a new signal re-alerts
+
+
+def _track_wait(sym: str, result: dict, state: dict, now_ist: datetime.datetime) -> None:
+    """Re-arm a stock once its signal has faded to WAIT for a full 15m candle.
+
+    Without this, a stock that signalled in the morning stays silent all day even
+    if it later gives a fresh setup in the same direction.
+    """
+    prev = state.get(sym)
+    if not isinstance(prev, dict) or prev.get("date") != now_ist.date().isoformat():
+        return
+    if result["direction"] != "WAIT":
+        prev.pop("wait_since", None)
+        return
+    if prev.get("direction", "WAIT") == "WAIT":
+        return
+    since = prev.get("wait_since")
+    if not since:
+        prev["wait_since"] = now_ist.isoformat()
+    elif (now_ist - datetime.datetime.fromisoformat(since)).total_seconds() >= REARM_AFTER_WAIT_MIN * 60:
+        prev["direction"] = "WAIT"
+        prev["strength"] = ""
+        prev.pop("wait_since", None)
+        print(f"  {sym:14s}: WAIT for {REARM_AFTER_WAIT_MIN}m — re-armed for a fresh signal")
+
+
+def _send_digest_if_due(active: list[dict], state: dict, topic: str,
+                        now_ist: datetime.datetime) -> None:
+    """One push per 15-minute slot listing every stock with an active signal."""
+    if now_ist.time() < datetime.time(9, 30):
+        return
+    slot = f"{now_ist.date().isoformat()} {now_ist.hour:02d}:{now_ist.minute // 15 * 15:02d}"
+    if state.get("_digest_slot") == slot:
+        return
+    state["_digest_slot"] = slot
+
+    active = sorted(active, key=lambda r: -abs(r["score"]))
+    buys   = sum(1 for r in active if r["direction"] == "BUY")
+    shorts = len(active) - buys
+    title  = f"CPR+ADX {slot[-5:]} update: {buys} BUY, {shorts} SHORT"
+    if active:
+        lines = []
+        for r in active[:15]:
+            arrow = "↑" if r["direction"] == "BUY" else "↓"
+            sl_t  = f" | SL {r['sl']:,.1f} T {r['target']:,.1f}" if r.get("sl") and r.get("target") else ""
+            lines.append(f"{'🚀' if abs(r['score']) >= STRONG_SCORE else '⚡'} {r['symbol']} {arrow} "
+                         f"{r['direction']} {r['score']:+d} @ ₹{r['price']:,.1f}{sl_t}")
+        if len(active) > 15:
+            lines.append(f"… and {len(active) - 15} more")
+        body = "\n".join(lines)
+    else:
+        body = "No stocks with an active CPR+ADX signal right now."
+    ok = send_ntfy(title, body + "\n\nIntraday MIS · Verify before trading.", topic, priority="default")
+    print(f"  [DIGEST] {title} — ntfy {'OK' if ok else 'FAILED'}")
 
 
 # ── Worker (continuous loop) ──────────────────────────────────────────────────
