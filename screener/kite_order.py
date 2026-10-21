@@ -385,9 +385,13 @@ def place_order_for_signal(
     trade_mode: str = "scalp",
     chart_sl: float | None = None,
     chart_target: float | None = None,
+    trailing: bool = False,
 ) -> dict:
     """
     Place ATM option order + GTT for the given signal.
+
+    trailing=True: the GTT gets the SL and a far target; the returned "t1" is the
+    take-profit activation level the caller manages (book half, trail the rest).
 
     Args:
         symbol:           "NIFTY" or "SENSEX"
@@ -475,32 +479,23 @@ def place_order_for_signal(
             target_price = _tick(entry_price * (1 + _FALLBACK_TARGET_PCT))
 
     # 7. GTT two-leg (OCO): [sl_trigger, target_trigger]
+    # trailing=True: target_price becomes the activation level (T1) handled by the
+    # bot (half booked, rest trailed), so the GTT's target leg sits far away.
+    t1_price  = target_price
+    gtt_target = target_price
+    if trailing:
+        gtt_target = _tick(max(entry_price * _TRAIL_FAR_TARGET_X, t1_price * 1.5))
     gtt_id = None
     try:
         gtt_id = kite.place_gtt(
             trigger_type=kite.GTT_TYPE_OCO,
             tradingsymbol=ts,
             exchange=exchange,
-            trigger_values=[sl_price, target_price],
+            trigger_values=[sl_price, gtt_target],
             last_price=entry_price,
-            orders=[
-                {
-                    "transaction_type": kite.TRANSACTION_TYPE_SELL,
-                    "quantity":         qty,
-                    "product":          kite.PRODUCT_NRML,
-                    "order_type":       kite.ORDER_TYPE_LIMIT,
-                    "price":            gtt_leg_prices(sl_price, target_price)[0],
-                },
-                {
-                    "transaction_type": kite.TRANSACTION_TYPE_SELL,
-                    "quantity":         qty,
-                    "product":          kite.PRODUCT_NRML,
-                    "order_type":       kite.ORDER_TYPE_LIMIT,
-                    "price":            gtt_leg_prices(sl_price, target_price)[1],
-                },
-            ],
+            orders=_oco_orders(kite, qty, sl_price, gtt_target),
         )
-        _LOG.info(f"GTT placed: {gtt_id}  SL={sl_price}  Target={target_price}")
+        _LOG.info(f"GTT placed: {gtt_id}  SL={sl_price}  Target={gtt_target}  T1={t1_price}")
     except Exception as e:
         _LOG.warning(f"GTT failed (order {order_id} is live, set SL manually): {e}")
 
@@ -512,10 +507,54 @@ def place_order_for_signal(
         "qty":           qty,
         "entry_price":   entry_price,
         "sl":            sl_price,
-        "target":        target_price,
+        "target":        gtt_target,
+        "t1":            t1_price,
         "gtt_id":        gtt_id,
         "trade_mode":    trade_mode,
     }
+
+
+# ── GTT / position helpers for trailing take profit ──────────────────────────
+
+_TRAIL_FAR_TARGET_X = 3.0   # GTT target placeholder while the bot trails (3× entry)
+
+
+def _oco_orders(kite: KiteConnect, qty: int, sl: float, target: float) -> list[dict]:
+    sl_lim, tgt_lim = gtt_leg_prices(sl, target)
+    leg = lambda price: {"transaction_type": kite.TRANSACTION_TYPE_SELL, "quantity": qty,
+                         "product": kite.PRODUCT_NRML, "order_type": kite.ORDER_TYPE_LIMIT,
+                         "price": price}
+    return [leg(sl_lim), leg(tgt_lim)]
+
+
+def modify_oco_gtt(kite: KiteConnect, symbol: str, ts: str, gtt_id, qty: int,
+                   sl: float, target: float, last_price: float):
+    """Change an existing OCO GTT in place (no window without a stop loss)."""
+    return kite.modify_gtt(
+        trigger_id=int(gtt_id),
+        trigger_type=kite.GTT_TYPE_OCO,
+        tradingsymbol=ts,
+        exchange=_EXCHANGE.get(symbol, "NFO"),
+        trigger_values=[sl, target],
+        last_price=last_price,
+        orders=_oco_orders(kite, qty, sl, target),
+    )
+
+
+def sell_partial(kite: KiteConnect, symbol: str, ts: str, qty: int) -> str | None:
+    """LIMIT SELL qty units of the bot's NRML position at LTP × 0.99. Returns order id."""
+    exchange = _EXCHANGE.get(symbol, "NFO")
+    try:
+        ltp = float(kite.ltp([f"{exchange}:{ts}"])[f"{exchange}:{ts}"]["last_price"])
+        return kite.place_order(
+            variety=kite.VARIETY_REGULAR, exchange=exchange, tradingsymbol=ts,
+            transaction_type=kite.TRANSACTION_TYPE_SELL, quantity=qty,
+            product=kite.PRODUCT_NRML, order_type=kite.ORDER_TYPE_LIMIT,
+            price=_tick(ltp * 0.99),
+        )
+    except Exception as e:
+        _LOG.error(f"Partial sell failed for {ts}: {e}")
+        return None
 
 
 def _send_rsi_exit_ntfy(ts: str, entry_ltp: float, exit_ltp: float, ntfy_topic: str) -> None:

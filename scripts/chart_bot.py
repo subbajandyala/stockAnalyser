@@ -38,10 +38,12 @@ from kiteconnect import KiteConnect
 
 from screener.chart_analysis import analyze_chart
 from screener.kite_order import (
-    gtt_leg_prices,
+    LOT_SIZE,
+    exit_position,
     has_open_position,
+    modify_oco_gtt,
     place_order_for_signal as _place_order,
-    position_pnl_pct,
+    sell_partial,
 )
 from screener.sharekhan_order import place_sk_order as _place_sk_order
 
@@ -329,121 +331,118 @@ def _append_chart_log(date_str: str, entry: dict) -> None:
         print(f"  [log] Failed to write chart log: {e}")
 
 
-# ── Trailing GTT adjuster ────────────────────────────────────────────────────
+# ── Trailing take profit ─────────────────────────────────────────────────────
+# At T1 (the chart / +25% target) the bot books half (when holding ≥ 2 lots) and
+# trails the rest: stop 12% below the highest premium seen, never below entry +10%.
+# The GTT keeps a far-away target the whole time, so profit-taking is the bot's job.
 
-_BREAKEVEN_THRESHOLD = 0.30   # 30% premium gain → move SL to entry (breakeven)
-_TRAIL1_THRESHOLD    = 0.55   # 55% premium gain → move SL to entry + 20%
-_TRAIL1_SL_BUFFER    = 0.20   # locks in 20% of entry premium as profit
+TRAIL_PCT       = 0.12              # stop sits this far below the peak premium
+TRAIL_FLOOR_PCT = 0.10              # once trailing, the stop never goes below entry +10%
+TRAIL_MIN_STEP  = 0.02              # modify the GTT only when the stop rises ≥ 2%
+SQUARE_OFF_TIME = datetime.time(15, 15)
 _EXCHANGE_MAP = {"NIFTY": "NFO", "SENSEX": "BFO", "BANKNIFTY": "NFO"}
 
 
-def _adjust_trailing_gtt(
-    kite,
-    symbol: str,
-    bot_ts: str,
-    gtt_id: int | str,
-    entry_price: float,
-    target_price: float,
-    qty: int,
-    sl_step: int,
-    pnl_pct: float,
-    state: dict,
-    trade_key: str,
-    ntfy_topic: str,
-) -> None:
-    """Cancel old GTT and place a new one with a better SL when trade is profitable.
+def _tick(x: float) -> float:
+    return round(round(x / 0.05) * 0.05, 2)
 
-    sl_step 0→1 : SL moves to breakeven (entry price) once premium is +30%.
-    sl_step 1→2 : SL moves to entry+20% (locks profit) once premium is +55%.
-    """
+
+def _bot_ltp(kite, symbol: str, ts: str) -> float | None:
     exchange = _EXCHANGE_MAP.get(symbol, "NFO")
-
-    if sl_step < 1 and pnl_pct >= _BREAKEVEN_THRESHOLD:
-        new_sl_step = 1
-        new_sl      = round(round(entry_price / 0.05) * 0.05, 2)
-        step_label  = "BREAKEVEN"
-    elif sl_step < 2 and pnl_pct >= _TRAIL1_THRESHOLD:
-        new_sl_step = 2
-        new_sl      = round(round(entry_price * (1 + _TRAIL1_SL_BUFFER) / 0.05) * 0.05, 2)
-        step_label  = "TRAIL +20%"
-    else:
-        return
-
-    if new_sl >= target_price:
-        return  # degenerate — don't adjust
-
     try:
-        ltp_data    = kite.ltp([f"{exchange}:{bot_ts}"])
-        current_ltp = float(ltp_data[f"{exchange}:{bot_ts}"]["last_price"])
+        return float(kite.ltp([f"{exchange}:{ts}"])[f"{exchange}:{ts}"]["last_price"])
     except Exception as e:
-        _LOG.warning(f"[TRAIL] LTP fetch failed for {bot_ts}: {e}")
+        _LOG.warning(f"[TRAIL] LTP fetch failed for {ts}: {e}")
+        return None
+
+
+def _manage_trade(kite, symbol: str, state: dict, trade_key: str,
+                  now_ist: datetime.datetime, api_key: str, access_token: str,
+                  ntfy_topic: str) -> None:
+    """Square-off at 15:15, book half at T1, then trail the stop on the rest."""
+    k = lambda name: f"{trade_key}:{name}"
+    ts      = state.get(k("ts"))
+    gtt_id  = state.get(k("gtt_id"))
+    entry   = float(state.get(k("entry_price")) or 0)
+    qty     = int(state.get(k("qty")) or 0)
+    t1      = float(state.get(k("t1")) or 0)
+    sl      = float(state.get(k("sl")) or 0)
+    far     = float(state.get(k("target_price")) or 0)
+    if not (ts and entry > 0 and qty > 0):
         return
 
-    if current_ltp <= new_sl:
-        return  # already at/below the new SL — skip
+    if state.get(k("exiting")):
+        print(f"  [MONITOR] {symbol}: square-off order sent at {state[k('exiting')]} — waiting for fill")
+        return
 
-    # Cancel the old GTT
-    if gtt_id:
-        try:
-            kite.delete_gtt(int(gtt_id))
-            _LOG.info(f"[TRAIL] Deleted old GTT {gtt_id}")
-        except Exception as e:
-            # Keep the existing GTT; placing a second one could sell twice (→ short)
-            _LOG.warning(f"[TRAIL] GTT delete failed ({e}) — keeping existing GTT")
+    # 1. End-of-day square-off — NRML positions would otherwise be carried overnight
+    if now_ist.time() >= SQUARE_OFF_TIME:
+        res = exit_position(symbol, api_key, access_token, gtt_id=gtt_id or None, only_ts=ts)
+        state[k("exiting")] = now_ist.strftime("%H:%M")
+        state[k("gtt_id")] = ""
+        msg = res.get("error") or "exit order sent"
+        print(f"  [MONITOR] {symbol}: 15:15 square-off — {msg}")
+        if ntfy_topic:
+            send_ntfy(f"Chart Bot: {symbol} squared off (15:15)", f"{ts}: {msg}", ntfy_topic,
+                      priority="urgent" if "error" in res else "default")
+        return
+
+    if not gtt_id:
+        return  # no GTT to manage (placement failed) — square-off still applies
+    ltp = _bot_ltp(kite, symbol, ts)
+    if ltp is None:
+        return
+    trailing = bool(state.get(k("trailing")))
+    stage = f"trailing, peak ₹{state.get(k('peak'))}" if trailing else f"T1 ₹{t1:.2f}"
+    print(f"  [MONITOR] {symbol}: LTP ₹{ltp:.2f}  entry ₹{entry:.2f}  SL ₹{sl:.2f}  {stage}")
+
+    # 2. T1 reached → book half, start trailing the rest
+    if not trailing:
+        if not (t1 and ltp >= t1):
             return
-
-    # Place new GTT with adjusted SL
-    new_gtt_id = None
-    try:
-        new_gtt_id = kite.place_gtt(
-            trigger_type=kite.GTT_TYPE_OCO,
-            tradingsymbol=bot_ts,
-            exchange=exchange,
-            trigger_values=[new_sl, target_price],
-            last_price=current_ltp,
-            orders=[
-                {
-                    "transaction_type": kite.TRANSACTION_TYPE_SELL,
-                    "quantity":         qty,
-                    "product":          kite.PRODUCT_NRML,
-                    "order_type":       kite.ORDER_TYPE_LIMIT,
-                    "price":            gtt_leg_prices(new_sl, target_price)[0],
-                },
-                {
-                    "transaction_type": kite.TRANSACTION_TYPE_SELL,
-                    "quantity":         qty,
-                    "product":          kite.PRODUCT_NRML,
-                    "order_type":       kite.ORDER_TYPE_LIMIT,
-                    "price":            gtt_leg_prices(new_sl, target_price)[1],
-                },
-            ],
-        )
-    except Exception as e:
-        _LOG.error(f"[TRAIL] New GTT placement failed: {e}")
+        lot       = LOT_SIZE.get(symbol, 1)
+        half      = (qty // lot // 2) * lot if qty // lot >= 2 else 0
+        remaining = qty - half
+        new_sl    = _tick(max(entry * (1 + TRAIL_FLOOR_PCT), ltp * (1 - TRAIL_PCT)))
+        far       = max(far, _tick(ltp * 2))
+        # Shrink the GTT first so it can never sell more than we will still hold
+        try:
+            modify_oco_gtt(kite, symbol, ts, gtt_id, remaining, new_sl, far, ltp)
+        except Exception as e:
+            _LOG.warning(f"[TRAIL] {symbol}: GTT modify failed ({e}) — will retry next scan")
+            return
+        if half and not sell_partial(kite, symbol, ts, half):
+            try:   # partial sell failed — put full-quantity protection back
+                modify_oco_gtt(kite, symbol, ts, gtt_id, qty, new_sl, far, ltp)
+            except Exception as e:
+                send_ntfy(f"⚠️ Chart Bot: {symbol} check GTT quantity",
+                          f"Partial sell failed and GTT reset failed: {e}", ntfy_topic, priority="urgent")
+            remaining, half = qty, 0
+        state.update({k("qty"): remaining, k("sl"): new_sl, k("target_price"): far,
+                      k("trailing"): True, k("peak"): ltp})
+        booked = f"Booked {half} units at ~₹{ltp:.1f}.\n" if half else ""
+        print(f"  [TRAIL] {symbol}: T1 hit at ₹{ltp:.1f} — booked {half}, trailing {remaining} with SL ₹{new_sl}")
+        if ntfy_topic:
+            send_ntfy(f"💰 Chart Bot: {symbol} target hit — trailing",
+                      f"{ts}\n{booked}Trailing {remaining} units: SL ₹{new_sl:.2f} "
+                      f"(12% below peak, never below entry +10%).", ntfy_topic, priority="default")
         return
 
-    state[f"{trade_key}:gtt_id"]  = new_gtt_id
-    state[f"{trade_key}:sl_step"] = new_sl_step
-
-    _LOG.info(
-        f"[TRAIL] {symbol} SL → {step_label}: entry={entry_price:.2f}"
-        f"  new_sl={new_sl:.2f}  target={target_price:.2f}  pnl={pnl_pct:+.1%}"
-    )
-
-    if ntfy_topic:
-        send_ntfy(
-            f"🛡 Chart Bot: {symbol} SL → {step_label}",
-            (
-                f"Trade is in profit ({pnl_pct:+.1%}) — SL adjusted.\n"
-                f"Contract : {bot_ts}\n"
-                f"Entry    : ₹{entry_price:.2f}\n"
-                f"New SL   : ₹{new_sl:.2f}\n"
-                f"Target   : ₹{target_price:.2f}\n"
-                f"GTT ID   : {new_gtt_id}"
-            ),
-            ntfy_topic,
-            priority="default",
-        )
+    # 3. Trailing — raise the stop as the premium makes new highs
+    peak = max(float(state.get(k("peak")) or ltp), ltp)
+    state[k("peak")] = peak
+    cand = _tick(max(entry * (1 + TRAIL_FLOOR_PCT), peak * (1 - TRAIL_PCT)))
+    if cand >= sl * (1 + TRAIL_MIN_STEP) and cand < ltp:
+        far = max(far, _tick(peak * 2))
+        try:
+            modify_oco_gtt(kite, symbol, ts, gtt_id, qty, cand, far, ltp)
+        except Exception as e:
+            _LOG.warning(f"[TRAIL] {symbol}: GTT modify failed ({e}) — will retry next scan")
+            return
+        state[k("sl")] = cand
+        state[k("target_price")] = far
+        print(f"  [TRAIL] {symbol}: peak ₹{peak:.1f} → SL raised to ₹{cand:.2f} "
+              f"(locks {((cand / entry) - 1) * 100:+.0f}%)")
 
 
 # ── Position monitor ─────────────────────────────────────────────────────────
@@ -496,10 +495,7 @@ def _monitor_positions(
                     print(f"  [MONITOR] {symbol}: deleted leftover GTT {_left_gtt}")
                 except Exception:
                     pass  # already triggered/removed by Kite
-            for _k in (trade_key, f"{trade_key}:ts", f"{trade_key}:gtt_id",
-                       f"{trade_key}:entry_price", f"{trade_key}:target_price",
-                       f"{trade_key}:qty", f"{trade_key}:sl_step",
-                       f"{trade_key}:reversal_alerted"):
+            for _k in [x for x in state if x == trade_key or x.startswith(f"{trade_key}:")]:
                 state.pop(_k, None)
             # Clear the alerted key too — prevents falling through to immediate re-entry
             state.pop(symbol, None)
@@ -509,29 +505,16 @@ def _monitor_positions(
                 send_ntfy(
                     f"Chart Bot: {symbol} position closed",
                     (
-                        f"The GTT was triggered (SL or Target hit).\n"
-                        f"30-min cooldown active — next re-entry earliest in 30 min."
+                        f"Stop loss / trailing stop hit, or the 15:15 square-off filled.\n"
+                        f"Ready for the next signal."
                     ),
                     ntfy_topic,
                     priority="default",
                 )
             continue
 
-        # Position open — attempt trailing GTT adjustment
-        gtt_id       = state.get(f"{trade_key}:gtt_id", "")
-        entry_price  = float(state.get(f"{trade_key}:entry_price") or 0)
-        target_price = float(state.get(f"{trade_key}:target_price") or 0)
-        qty          = int(state.get(f"{trade_key}:qty") or 0)
-        sl_step      = int(state.get(f"{trade_key}:sl_step") or 0)
-
-        if gtt_id and entry_price > 0 and target_price > 0 and qty > 0 and bot_ts:
-            pnl_pct = position_pnl_pct(kite, symbol)
-            if pnl_pct is not None:
-                print(f"  [MONITOR] {symbol}: pnl={pnl_pct:+.1%}  sl_step={sl_step}")
-                _adjust_trailing_gtt(
-                    kite, symbol, bot_ts, gtt_id, entry_price, target_price,
-                    qty, sl_step, pnl_pct, state, trade_key, ntfy_topic,
-                )
+        # Position open — square-off / take profit / trailing stop
+        _manage_trade(kite, symbol, state, trade_key, now_ist, api_key, access_token, ntfy_topic)
 
         # Position still open — check if 15m signal has reversed
         if not recorded_direction:
@@ -814,7 +797,7 @@ def scan_once(symbols: list[str], state_file: str, force: bool = False) -> None:
             )
             trade = _place_order(
                 symbol, direction, spot, api_key, access_token,
-                chart_sl=chart_sl, chart_target=chart_tgt,
+                chart_sl=chart_sl, chart_target=chart_tgt, trailing=True,
             )
             if "error" in trade:
                 print(f"  [AUTO-TRADE] SKIPPED — {trade['error']}")
@@ -832,7 +815,7 @@ def scan_once(symbols: list[str], state_file: str, force: bool = False) -> None:
                     f"  [AUTO-TRADE] ORDER — {trade['tradingsymbol']}"
                     f" | Entry ₹{trade['entry_price']}"
                     f" | SL ₹{trade['sl']}"
-                    f" | Target ₹{trade['target']}"
+                    f" | T1 ₹{trade.get('t1')} (book half + trail)"
                 )
                 log_entry.update({
                     "auto_trade":    "placed",
@@ -853,7 +836,7 @@ def scan_once(symbols: list[str], state_file: str, force: bool = False) -> None:
                             f"Qty     : {trade['qty']}\n"
                             f"Entry   : ₹{trade['entry_price']}\n"
                             f"SL      : ₹{trade['sl']}\n"
-                            f"Target  : ₹{trade['target']}\n"
+                            f"T1      : ₹{trade.get('t1')} → book half, trail rest 12% below peak\n"
                             f"Order ID: {trade['order_id']}"
                         ),
                         ntfy_topic,
@@ -864,7 +847,9 @@ def scan_once(symbols: list[str], state_file: str, force: bool = False) -> None:
                 state[f"{trade_key}:entry_price"]    = trade.get("entry_price", 0)
                 state[f"{trade_key}:target_price"]   = trade.get("target", 0)
                 state[f"{trade_key}:qty"]            = trade.get("qty", 0)
-                state[f"{trade_key}:sl_step"]        = 0
+                state[f"{trade_key}:sl"]             = trade.get("sl", 0)
+                state[f"{trade_key}:t1"]             = trade.get("t1", 0)
+                state[f"{trade_key}:trailing"]       = False
 
                 # Mirror on Sharekhan
                 try:
@@ -872,7 +857,7 @@ def scan_once(symbols: list[str], state_file: str, force: bool = False) -> None:
                         symbol, direction, spot,
                         option_ltp=trade.get("entry_price", 0),
                         option_sl=trade.get("sl", 0),
-                        option_target=trade.get("target", 0),
+                        option_target=trade.get("t1", trade.get("target", 0)),
                     )
                     if "error" in sk_result:
                         print(f"  [SHAREKHAN] SKIPPED — {sk_result['error']}")
