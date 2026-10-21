@@ -357,7 +357,9 @@ def _adjust_trailing_gtt(
             kite.delete_gtt(int(gtt_id))
             _LOG.info(f"[TRAIL] Deleted old GTT {gtt_id}")
         except Exception as e:
-            _LOG.warning(f"[TRAIL] GTT delete failed ({e}) — placing new GTT anyway")
+            # Keep the existing GTT; placing a second one could sell twice (→ short)
+            _LOG.warning(f"[TRAIL] GTT delete failed ({e}) — keeping existing GTT")
+            return
 
     # Place new GTT with adjusted SL
     new_gtt_id = None
@@ -455,6 +457,14 @@ def _monitor_positions(
 
         if not position_open:
             print(f"  [MONITOR] {symbol}: position closed (GTT hit)")
+            # Remove any leftover GTT so it can't sell an option we no longer hold
+            _left_gtt = state.get(f"{trade_key}:gtt_id")
+            if _left_gtt:
+                try:
+                    kite.delete_gtt(int(_left_gtt))
+                    print(f"  [MONITOR] {symbol}: deleted leftover GTT {_left_gtt}")
+                except Exception:
+                    pass  # already triggered/removed by Kite
             for _k in (trade_key, f"{trade_key}:ts", f"{trade_key}:gtt_id",
                        f"{trade_key}:entry_price", f"{trade_key}:target_price",
                        f"{trade_key}:qty", f"{trade_key}:sl_step"):
@@ -687,17 +697,27 @@ def scan_once(symbols: list[str], state_file: str, force: bool = False) -> None:
         if already_alerted and already_traded:
             print(f"         Already alerted+traded today — no change")
             continue
-        elif already_alerted:
+        # _monitor_positions clears trade_key once the bot's position is closed, so a
+        # trade_key here means a bot position is still open (possibly the other side)
+        if already_traded:
+            print(f"         [{symbol}] Bot position still open — no new entry")
+            continue
+        sent_key = f"{state_key}:sent"
+        if already_alerted and state.get(sent_key):
+            print(f"         Order for this signal already sent at {state[sent_key]} "
+                  f"(rejected/unfilled) — not resending")
+            continue
+        if already_alerted:
             print(f"         Already alerted (no trade yet) — will retry order if conditions met")
 
-        # Format and send notification
+        # Format and send notification (once per signal)
         title, message = _fmt_alert(symbol, p_res, c_res)
         print(f"\n{'='*55}\n{message}\n{'='*55}\n")
 
-        if ntfy_topic:
+        if ntfy_topic and not already_alerted:
             ok = send_ntfy(title, message, ntfy_topic)
             print(f"  ntfy.sh: {'OK' if ok else 'FAILED'}")
-        else:
+        elif not ntfy_topic:
             print("  No ntfy topic configured.")
 
         # Build log entry for EOD report
@@ -746,7 +766,11 @@ def scan_once(symbols: list[str], state_file: str, force: bool = False) -> None:
             if "error" in trade:
                 print(f"  [AUTO-TRADE] SKIPPED — {trade['error']}")
                 log_entry["auto_trade"] = f"skipped: {trade['error']}"
-                if ntfy_topic:
+                if trade.get("sent"):
+                    # Reached Kite but rejected/unfilled — don't resend for this same signal
+                    state[sent_key] = now_ist.strftime("%H:%M")
+                    log_entry["order_id"] = trade.get("order_id", "")
+                if ntfy_topic and (trade.get("sent") or not already_alerted):
                     send_ntfy(
                         f"Chart Auto-Trade SKIPPED: {symbol}",
                         f"Signal: {verdict}\nReason: {trade['error']}",

@@ -199,21 +199,32 @@ def _calc_qty(kite: KiteConnect, symbol: str, ltp: float, capital_fraction: floa
     return lots * lot
 
 
-def _fill_price(kite: KiteConnect, order_id: str, exchange: str, ts: str) -> float:
-    """Wait briefly for fill, return average_price; fall back to LTP."""
-    time.sleep(2)   # give exchange 2s to fill a market order
+def _fill_price(kite: KiteConnect, order_id: str, exchange: str, ts: str) -> tuple[float, str]:
+    """Wait up to 8s for the fill. Returns (avg_price, "") if filled, else (0.0, reason).
+
+    A rejected order returns Kite's reason. An order still open after 8s is
+    cancelled so it doesn't lock margin. The caller must not place a GTT
+    unless a real fill price is returned.
+    """
+    for _ in range(4):
+        time.sleep(2)
+        try:
+            for h in reversed(kite.order_history(order_id)):
+                status = h.get("status", "")
+                if status == "COMPLETE" and h.get("average_price", 0) > 0:
+                    return float(h["average_price"]), ""
+                if status in ("REJECTED", "CANCELLED"):
+                    reason = h.get("status_message") or h.get("status_message_raw") or ""
+                    _LOG.warning(f"Order {order_id} {status}: {reason}")
+                    return 0.0, f"Kite {status}: {reason}".strip(": ")
+        except Exception:
+            pass
     try:
-        for h in reversed(kite.order_history(order_id)):
-            if h.get("status") == "COMPLETE" and h.get("average_price", 0) > 0:
-                return float(h["average_price"])
-    except Exception:
-        pass
-    # fallback: LTP
-    try:
-        q = kite.ltp([f"{exchange}:{ts}"])
-        return float(q[f"{exchange}:{ts}"]["last_price"])
-    except Exception:
-        return 0.0
+        kite.cancel_order(variety=kite.VARIETY_REGULAR, order_id=order_id)
+        _LOG.warning(f"Order {order_id} not filled in 8s — cancelled")
+    except Exception as e:
+        _LOG.warning(f"Could not cancel unfilled order {order_id}: {e}")
+    return 0.0, "not filled within 8s — cancelled"
 
 
 # ── Public API ───────────────────────────────────────────────────────────────
@@ -412,20 +423,15 @@ def place_order_for_signal(
                 price=limit_price,
             )
         except Exception as e:
-            return {"error": f"Order placement failed: {e}"}
+            return {"error": f"Order rejected by Kite for {qty} × {ts}: {e}", "sent": True}
 
     _LOG.info(f"Order placed: {order_id}")
 
-    # 5. Get fill price (wait briefly for limit fill)
-    entry_price = _fill_price(kite, order_id, exchange, ts)
+    # 5. Confirm the fill — no GTT for a rejected / unfilled order
+    entry_price, reason = _fill_price(kite, order_id, exchange, ts)
     if not entry_price:
-        entry_price = limit_price  # use limit price as proxy if fill not confirmed
-    if not entry_price:
-        return {
-            "order_id":      order_id,
-            "tradingsymbol": ts,
-            "error":         "Order placed but fill price unavailable — GTT not set",
-        }
+        return {"error": f"Order {order_id} for {qty} × {ts} {reason}", "sent": True,
+                "order_id": order_id, "tradingsymbol": ts}
 
     # 6. SL and target — chart-derived levels preferred; fall back to scalp/ride
     chart_levels = None
