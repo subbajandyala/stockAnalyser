@@ -41,6 +41,7 @@ from screener.chart_analysis import analyze_chart
 from screener.kite_order import (
     LOT_SIZE,
     contract_pnl,
+    delete_gtts_for,
     has_open_position,
     modify_oco_gtt,
     open_qty,
@@ -364,6 +365,20 @@ def _bot_ltp(kite, symbol: str, ts: str) -> float | None:
         return None
 
 
+def _clear_gtts(kite, symbol: str, ts: str, ntfy_topic: str) -> None:
+    """Delete every active GTT on a contract the bot is now flat in; alert if any remain."""
+    deleted, failed = delete_gtts_for(kite, ts)
+    if deleted:
+        print(f"  [MONITOR] {symbol}: deleted GTT {', '.join(map(str, deleted))} on {ts}")
+    if failed:
+        print(f"  [MONITOR] {symbol}: GTT cleanup failed — {failed}")
+        if ntfy_topic:
+            send_ntfy(f"⚠️ Chart Bot: delete GTT on {ts} manually",
+                      f"Position is flat but the GTT could not be removed ({failed}). "
+                      f"If it triggers it will SELL an option you don't hold.",
+                      ntfy_topic, priority="urgent")
+
+
 def _exit_bot_position(kite, symbol: str, state: dict, trade_key: str, reason: str,
                        ntfy_topic: str) -> bool:
     """Sell the bot's whole position and only then remove its GTT.
@@ -387,11 +402,7 @@ def _exit_bot_position(kite, symbol: str, state: dict, trade_key: str, reason: s
                       f"{reason}\n{ts}: {info}\nGTT stop loss kept; retrying every minute.",
                       ntfy_topic, priority="urgent")
         return False
-    if gtt_id:
-        try:
-            kite.delete_gtt(int(gtt_id))
-        except Exception:
-            pass  # already triggered / removed
+    _clear_gtts(kite, symbol, ts, ntfy_topic)
     state[k("gtt_id")] = ""
     state[k("exit_reason")] = reason
     print(f"  [EXIT] {symbol}: {reason} — {info}")
@@ -551,13 +562,8 @@ def _monitor_positions(
             if pnl is not None and pnl < 0 and closed_dir:
                 state[f"{today}:{symbol}:loss_block"] = {"dir": closed_dir, "t": now_ist.strftime("%H:%M")}
             # Remove any leftover GTT so it can't sell an option we no longer hold
-            _left_gtt = state.get(f"{trade_key}:gtt_id")
-            if _left_gtt:
-                try:
-                    kite.delete_gtt(int(_left_gtt))
-                    print(f"  [MONITOR] {symbol}: deleted leftover GTT {_left_gtt}")
-                except Exception:
-                    pass  # already triggered/removed by Kite
+            if bot_ts:
+                _clear_gtts(kite, symbol, bot_ts, ntfy_topic)
             for _k in [x for x in state if x == trade_key or x.startswith(f"{trade_key}:")]:
                 state.pop(_k, None)
             # Clear the alerted key too — prevents falling through to immediate re-entry

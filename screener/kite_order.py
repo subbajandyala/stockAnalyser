@@ -311,6 +311,28 @@ def open_qty(kite: KiteConnect, ts: str) -> int | None:
         return None
 
 
+def delete_gtts_for(kite: KiteConnect, ts: str) -> tuple[list, list]:
+    """Delete every ACTIVE GTT on one contract. Returns (deleted_ids, failures).
+
+    Used once the bot is flat: a GTT left on a contract we no longer hold would
+    SELL it when triggered and open a naked short.
+    """
+    deleted, failed = [], []
+    try:
+        gtts = kite.get_gtts()
+    except Exception as e:
+        return deleted, [f"GTT list failed: {e}"]
+    for g in gtts:
+        if g.get("status") != "active" or g.get("condition", {}).get("tradingsymbol") != ts:
+            continue
+        try:
+            kite.delete_gtt(g["id"])
+            deleted.append(g["id"])
+        except Exception as e:
+            failed.append(f"{g['id']}: {e}")
+    return deleted, failed
+
+
 def place_oco_gtt(kite: KiteConnect, symbol: str, ts: str, qty: int,
                   sl: float, target: float, last_price: float):
     """Place a fresh OCO GTT (SL / target) for a long option position."""
