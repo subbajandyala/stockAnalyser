@@ -259,8 +259,10 @@ def _fmt_alert(symbol: str, p_res: dict, c_res: dict) -> tuple[str, str]:
         f"",
     ]
 
-    ok_reasons  = [r["text"] for r in reasons if r.get("ok") is True][:4]
-    bad_reasons = [r["text"] for r in reasons if r.get("ok") is False][:2]
+    # reason["ok"] is True for bullish evidence; for a PE signal bearish evidence supports it
+    supports = direction == "CE"
+    ok_reasons  = [r["text"] for r in reasons if r.get("ok") is supports][:4]
+    bad_reasons = [r["text"] for r in reasons if r.get("ok") is (not supports)][:2]
     if ok_reasons:
         lines.append("Signals:")
         for r in ok_reasons:
@@ -734,11 +736,17 @@ def scan_once(symbols: list[str], state_file: str, force: bool = False) -> None:
             print(f"         [{symbol}] Bot position still open — no new entry")
             continue
         if already_alerted:
-            print(f"         Already alerted (no trade yet) — will retry order if conditions met")
+            if not (_AUTO_TRADE and symbol in _TRADE_SYMBOLS and abs(score) >= MIN_TRADE_SCORE):
+                why = ("no auto-trade for this symbol" if symbol not in _TRADE_SYMBOLS
+                       else f"orders need score ±{MIN_TRADE_SCORE}")
+                print(f"         Already alerted — signal only ({why}), no order")
+                continue
+            print(f"         Already alerted (no trade yet) — retrying order")
 
         # Format and send notification (once per signal)
         title, message = _fmt_alert(symbol, p_res, c_res)
-        print(f"\n{'='*55}\n{message}\n{'='*55}\n")
+        if not already_alerted:
+            print(f"\n{'='*55}\n{message}\n{'='*55}\n")
 
         if ntfy_topic and not already_alerted:
             ok = send_ntfy(title, message, ntfy_topic)
