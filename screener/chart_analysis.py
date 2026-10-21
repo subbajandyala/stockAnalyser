@@ -316,6 +316,10 @@ def compute_indicators(df: pd.DataFrame, intraday: bool = True) -> pd.DataFrame:
     df["DI_neg"] = di_n
     vol_avg      = df["Volume"].rolling(20).mean()
     df["VolAvg"] = vol_avg
+    pc           = df["Close"].shift(1)
+    tr           = pd.concat([df["High"] - df["Low"], (df["High"] - pc).abs(),
+                              (df["Low"] - pc).abs()], axis=1).max(axis=1)
+    df["ATR"]    = tr.ewm(span=14, adjust=False).mean()
     return df
 
 
@@ -582,6 +586,7 @@ def generate_verdict(df: pd.DataFrame, events: list, obs: list,
 
     score   = 0
     reasons = []
+    weak_adx = inside_cpr = False
 
     # Recent structure (last 3 events carry the most weight)
     recent_types = [e["type"] for e in events[-8:]] if events else []
@@ -628,15 +633,16 @@ def generate_verdict(df: pd.DataFrame, events: list, obs: list,
 
     # RSI
     if np.isnan(rsi): rsi = 50
-    if rsi > 70:
+    if 55 <= rsi <= 70:
+        score += 1
+        reasons.append({"text": f"RSI {rsi:.0f} — bullish momentum", "ok": True})
+    elif 30 <= rsi <= 45:
         score -= 1
-        reasons.append({"text": f"RSI {rsi:.0f} — overbought, potential fall", "ok": False})
+        reasons.append({"text": f"RSI {rsi:.0f} — bearish momentum", "ok": False})
+    elif rsi > 70:
+        reasons.append({"text": f"RSI {rsi:.0f} — overbought, stretched", "ok": None})
     elif rsi < 30:
-        score += 1
-        reasons.append({"text": f"RSI {rsi:.0f} — oversold, watch for bounce", "ok": None})
-    elif 35 <= rsi <= 60:
-        score += 1
-        reasons.append({"text": f"RSI {rsi:.0f} — healthy zone, room to move", "ok": True})
+        reasons.append({"text": f"RSI {rsi:.0f} — oversold, stretched", "ok": None})
     else:
         reasons.append({"text": f"RSI {rsi:.0f} — neutral", "ok": None})
 
@@ -650,8 +656,8 @@ def generate_verdict(df: pd.DataFrame, events: list, obs: list,
             score -= 1
             reasons.append({"text": f"ADX {adx:.0f} — strong downtrend (DI− dominant)", "ok": False})
     elif adx < 15:
-        score -= 1
-        reasons.append({"text": f"ADX {adx:.0f} — very weak/no trend, signal quality low", "ok": False})
+        weak_adx = True
+        reasons.append({"text": f"ADX {adx:.0f} — very weak/no trend, conviction reduced", "ok": None})
     elif adx < 20:
         reasons.append({"text": f"ADX {adx:.0f} — below 20, mild chop (no penalty)", "ok": None})
     else:
@@ -690,8 +696,8 @@ def generate_verdict(df: pd.DataFrame, events: list, obs: list,
             score -= 1
             reasons.append({"text": f"Below CPR ({_bc:,.0f}–{_tc:,.0f}) — bearish day bias", "ok": False})
         else:
-            score -= 1
-            reasons.append({"text": f"Inside CPR ({_bc:,.0f}–{_tc:,.0f}) — choppy/indecision zone", "ok": False})
+            inside_cpr = True
+            reasons.append({"text": f"Inside CPR ({_bc:,.0f}–{_tc:,.0f}) — choppy/indecision zone", "ok": None})
 
     # GEX regime + gamma wall
     if gex and gex.get("regime"):
@@ -721,6 +727,12 @@ def generate_verdict(df: pd.DataFrame, events: list, obs: list,
             else:
                 reasons.append({"text": f"Gamma Wall {int(gamma_wall):,} — ATM pin zone", "ok": None})
 
+    # Weak trend / CPR chop reduce conviction in either direction; keep within ±7
+    for _shrink in (weak_adx, inside_cpr):
+        if _shrink and score != 0:
+            score -= int(np.sign(score))
+    score = int(np.clip(score, -7, 7))
+
     # Verdict
     if score >= 5:
         verdict, v_col = "STRONG BUY",  "#00d4aa"
@@ -735,9 +747,12 @@ def generate_verdict(df: pd.DataFrame, events: list, obs: list,
 
     confidence = min(100, max(0, int((abs(score) / 7) * 100)))
 
-    # Entry / SL / Targets
+    # Entry / SL / Targets. The stop sits half an ATR beyond the order block / swing,
+    # out of the cluster of stops placed right at the obvious level.
     sl_vals = df["Low"][df["swing_low"]].values
     sh_vals = df["High"][df["swing_high"]].values
+    _atr    = float(last.get("ATR", 0) or 0)
+    sl_buf  = 0.5 * _atr if _atr == _atr else 0.0
     entry_zone = stop_loss = rr = None
     targets: list[float] = []
 
@@ -745,9 +760,9 @@ def generate_verdict(df: pd.DataFrame, events: list, obs: list,
         if b_obs:
             ob = b_obs[-1]
             entry_zone = (round(ob["bottom"], 1), round(ob["top"], 1))
-            stop_loss  = round(ob["bottom"] * 0.998, 1)
+            stop_loss  = round(ob["bottom"] - sl_buf, 1)
         elif len(sl_vals):
-            stop_loss  = round(float(sl_vals[-1]), 1)
+            stop_loss  = round(float(sl_vals[-1]) - sl_buf, 1)
             entry_zone = (round(close * 0.9995, 1), round(close * 1.0005, 1))
         else:
             stop_loss  = round(close * 0.995, 1)
@@ -771,9 +786,9 @@ def generate_verdict(df: pd.DataFrame, events: list, obs: list,
         if s_obs:
             ob = s_obs[-1]
             entry_zone = (round(ob["bottom"], 1), round(ob["top"], 1))
-            stop_loss  = round(ob["top"] * 1.002, 1)
+            stop_loss  = round(ob["top"] + sl_buf, 1)
         elif len(sh_vals):
-            stop_loss  = round(float(sh_vals[-1]), 1)
+            stop_loss  = round(float(sh_vals[-1]) + sl_buf, 1)
             entry_zone = (round(close * 0.9995, 1), round(close * 1.0005, 1))
         else:
             stop_loss  = round(close * 1.005, 1)
@@ -881,7 +896,9 @@ def compute_cpr(df: pd.DataFrame, interval_key: str) -> dict:
 # ── Main entry point ──────────────────────────────────────────────────────────
 
 def analyze_chart(symbol: str, interval: str,
-                  api_key: str, access_token: str) -> dict:
+                  api_key: str, access_token: str,
+                  closed_only: bool = False) -> dict:
+    """closed_only=True scores only completed candles (bots); charts keep the live bar."""
     try:
         token, display_name = resolve_token(symbol, api_key, access_token)
     except ValueError as e:
@@ -893,6 +910,11 @@ def analyze_chart(symbol: str, interval: str,
         df = fetch_candles(token, interval, api_key, access_token)
     except RuntimeError as e:
         return {"error": str(e)}
+
+    if intraday:
+        df = _with_futures_volume(df, display_name, interval, api_key, access_token)
+    if closed_only:
+        df = drop_open_candle(df, interval)
 
     if df.empty or len(df) < 30:
         return {"error": "Not enough data — try a longer timeframe or check the symbol"}
@@ -977,3 +999,24 @@ def analyze_df(df: pd.DataFrame, interval: str, gex: dict | None = None) -> dict
     verdict  = generate_verdict(df, evts, obs, fvgs, summary, cpr=cpr, gex=gex)
     return {"df": df, "events": evts, "obs": obs, "fvgs": fvgs,
             "summary": summary, "verdict": verdict, "cpr": cpr, "gex": gex}
+
+
+def _with_futures_volume(df: pd.DataFrame, symbol: str, interval: str,
+                         api_key: str, access_token: str) -> pd.DataFrame:
+    """Index candles carry no volume, so VWAP was a plain average of prices.
+    Use the front-month future's volume as the weights (same timestamps)."""
+    if df.empty or df["Volume"].sum() > 0:
+        return df
+    fut_tok = front_future_token(symbol, api_key, access_token)
+    if not fut_tok:
+        return df
+    try:
+        fut = fetch_candles(fut_tok, interval, api_key, access_token)
+    except Exception:
+        return df
+    vol = fut["Volume"].reindex(df.index).fillna(0)
+    if vol.sum() <= 0:
+        return df
+    df = df.copy()
+    df["Volume"] = vol.values
+    return df

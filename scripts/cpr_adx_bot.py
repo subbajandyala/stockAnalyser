@@ -46,7 +46,7 @@ logging.basicConfig(
 
 _IST         = datetime.timezone(datetime.timedelta(hours=5, minutes=30))
 MARKET_OPEN  = datetime.time(9, 20)
-MARKET_CLOSE = datetime.time(14, 30)
+MARKET_CLOSE = datetime.time(14, 31)   # inclusive of the 14:30 scan + digest
 SCAN_INTERVAL_SEC = 60        # scan every 60 seconds
 
 MIN_SIGNAL_SCORE  = 3         # regular signal threshold

@@ -27,6 +27,7 @@ import json
 import logging
 import os
 import pathlib
+import re
 import sys
 import time
 
@@ -39,11 +40,13 @@ from kiteconnect import KiteConnect
 from screener.chart_analysis import analyze_chart
 from screener.kite_order import (
     LOT_SIZE,
-    exit_position,
+    contract_pnl,
     has_open_position,
     modify_oco_gtt,
+    open_qty,
+    place_oco_gtt,
     place_order_for_signal as _place_order,
-    sell_partial,
+    sell_and_confirm,
 )
 from screener.sharekhan_order import place_sk_order as _place_sk_order
 
@@ -91,8 +94,13 @@ MIN_RR = 1.5
 # Clean signal window: no new signals outside 9:30–15:00 IST
 SIGNAL_OPEN  = datetime.time(9, 30)
 SIGNAL_CLOSE = datetime.time(15, 0)
-# A signal must appear on this many consecutive scans (1 min apart) before acting
-CONFIRM_SCANS = 2
+# Signals are scored on completed candles (no flicker), so one scan is enough.
+# Raise this to require the signal on N consecutive 1-minute scans.
+CONFIRM_SCANS = 1
+# After a losing trade, no re-entry in the SAME direction for this long
+LOSS_REENTRY_BLOCK_MIN = 15
+# Exit an open trade when the signal chart turns this strongly against it
+REVERSAL_EXIT_SCORE = 3
 
 
 def _minutes_between(hhmm: str, now_ist: datetime.datetime) -> float:
@@ -356,6 +364,42 @@ def _bot_ltp(kite, symbol: str, ts: str) -> float | None:
         return None
 
 
+def _exit_bot_position(kite, symbol: str, state: dict, trade_key: str, reason: str,
+                       ntfy_topic: str) -> bool:
+    """Sell the bot's whole position and only then remove its GTT.
+
+    The GTT is the only stop loss, so it is kept until the sell is confirmed;
+    a failed sell is retried on the next scan instead of leaving no protection.
+    """
+    k = lambda name: f"{trade_key}:{name}"
+    ts, qty, gtt_id = state.get(k("ts")), int(state.get(k("qty")) or 0), state.get(k("gtt_id"))
+    held = open_qty(kite, ts)          # sell what is really held (a cancelled sell may have part-filled)
+    if held is not None:
+        qty = held
+        state[k("qty")] = held
+    ok, info = (True, "already flat") if qty <= 0 else sell_and_confirm(kite, symbol, ts, qty, discount=0.02)
+    if not ok:
+        fails = int(state.get(k("exit_fails")) or 0) + 1
+        state[k("exit_fails")] = fails
+        print(f"  [EXIT] {symbol}: {reason} — sell not filled ({info}); GTT kept, retrying next scan")
+        if fails in (1, 3) and ntfy_topic:
+            send_ntfy(f"⚠️ Chart Bot: {symbol} exit not filled yet",
+                      f"{reason}\n{ts}: {info}\nGTT stop loss kept; retrying every minute.",
+                      ntfy_topic, priority="urgent")
+        return False
+    if gtt_id:
+        try:
+            kite.delete_gtt(int(gtt_id))
+        except Exception:
+            pass  # already triggered / removed
+    state[k("gtt_id")] = ""
+    state[k("exit_reason")] = reason
+    print(f"  [EXIT] {symbol}: {reason} — {info}")
+    if ntfy_topic:
+        send_ntfy(f"Chart Bot: {symbol} exited", f"{reason}\n{ts}: {info}", ntfy_topic, priority="default")
+    return True
+
+
 def _manage_trade(kite, symbol: str, state: dict, trade_key: str,
                   now_ist: datetime.datetime, api_key: str, access_token: str,
                   ntfy_topic: str) -> None:
@@ -371,27 +415,33 @@ def _manage_trade(kite, symbol: str, state: dict, trade_key: str,
     if not (ts and entry > 0 and qty > 0):
         return
 
-    if state.get(k("exiting")):
-        print(f"  [MONITOR] {symbol}: square-off order sent at {state[k('exiting')]} — waiting for fill")
-        return
+    if state.get(k("exit_reason")):
+        return  # sold; the close-out runs once Kite shows the position flat
 
     # 1. End-of-day square-off — NRML positions would otherwise be carried overnight
     if now_ist.time() >= SQUARE_OFF_TIME:
-        res = exit_position(symbol, api_key, access_token, gtt_id=gtt_id or None, only_ts=ts)
-        state[k("exiting")] = now_ist.strftime("%H:%M")
-        state[k("gtt_id")] = ""
-        msg = res.get("error") or "exit order sent"
-        print(f"  [MONITOR] {symbol}: 15:15 square-off — {msg}")
-        if ntfy_topic:
-            send_ntfy(f"Chart Bot: {symbol} squared off (15:15)", f"{ts}: {msg}", ntfy_topic,
-                      priority="urgent" if "error" in res else "default")
+        _exit_bot_position(kite, symbol, state, trade_key, "15:15 square-off", ntfy_topic)
         return
 
-    if not gtt_id:
-        return  # no GTT to manage (placement failed) — square-off still applies
     ltp = _bot_ltp(kite, symbol, ts)
     if ltp is None:
         return
+
+    # A position without a GTT has no stop loss — (re)place one, alert if it fails
+    if not gtt_id:
+        sl  = sl or _tick(entry * 0.80)
+        far = far or _tick(entry * 3)
+        try:
+            gtt_id = place_oco_gtt(kite, symbol, ts, qty, sl, far, ltp)
+            state.update({k("gtt_id"): gtt_id, k("sl"): sl, k("target_price"): far})
+            print(f"  [MONITOR] {symbol}: GTT was missing — placed {gtt_id} (SL ₹{sl})")
+        except Exception as e:
+            if not state.get(k("gtt_alerted")):
+                state[k("gtt_alerted")] = True
+                send_ntfy(f"⚠️ Chart Bot: {symbol} has NO stop loss",
+                          f"{ts}: GTT placement failed ({e}). Set a stop loss in Kite manually.",
+                          ntfy_topic, priority="urgent")
+            return
     trailing = bool(state.get(k("trailing")))
     stage = f"trailing, peak ₹{state.get(k('peak'))}" if trailing else f"T1 ₹{t1:.2f}"
     print(f"  [MONITOR] {symbol}: LTP ₹{ltp:.2f}  entry ₹{entry:.2f}  SL ₹{sl:.2f}  {stage}")
@@ -411,13 +461,17 @@ def _manage_trade(kite, symbol: str, state: dict, trade_key: str,
         except Exception as e:
             _LOG.warning(f"[TRAIL] {symbol}: GTT modify failed ({e}) — will retry next scan")
             return
-        if half and not sell_partial(kite, symbol, ts, half):
-            try:   # partial sell failed — put full-quantity protection back
-                modify_oco_gtt(kite, symbol, ts, gtt_id, qty, new_sl, far, ltp)
+        sold_ok, sold_info = (sell_and_confirm(kite, symbol, ts, half) if half else (True, ""))
+        if not sold_ok:
+            held = open_qty(kite, ts)
+            held = qty if held is None else held   # may be < qty if the sell part-filled
+            print(f"  [TRAIL] {symbol}: partial sell not filled ({sold_info}) — GTT back to {held} units")
+            try:   # partial sell failed — protect what is actually held
+                modify_oco_gtt(kite, symbol, ts, gtt_id, held, new_sl, far, ltp)
             except Exception as e:
                 send_ntfy(f"⚠️ Chart Bot: {symbol} check GTT quantity",
                           f"Partial sell failed and GTT reset failed: {e}", ntfy_topic, priority="urgent")
-            remaining, half = qty, 0
+            remaining, half = held, qty - held
         state.update({k("qty"): remaining, k("sl"): new_sl, k("target_price"): far,
                       k("trailing"): True, k("peak"): ltp})
         booked = f"Booked {half} units at ~₹{ltp:.1f}.\n" if half else ""
@@ -473,6 +527,7 @@ def _monitor_positions(
         order_id  = state.get(trade_key)
         if not order_id:
             continue  # no recorded trade for this symbol today
+        direction = state.get(f"{trade_key}:direction")
 
         # Use the exact contract the bot placed — never touch manual positions
         bot_ts = state.get(f"{trade_key}:ts")  # e.g. "NIFTY2541524950CE"
@@ -484,9 +539,17 @@ def _monitor_positions(
         recorded_direction = parts[2] if len(parts) >= 4 else None
 
         position_open = has_open_position(kite, symbol, only_ts=bot_ts)
+        if position_open is None:
+            # Kite API error — never treat it as "closed" (that would delete the GTT)
+            print(f"  [MONITOR] {symbol}: position check failed — leaving the trade as is")
+            continue
 
         if not position_open:
-            print(f"  [MONITOR] {symbol}: position closed (GTT hit)")
+            print(f"  [MONITOR] {symbol}: position closed")
+            pnl = contract_pnl(kite, bot_ts) if bot_ts else None
+            closed_dir = direction or recorded_direction
+            if pnl is not None and pnl < 0 and closed_dir:
+                state[f"{today}:{symbol}:loss_block"] = {"dir": closed_dir, "t": now_ist.strftime("%H:%M")}
             # Remove any leftover GTT so it can't sell an option we no longer hold
             _left_gtt = state.get(f"{trade_key}:gtt_id")
             if _left_gtt:
@@ -499,14 +562,14 @@ def _monitor_positions(
                 state.pop(_k, None)
             # Clear the alerted key too — prevents falling through to immediate re-entry
             state.pop(symbol, None)
-            # Set a 30-min cooldown so the bot doesn't re-enter right away
-            state[f"{today}:{symbol}:sl_cooldown"] = now_ist.strftime("%H:%M")
+            pnl_txt = f"P&L ₹{pnl:,.0f}" if pnl is not None else "P&L unknown"
             if ntfy_topic:
                 send_ntfy(
-                    f"Chart Bot: {symbol} position closed",
+                    f"Chart Bot: {symbol} position closed ({pnl_txt})",
                     (
-                        f"Stop loss / trailing stop hit, or the 15:15 square-off filled.\n"
-                        f"Ready for the next signal."
+                        f"Stop loss / trailing stop, reversal exit or 15:15 square-off.\n"
+                        + (f"No {closed_dir} re-entry for {LOSS_REENTRY_BLOCK_MIN} min (loss); "
+                           f"opposite side allowed." if pnl is not None and pnl < 0 else "Ready for the next signal.")
                     ),
                     ntfy_topic,
                     priority="default",
@@ -515,12 +578,15 @@ def _monitor_positions(
 
         # Position open — square-off / take profit / trailing stop
         _manage_trade(kite, symbol, state, trade_key, now_ist, api_key, access_token, ntfy_topic)
+        if state.get(f"{trade_key}:exit_reason"):
+            continue
 
-        # Position still open — check if 15m signal has reversed
+        # Reversal exit: the signal chart has turned against the trade
+        recorded_direction = direction or recorded_direction
         if not recorded_direction:
             continue
         try:
-            p_res = analyze_chart(symbol, PRIMARY_TF, api_key, access_token)
+            p_res = analyze_chart(symbol, PRIMARY_TF, api_key, access_token, closed_only=True)
         except Exception as e:
             print(f"  [MONITOR] {symbol}: chart fetch failed — {e}")
             continue
@@ -535,23 +601,11 @@ def _monitor_positions(
         if current_direction == "WAIT":
             continue
 
-        if current_direction != recorded_direction:
-            print(
-                f"  [MONITOR] {symbol}: SIGNAL REVERSED — was {recorded_direction}, "
-                f"now {current_verdict} ({current_score:+d}) — alerting"
-            )
-            if ntfy_topic and not state.get(f"{trade_key}:reversal_alerted"):
-                state[f"{trade_key}:reversal_alerted"] = True  # once per trade, not every scan
-                send_ntfy(
-                    f"⚠️ Chart Bot: {symbol} signal REVERSED",
-                    (
-                        f"You have an open {recorded_direction} position.\n"
-                        f"{PRIMARY_TF} chart now shows: {current_verdict} ({current_score:+d})\n\n"
-                        f"Consider reviewing / exiting your position."
-                    ),
-                    ntfy_topic,
-                    priority="urgent",
-                )
+        if current_direction != recorded_direction and abs(current_score) >= REVERSAL_EXIT_SCORE:
+            _exit_bot_position(
+                kite, symbol, state, trade_key,
+                f"reversal exit — {PRIMARY_TF} now {current_verdict} ({current_score:+d}) against the "
+                f"{recorded_direction} trade", ntfy_topic)
 
 
 # ── Single scan ───────────────────────────────────────────────────────────────
@@ -576,6 +630,23 @@ def scan_once(symbols: list[str], state_file: str, force: bool = False) -> None:
         return
 
     state = _load_state(state_file)
+    today = now_ist.strftime("%Y-%m-%d")
+
+    # Carry trades from earlier days forward so they are still managed (square-off,
+    # trailing) — the monitor only looks at today's keys.
+    for key in [k for k in state if re.fullmatch(r"\d{4}-\d{2}-\d{2}:\w+:trade", k)]:
+        day, sym, _ = key.split(":")
+        new_key = f"{today}:{sym}:trade"
+        if day < today and new_key not in state:
+            for old in [k for k in list(state) if k == key or k.startswith(key + ":")]:
+                state[new_key + old[len(key):]] = state.pop(old)
+            print(f"  [STATE] Carried open {sym} trade from {day} forward")
+    # Prune everything else dated before today
+    stale = [k for k in state if k[:10].count("-") == 2 and k[:10] < today]
+    for k in stale:
+        state.pop(k, None)
+    if stale:
+        print(f"  [STATE] Pruned {len(stale)} entries from previous days")
 
     # Monitor existing open positions before scanning for new signals
     _monitor_positions(symbols, state, api_key, access_token, ntfy_topic, now_ist)
@@ -588,7 +659,7 @@ def scan_once(symbols: list[str], state_file: str, force: bool = False) -> None:
 
     for symbol in symbols:
         try:
-            p_res = analyze_chart(symbol, PRIMARY_TF, api_key, access_token)
+            p_res = analyze_chart(symbol, PRIMARY_TF, api_key, access_token, closed_only=True)
         except Exception as e:
             print(f"  {symbol} {PRIMARY_TF}: ERROR — {e}")
             continue
@@ -605,13 +676,12 @@ def scan_once(symbols: list[str], state_file: str, force: bool = False) -> None:
         marker = "🚀" if abs(score) >= 5 else ("⚡" if abs(score) >= 3 else "  ")
         print(f"  {marker} {symbol:12s} | {PRIMARY_TF} | {verdict:12s} | score {score:+d} | {conf}% conf")
 
-        # Gate: R:R must be at least MIN_RR on the underlying
+        # R:R on the underlying is informational only — exits are trailing, so a
+        # close swing target no longer caps the trade (it used to hide the signal)
         rr_val = p_res["verdict"].get("rr")
         if rr_val is not None and rr_val < MIN_RR:
-            print(f"         R:R {rr_val} < {MIN_RR} — skipping (poor setup)")
-            _skip_reason = f"R:R {rr_val} < {MIN_RR}"
-        else:
-            _skip_reason = None
+            print(f"         R:R {rr_val} < {MIN_RR} (info only)")
+        _skip_reason = None
 
         if direction == "WAIT" or abs(score) < MIN_NOTIFY_SCORE or _skip_reason:
             # Log WAIT/weak/filtered scans so the EOD Chart Bot sheet is never blank
@@ -648,7 +718,7 @@ def scan_once(symbols: list[str], state_file: str, force: bool = False) -> None:
         c_res = {}
         if CONFIRM_TF != "none":
             try:
-                c_res = analyze_chart(symbol, CONFIRM_TF, api_key, access_token)
+                c_res = analyze_chart(symbol, CONFIRM_TF, api_key, access_token, closed_only=True)
             except Exception as e:
                 print(f"       {CONFIRM_TF} confirm failed: {e}")
                 c_res = {}
@@ -737,11 +807,34 @@ def scan_once(symbols: list[str], state_file: str, force: bool = False) -> None:
         if already_traded:
             print(f"         [{symbol}] Bot position still open — no new entry")
             continue
+        lb = state.get(f"{today}:{symbol}:loss_block") or {}
+        if lb.get("dir") == direction:
+            left = LOSS_REENTRY_BLOCK_MIN - _minutes_between(lb.get("t", ""), now_ist)
+            if left > 0:
+                print(f"         [{symbol}] last {direction} trade lost — no {direction} re-entry "
+                      f"for {left:.0f} more min (opposite side allowed)")
+                continue
         if already_alerted:
             if not (_AUTO_TRADE and symbol in _TRADE_SYMBOLS and abs(score) >= MIN_TRADE_SCORE):
                 why = ("no auto-trade for this symbol" if symbol not in _TRADE_SYMBOLS
                        else f"orders need score ±{MIN_TRADE_SCORE}")
                 print(f"         Already alerted — signal only ({why}), no order")
+                if now_ist.minute % 5 == 0:   # keep the EOD sheet at 5-min granularity
+                    vd = p_res["verdict"]
+                    _append_chart_log(today, {
+                        "_key": f"{today}:{symbol}:{now_ist.strftime('%H%M')}",
+                        "time": now_ist.strftime("%H:%M IST"), "symbol": symbol,
+                        "direction": direction, "verdict": verdict, "score": score, "conf": conf,
+                        "spot": p_res["summary"]["close"],
+                        "tf_15m": f"{verdict} ({score:+d})", "tf_5m": "",
+                        "entry_low": "", "entry_high": "",
+                        "stop_loss": vd.get("stop_loss", ""),
+                        "targets": " / ".join(str(round(t, 1)) for t in (vd.get("targets") or [])),
+                        "rr": vd.get("rr", ""),
+                        "auto_trade": f"signal only ({why})",
+                        "tradingsymbol": "", "strike": "", "qty": "",
+                        "entry_premium": "", "sl_premium": "", "target_premium": "", "order_id": "",
+                    })
                 continue
             print(f"         Already alerted (no trade yet) — retrying order")
 
@@ -850,6 +943,7 @@ def scan_once(symbols: list[str], state_file: str, force: bool = False) -> None:
                 state[f"{trade_key}:sl"]             = trade.get("sl", 0)
                 state[f"{trade_key}:t1"]             = trade.get("t1", 0)
                 state[f"{trade_key}:trailing"]       = False
+                state[f"{trade_key}:direction"]      = direction
 
                 # Mirror on Sharekhan
                 try:
@@ -895,7 +989,8 @@ def scan_once(symbols: list[str], state_file: str, force: bool = False) -> None:
         elif _AUTO_TRADE and abs(score) < MIN_TRADE_SCORE:
             log_entry["auto_trade"] = f"signal only (score {score:+d} < {MIN_TRADE_SCORE})"
 
-        _append_chart_log(today, log_entry)
+        if not already_alerted or log_entry["auto_trade"] == "placed" or now_ist.minute % 5 == 0:
+            _append_chart_log(today, log_entry)
         state[symbol] = state_key  # mark as alerted (date-prefixed)
 
     _save_state(state_file, state)

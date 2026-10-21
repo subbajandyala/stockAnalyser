@@ -189,6 +189,10 @@ def _resolve_tradingsymbol(
     if filtered.empty:
         _LOG.error(f"No instrument found: {symbol} {strike} {opt_type} on {exchange}")
         return None
+    # On the symbol's own expiry day, skip the 0DTE contract (wild premium swings)
+    if filtered.iloc[0]["expiry"] == today and len(filtered) > 1:
+        _LOG.info(f"{symbol} expiry day — using next weekly {filtered.iloc[1]['expiry']}")
+        return str(filtered.iloc[1]["tradingsymbol"])
     return str(filtered.iloc[0]["tradingsymbol"])
 
 
@@ -280,7 +284,63 @@ def has_open_position(
                     return True
     except Exception as e:
         _LOG.warning(f"Position check failed: {e}")
+        return None   # unknown — callers must not treat an API error as "closed"
     return False
+
+
+def contract_pnl(kite: KiteConnect, ts: str) -> float | None:
+    """Day P&L (₹, realised + unrealised) of one contract, or None if unavailable."""
+    try:
+        for pos in kite.positions().get("net", []):
+            if pos.get("tradingsymbol") == ts:
+                return float(pos.get("pnl", 0))
+    except Exception as e:
+        _LOG.warning(f"Contract P&L fetch failed for {ts}: {e}")
+    return None
+
+
+def open_qty(kite: KiteConnect, ts: str) -> int | None:
+    """Net quantity currently held in one contract (0 if flat), or None on API error."""
+    try:
+        for pos in kite.positions().get("net", []):
+            if pos.get("tradingsymbol") == ts:
+                return int(pos.get("quantity", 0))
+        return 0
+    except Exception as e:
+        _LOG.warning(f"Quantity fetch failed for {ts}: {e}")
+        return None
+
+
+def place_oco_gtt(kite: KiteConnect, symbol: str, ts: str, qty: int,
+                  sl: float, target: float, last_price: float):
+    """Place a fresh OCO GTT (SL / target) for a long option position."""
+    return kite.place_gtt(
+        trigger_type=kite.GTT_TYPE_OCO, tradingsymbol=ts,
+        exchange=_EXCHANGE.get(symbol, "NFO"), trigger_values=[sl, target],
+        last_price=last_price, orders=_oco_orders(kite, qty, sl, target),
+    )
+
+
+def sell_and_confirm(kite: KiteConnect, symbol: str, ts: str, qty: int,
+                     discount: float = 0.01) -> tuple[bool, str]:
+    """LIMIT SELL qty at LTP × (1 − discount) and wait up to 8 s for the fill.
+
+    Returns (filled, info). An unfilled order is cancelled, so the caller can
+    safely keep / restore the GTT and retry on the next scan.
+    """
+    exchange = _EXCHANGE.get(symbol, "NFO")
+    try:
+        ltp = float(kite.ltp([f"{exchange}:{ts}"])[f"{exchange}:{ts}"]["last_price"])
+        oid = kite.place_order(
+            variety=kite.VARIETY_REGULAR, exchange=exchange, tradingsymbol=ts,
+            transaction_type=kite.TRANSACTION_TYPE_SELL, quantity=qty,
+            product=kite.PRODUCT_NRML, order_type=kite.ORDER_TYPE_LIMIT,
+            price=_tick(ltp * (1 - discount)),
+        )
+    except Exception as e:
+        return False, f"sell order failed: {e}"
+    price, reason = _fill_price(kite, oid, exchange, ts)
+    return (True, f"sold {qty} @ ₹{price:.2f}") if price else (False, reason)
 
 
 def position_pnl_pct(kite: KiteConnect, symbol: str) -> float | None:
@@ -660,7 +720,10 @@ def place_rsi_scalp_order(
 
     with _order_lock():
         # MIS only — chart_bot NRML positions never block RSI scalp and vice versa
-        if has_open_position(kite, symbol, product="MIS"):
+        open_pos = has_open_position(kite, symbol, product="MIS")
+        if open_pos is None:
+            return {"error": f"{symbol} position check failed — skipping RSI scalp"}
+        if open_pos:
             return {"error": f"Open {symbol} MIS position exists — skipping RSI scalp"}
 
         strike = _atm_strike(spot, symbol)
