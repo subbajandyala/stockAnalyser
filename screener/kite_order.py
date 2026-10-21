@@ -49,8 +49,10 @@ _STRIKE_STEP = {
 }
 
 # Scalp targets in premium points (GTT levels)
-_SCALP_TARGET_PTS = {"NIFTY": 15, "SENSEX": 30}
-_SCALP_STOP_PTS   = {"NIFTY": 12, "SENSEX": 25}
+# Used when the chart gives no SL/target: SL 20% below entry, target keeps the
+# original 1.25 reward:risk (was a fixed 12/15 pts on NIFTY, too tight for options)
+_FALLBACK_STOP_PCT   = 0.20
+_FALLBACK_TARGET_PCT = 0.25
 
 # Ride targets — percentage of entry premium (CPR-confirmed trades)
 _RIDE_TARGET_PCT = 0.60   # +60%
@@ -449,10 +451,8 @@ def place_order_for_signal(
             sl_price     = round(entry_price * (1 - _RIDE_STOP_PCT), 1)
             target_price = round(entry_price * (1 + _RIDE_TARGET_PCT), 1)
         else:
-            tgt_pts      = _SCALP_TARGET_PTS.get(symbol, 10)
-            stop_pts     = _SCALP_STOP_PTS.get(symbol, 7)
-            sl_price     = round(entry_price - stop_pts, 1)
-            target_price = round(entry_price + tgt_pts, 1)
+            sl_price     = _tick(entry_price * (1 - _FALLBACK_STOP_PCT))
+            target_price = _tick(entry_price * (1 + _FALLBACK_TARGET_PCT))
 
     # 7. GTT two-leg (OCO): [sl_trigger, target_trigger]
     gtt_id = None

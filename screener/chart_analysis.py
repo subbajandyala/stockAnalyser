@@ -735,7 +735,7 @@ def generate_verdict(df: pd.DataFrame, events: list, obs: list,
             targets = [t1, t2]
         else:
             # Market is at new highs — no valid swing target above price.
-            # Return empty targets so chart_bot falls back to _SCALP_TARGET_PTS.
+            # Return empty targets so kite_order falls back to the 20% SL / 25% target.
             targets = []
             t1 = None
         if stop_loss and entry_zone and t1:
@@ -761,7 +761,7 @@ def generate_verdict(df: pd.DataFrame, events: list, obs: list,
             targets = [t1, t2]
         else:
             # Market is at new lows — no valid swing target below price.
-            # Return empty targets so chart_bot falls back to _SCALP_TARGET_PTS.
+            # Return empty targets so kite_order falls back to the 20% SL / 25% target.
             targets = []
             t1 = None
         if stop_loss and entry_zone and t1:
