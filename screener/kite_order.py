@@ -58,6 +58,13 @@ _FALLBACK_TARGET_PCT = 0.25
 _RIDE_TARGET_PCT = 0.60   # +60%
 _RIDE_STOP_PCT   = 0.30   # -30%
 
+# Option stop loss is kept 20–25% below entry whatever the chart level says:
+# wider risks too much (a 54% chart stop on 21 Oct), tighter gets hit by noise.
+SL_MIN_PCT = 0.20
+SL_MAX_PCT = 0.25
+# T1 at least +15%, so the trailing floor (entry +10%) is always below the price at T1
+T1_MIN_PCT = 0.15
+
 
 _ORDER_LOCK_PATH = "/tmp/kite_order.lock"
 
@@ -559,6 +566,11 @@ def place_order_for_signal(
         else:
             sl_price     = _tick(entry_price * (1 - _FALLBACK_STOP_PCT))
             target_price = _tick(entry_price * (1 + _FALLBACK_TARGET_PCT))
+
+    sl_price = _tick(min(max(sl_price, entry_price * (1 - SL_MAX_PCT)),
+                         entry_price * (1 - SL_MIN_PCT)))
+    target_price = _tick(max(target_price, entry_price * (1 + T1_MIN_PCT)))
+    _LOG.info(f"Option SL ₹{sl_price} ({(1 - sl_price / entry_price) * 100:.0f}% below entry), T1 ₹{target_price}")
 
     # 7. GTT two-leg (OCO): [sl_trigger, target_trigger]
     # trailing=True: target_price becomes the activation level (T1) handled by the

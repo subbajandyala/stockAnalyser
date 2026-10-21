@@ -434,41 +434,28 @@ def detect_order_blocks(df: pd.DataFrame, events: list, max_obs: int = 6) -> lis
 
 
 def detect_fvg(df: pd.DataFrame, max_fvgs: int = 8) -> list:
+    # numpy arrays, not df.iloc per row — same result, ~50× faster (1-min bot scans)
+    hi = df["High"].to_numpy(dtype=float)
+    lo = df["Low"].to_numpy(dtype=float)
+    n = len(df)
     fvgs: list[dict] = []
-    for i in range(1, len(df) - 1):
-        prev  = df.iloc[i - 1]
-        after = df.iloc[i + 1]
-        idx   = df.index[i]
+    for i in range(1, n - 1):
         # Bullish FVG: gap between prev high and next low
-        if float(after["Low"]) > float(prev["High"]):
-            fvgs.append({
-                "type":   "bullish",
-                "top":    float(after["Low"]),
-                "bottom": float(prev["High"]),
-                "index":  idx,
-                "filled": False,
-            })
+        if lo[i + 1] > hi[i - 1]:
+            fvgs.append({"type": "bullish", "top": float(lo[i + 1]), "bottom": float(hi[i - 1]),
+                         "index": df.index[i], "filled": False, "_pos": i})
         # Bearish FVG: gap between prev low and next high
-        elif float(after["High"]) < float(prev["Low"]):
-            fvgs.append({
-                "type":   "bearish",
-                "top":    float(prev["Low"]),
-                "bottom": float(after["High"]),
-                "index":  idx,
-                "filled": False,
-            })
+        elif hi[i + 1] < lo[i - 1]:
+            fvgs.append({"type": "bearish", "top": float(lo[i - 1]), "bottom": float(hi[i + 1]),
+                         "index": df.index[i], "filled": False, "_pos": i})
 
     # Mark filled (price returned to zone)
     for fvg in fvgs:
-        pos = df.index.get_loc(fvg["index"])
-        for j in range(pos + 2, len(df)):
-            lo, hi = float(df["Low"].iloc[j]), float(df["High"].iloc[j])
-            if fvg["type"] == "bullish" and lo <= fvg["top"]:
-                fvg["filled"] = True
-                break
-            elif fvg["type"] == "bearish" and hi >= fvg["bottom"]:
-                fvg["filled"] = True
-                break
+        j0 = fvg.pop("_pos") + 2
+        if fvg["type"] == "bullish":
+            fvg["filled"] = bool((lo[j0:] <= fvg["top"]).any())
+        else:
+            fvg["filled"] = bool((hi[j0:] >= fvg["bottom"]).any())
 
     return [f for f in fvgs if not f["filled"]][-max_fvgs:]
 

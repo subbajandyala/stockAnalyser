@@ -1,24 +1,26 @@
 """
 Chart Analysis Signal Bot
 =========================
-Runs analyze_chart() for each symbol/timeframe and sends a push notification
-via ntfy.sh when a tradeable signal fires (STRONG BUY / BUY / STRONG SELL / SELL).
+Scores the closed 5-minute candles (analyze_chart) every minute and pushes an
+ntfy alert on BUY / SELL; STRONG ±5 on NIFTY / SENSEX places an ATM option order.
 
 Signal → Option direction:
   STRONG BUY / BUY  → BUY CE
   STRONG SELL / SELL → BUY PE
 
-Multi-timeframe: scans 15m first, confirms with 5m entry timing.
-A signal only fires when BOTH timeframes agree in direction.
+Entry gates: R:R ≥ MIN_RR, one open bot trade per index, no direction after
+MAX_LOSSES_PER_DIR losing trades in it today. Exits: GTT stop (20–25%), half
+booked at T1 and the rest trailed, reversal exit, 15:15 square-off.
 
 Set KITE_AUTO_TRADE=1 to enable auto order execution.
 
-Cron (every 5 min, market hours):
-  */5 9-15 * * 1-5 cd /root/stockAnalyser && /root/venv/bin/python -u scripts/chart_bot.py --once >> chart_bot.log 2>&1
+Run (start_droplet.sh):
+  /root/venv/bin/python -u scripts/chart_bot.py --loop >> chart_bot.log 2>&1
 
-Single test run:
-  /root/venv/bin/python -u scripts/chart_bot.py --once
+Checks / tests:
+  /root/venv/bin/python scripts/chart_bot.py --preflight          # no orders
   /root/venv/bin/python -u scripts/chart_bot.py --test-notify
+  /root/venv/bin/python scripts/replay_bot.py --days 20           # replay rules on history
 """
 
 import argparse
@@ -98,8 +100,9 @@ SIGNAL_CLOSE = datetime.time(15, 0)
 # Signals are scored on completed candles (no flicker), so one scan is enough.
 # Raise this to require the signal on N consecutive 1-minute scans.
 CONFIRM_SCANS = 1
-# After a losing trade, no re-entry in the SAME direction for this long
-LOSS_REENTRY_BLOCK_MIN = 15
+# After this many losing trades in one direction on one index, stop that
+# direction for the day (the other side keeps trading)
+MAX_LOSSES_PER_DIR = 2
 # Exit an open trade when the signal chart turns this strongly against it
 REVERSAL_EXIT_SCORE = 3
 
@@ -559,8 +562,12 @@ def _monitor_positions(
             print(f"  [MONITOR] {symbol}: position closed")
             pnl = contract_pnl(kite, bot_ts) if bot_ts else None
             closed_dir = direction or recorded_direction
-            if pnl is not None and pnl < 0 and closed_dir:
-                state[f"{today}:{symbol}:loss_block"] = {"dir": closed_dir, "t": now_ist.strftime("%H:%M")}
+            lost = pnl is not None and pnl < 0 and closed_dir
+            n_losses = 0
+            if lost:
+                loss_key = f"{today}:{symbol}:losses:{closed_dir}"
+                n_losses = int(state.get(loss_key) or 0) + 1
+                state[loss_key] = n_losses
             # Remove any leftover GTT so it can't sell an option we no longer hold
             if bot_ts:
                 _clear_gtts(kite, symbol, bot_ts, ntfy_topic)
@@ -574,8 +581,10 @@ def _monitor_positions(
                     f"Chart Bot: {symbol} position closed ({pnl_txt})",
                     (
                         f"Stop loss / trailing stop, reversal exit or 15:15 square-off.\n"
-                        + (f"No {closed_dir} re-entry for {LOSS_REENTRY_BLOCK_MIN} min (loss); "
-                           f"opposite side allowed." if pnl is not None and pnl < 0 else "Ready for the next signal.")
+                        + (f"{n_losses} {closed_dir} loss(es) today — no more {symbol} {closed_dir} trades today; "
+                           f"opposite side allowed." if lost and n_losses >= MAX_LOSSES_PER_DIR
+                           else f"{n_losses} {closed_dir} loss(es) today. Ready for the next signal." if lost
+                           else "Ready for the next signal.")
                     ),
                     ntfy_topic,
                     priority="default",
@@ -682,12 +691,13 @@ def scan_once(symbols: list[str], state_file: str, force: bool = False) -> None:
         marker = "🚀" if abs(score) >= 5 else ("⚡" if abs(score) >= 3 else "  ")
         print(f"  {marker} {symbol:12s} | {PRIMARY_TF} | {verdict:12s} | score {score:+d} | {conf}% conf")
 
-        # R:R on the underlying is informational only — exits are trailing, so a
-        # close swing target no longer caps the trade (it used to hide the signal)
+        # R:R on the underlying: a target closer than the stop means price is already
+        # sitting on support/resistance — the move is mostly done (21 Oct, 14:00–14:55)
         rr_val = p_res["verdict"].get("rr")
-        if rr_val is not None and rr_val < MIN_RR:
-            print(f"         R:R {rr_val} < {MIN_RR} (info only)")
         _skip_reason = None
+        if rr_val is not None and rr_val < MIN_RR:
+            _skip_reason = f"R:R {rr_val} < {MIN_RR}"
+            print(f"         {_skip_reason} — skipped")
 
         if direction == "WAIT" or abs(score) < MIN_NOTIFY_SCORE or _skip_reason:
             # Log WAIT/weak/filtered scans so the EOD Chart Bot sheet is never blank
@@ -813,13 +823,12 @@ def scan_once(symbols: list[str], state_file: str, force: bool = False) -> None:
         if already_traded:
             print(f"         [{symbol}] Bot position still open — no new entry")
             continue
-        lb = state.get(f"{today}:{symbol}:loss_block") or {}
-        if lb.get("dir") == direction:
-            left = LOSS_REENTRY_BLOCK_MIN - _minutes_between(lb.get("t", ""), now_ist)
-            if left > 0:
-                print(f"         [{symbol}] last {direction} trade lost — no {direction} re-entry "
-                      f"for {left:.0f} more min (opposite side allowed)")
-                continue
+        n_lost = int(state.get(f"{today}:{symbol}:losses:{direction}") or 0)
+        if n_lost >= MAX_LOSSES_PER_DIR:
+            if now_ist.minute % 5 == 0:
+                print(f"         [{symbol}] {n_lost} {direction} losses today — no more {direction} "
+                      f"entries today (opposite side allowed)")
+            continue
         if already_alerted:
             if not (_AUTO_TRADE and symbol in _TRADE_SYMBOLS and abs(score) >= MIN_TRADE_SCORE):
                 why = ("no auto-trade for this symbol" if symbol not in _TRADE_SYMBOLS
@@ -1003,6 +1012,127 @@ def scan_once(symbols: list[str], state_file: str, force: bool = False) -> None:
     print("Done.")
 
 
+# ── Preflight (no orders) ─────────────────────────────────────────────────────
+
+def preflight(symbols: list[str], state_file: str, notify: bool = False) -> bool:
+    """Check everything an order needs, without placing one. True if nothing FAILs."""
+    import fcntl
+    from screener.kite_order import _EXCHANGE, _atm_strike, _resolve_tradingsymbol
+
+    results: list[tuple[str, str, str]] = []
+    def add(level: str, name: str, info: str) -> None:
+        results.append((level, name, info))
+        print(f"  {level:4s}  {name:22s} {info}")
+
+    now_ist = datetime.datetime.now(_IST)
+    print(f"[{now_ist:%Y-%m-%d %H:%M IST}] chart_bot preflight — no orders are placed\n")
+    add("PASS" if _AUTO_TRADE else "FAIL", "auto-trade", "ON" if _AUTO_TRADE else "OFF — set KITE_AUTO_TRADE=1 in .env")
+    add("PASS", "rules", f"{PRIMARY_TF} chart, orders at ±{MIN_TRADE_SCORE}, R:R ≥ {MIN_RR}, "
+                         f"{MAX_LOSSES_PER_DIR} losses/direction/day, window {SIGNAL_OPEN:%H:%M}–{SIGNAL_CLOSE:%H:%M}")
+    topic = _ntfy_topic()
+    add("PASS" if topic else "WARN", "ntfy topic", "set" if topic else "missing — no phone alerts")
+
+    api_key, access_token = _kite_creds()
+    if not (api_key and access_token):
+        add("FAIL", "kite credentials", "KITE_API_KEY / KITE_ACCESS_TOKEN missing")
+        return _preflight_report(results, topic, notify)
+    kite = KiteConnect(api_key=api_key)
+    kite.set_access_token(access_token)
+    try:
+        prof = kite.profile()
+        add("PASS", "kite token", f"valid ({prof.get('user_id', '?')})")
+    except Exception as e:
+        add("FAIL", "kite token", f"{e} — run auto_token.py")
+        return _preflight_report(results, topic, notify)
+
+    try:
+        bal = float(kite.margins()["equity"]["available"]["live_balance"])
+        add("PASS", "balance", f"₹{bal:,.0f} live balance")
+    except Exception as e:
+        bal = None
+        add("WARN", "balance", f"margin fetch failed ({e}) — orders will use 1 lot")
+
+    for sym in symbols:
+        try:
+            res = analyze_chart(sym, PRIMARY_TF, api_key, access_token, closed_only=True)
+        except Exception as e:
+            add("FAIL", f"{sym} chart", str(e))
+            continue
+        if res.get("error"):
+            add("FAIL", f"{sym} chart", res["error"])
+            continue
+        df, v = res["df"], res["verdict"]
+        last = df.index[-1]
+        vol = "futures volume" if df["Volume"].tail(20).sum() > 0 else "NO volume (price-only VWAP)"
+        add("PASS", f"{sym} chart", f"{len(df)} candles, last {last:%d-%b %H:%M}, {vol}; "
+                                    f"now {v['verdict']} {v['score']:+d} R:R {v.get('rr')}")
+        if sym not in _TRADE_SYMBOLS:
+            continue
+        spot = float(res["summary"]["close"])
+        for opt in ("CE", "PE"):
+            try:
+                strike = _atm_strike(spot, sym)
+                ts = _resolve_tradingsymbol(kite, sym, strike, opt)
+                if not ts:
+                    add("FAIL", f"{sym} {opt} contract", f"no contract for strike {strike}")
+                    continue
+                ex = _EXCHANGE[sym]
+                ltp = float(kite.ltp([f"{ex}:{ts}"])[f"{ex}:{ts}"]["last_price"])
+                lot_cost = ltp * LOT_SIZE[sym]
+                lvl = "PASS" if bal is None or bal >= lot_cost else "WARN"
+                note = "" if lvl == "PASS" else f" — balance below 1 lot, Kite will reject"
+                add(lvl, f"{sym} {opt} contract", f"{ts} LTP ₹{ltp:.2f}, 1 lot ₹{lot_cost:,.0f}{note}")
+            except Exception as e:
+                add("FAIL", f"{sym} {opt} contract", str(e))
+
+    # Open positions vs GTTs — a GTT on a contract we don't hold would open a short
+    try:
+        held = {p["tradingsymbol"]: int(p["quantity"]) for p in kite.positions().get("net", [])
+                if int(p.get("quantity", 0)) != 0}
+        gtts = [g for g in kite.get_gtts() if g.get("status") == "active"]
+        orphans = [g for g in gtts if g.get("condition", {}).get("tradingsymbol") not in held]
+        unprotected = [ts for ts, q in held.items() if q > 0 and
+                       not any(g.get("condition", {}).get("tradingsymbol") == ts for g in gtts)]
+        add("PASS", "positions", ", ".join(f"{ts} {q}" for ts, q in held.items()) or "none open")
+        add("FAIL" if orphans else "PASS", "orphan GTTs",
+            ", ".join(f"{g['id']} {g['condition']['tradingsymbol']}" for g in orphans) + " — delete in Kite"
+            if orphans else "none")
+        add("WARN" if unprotected else "PASS", "positions w/o GTT",
+            ", ".join(unprotected) + " — no stop loss" if unprotected else "none")
+    except Exception as e:
+        add("FAIL", "positions / GTTs", str(e))
+
+    try:
+        state = _load_state(state_file)
+        open_trades = [k for k in state if re.fullmatch(r"\d{4}-\d{2}-\d{2}:\w+:trade", k)]
+        add("PASS", "state file", f"{len(state)} keys; open bot trades: "
+                                  + (", ".join(open_trades) if open_trades else "none"))
+    except Exception as e:
+        add("FAIL", "state file", str(e))
+
+    try:
+        with open("/tmp/chart_bot_loop.lock", "w") as lf:
+            fcntl.flock(lf, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            fcntl.flock(lf, fcntl.LOCK_UN)
+        add("WARN", "chart_bot loop", "NOT running — bash start_droplet.sh (watchdog restarts it)")
+    except OSError:
+        add("PASS", "chart_bot loop", "running")
+
+    return _preflight_report(results, topic, notify)
+
+
+def _preflight_report(results: list, topic: str, notify: bool) -> bool:
+    fails = [r for r in results if r[0] == "FAIL"]
+    warns = [r for r in results if r[0] == "WARN"]
+    verdict = "READY" if not fails else "NOT READY"
+    print(f"\n{verdict}: {len(fails)} fail, {len(warns)} warn")
+    if notify and topic:
+        body = "\n".join(f"{lvl} {name}: {info}" for lvl, name, info in fails + warns) or "All checks passed."
+        send_ntfy(f"Chart Bot preflight: {verdict}", body, topic,
+                  priority="urgent" if fails else "default")
+    return not fails
+
+
 # ── Entry point ───────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
@@ -1014,10 +1144,14 @@ if __name__ == "__main__":
     ap.add_argument("--interval",    type=int, default=60, help="Loop interval in seconds, aligned to the clock (default: 60)")
     ap.add_argument("--test-notify", action="store_true", help="Send test notification and exit")
     ap.add_argument("--force", action="store_true", help="Run scan even outside market hours")
+    ap.add_argument("--preflight", action="store_true", help="Check token, charts, contracts, GTTs — no orders")
+    ap.add_argument("--notify", action="store_true", help="With --preflight: push the result to ntfy")
     args = ap.parse_args()
 
     symbols = [s.upper() for s in args.symbols]
 
+    if args.preflight:
+        sys.exit(0 if preflight(symbols, args.state_file, notify=args.notify) else 1)
     if args.test_notify:
         ntfy_topic = _ntfy_topic()
         now = datetime.datetime.now(_IST).strftime("%H:%M IST")
