@@ -59,9 +59,26 @@ MARKET_CLOSE = datetime.time(15, 25)  # stop 5 min before close
 SYMBOLS    = ["NIFTY", "BANKNIFTY", "SENSEX"]
 _TRADE_SYMBOLS = {"NIFTY", "SENSEX"}   # BANKNIFTY excluded from auto-trade
 
-# Primary + confirmation timeframe
-PRIMARY_TF = "15m"
-CONFIRM_TF = "5m"
+def _env_setting(name: str) -> str:
+    """Value from the environment, else from .env; "" if unset."""
+    v = os.environ.get(name, "")
+    if v:
+        return v.strip()
+    env_path = pathlib.Path(__file__).parent.parent / ".env"
+    if env_path.exists():
+        for line in env_path.read_text().splitlines():
+            line = line.strip()
+            if "=" in line and not line.startswith("#"):
+                k, val = line.split("=", 1)
+                if k.strip() == name:
+                    return val.strip().strip('"').strip("'")
+    return ""
+
+
+# Signal timeframe (orders come from this chart) and optional confirmation chart.
+# Override in .env, e.g. CHART_PRIMARY_TF=15m and CHART_CONFIRM_TF=5m for the 15 Oct setup.
+PRIMARY_TF = _env_setting("CHART_PRIMARY_TF") or "5m"
+CONFIRM_TF = _env_setting("CHART_CONFIRM_TF") or "none"
 
 # Minimum score to send a notification (BUY=3, STRONG BUY=5)
 MIN_NOTIFY_SCORE = 3
@@ -103,7 +120,8 @@ def _auto_trade_enabled() -> bool:
     return False
 
 _AUTO_TRADE = _auto_trade_enabled()
-print(f"[chart_bot] AUTO_TRADE={'ON' if _AUTO_TRADE else 'OFF (set KITE_AUTO_TRADE=1 in .env to enable)'}", flush=True)
+print(f"[chart_bot] AUTO_TRADE={'ON' if _AUTO_TRADE else 'OFF (set KITE_AUTO_TRADE=1 in .env to enable)'}"
+      f" | signal chart {PRIMARY_TF} | confirm {CONFIRM_TF} | orders at score ±{MIN_TRADE_SCORE}", flush=True)
 
 
 # ── Credentials ───────────────────────────────────────────────────────────────
@@ -252,12 +270,10 @@ def _fmt_alert(symbol: str, p_res: dict, c_res: dict) -> tuple[str, str]:
     # Confirmation timeframe summary
     c_verdict = c_res.get("verdict", {}).get("verdict", "WAIT")
     c_score   = c_res.get("verdict", {}).get("score", 0)
-    lines += [
-        f"",
-        f"15m : {verdict} ({score:+d})",
-        f"5m  : {c_verdict} ({c_score:+d})",
-        f"",
-    ]
+    lines += ["", f"{PRIMARY_TF:<4}: {verdict} ({score:+d})"]
+    if CONFIRM_TF != "none":
+        lines.append(f"{CONFIRM_TF:<4}: {c_verdict} ({c_score:+d})")
+    lines.append("")
 
     # reason["ok"] is True for bullish evidence; for a PE signal bearish evidence supports it
     supports = direction == "CE"
@@ -547,7 +563,7 @@ def _monitor_positions(
                     f"⚠️ Chart Bot: {symbol} signal REVERSED",
                     (
                         f"You have an open {recorded_direction} position.\n"
-                        f"15m chart now shows: {current_verdict} ({current_score:+d})\n\n"
+                        f"{PRIMARY_TF} chart now shows: {current_verdict} ({current_score:+d})\n\n"
                         f"Consider reviewing / exiting your position."
                     ),
                     ntfy_topic,
@@ -645,18 +661,21 @@ def scan_once(symbols: list[str], state_file: str, force: bool = False) -> None:
                 _append_chart_log(today, wait_entry)
             continue
 
-        # Confirm on 5m
-        try:
-            c_res = analyze_chart(symbol, CONFIRM_TF, api_key, access_token)
-        except Exception as e:
-            print(f"       5m confirm failed: {e}")
-            c_res = {}
+        # Optional confirmation chart (CONFIRM_TF="none" → signal chart only)
+        c_res = {}
+        if CONFIRM_TF != "none":
+            try:
+                c_res = analyze_chart(symbol, CONFIRM_TF, api_key, access_token)
+            except Exception as e:
+                print(f"       {CONFIRM_TF} confirm failed: {e}")
+                c_res = {}
 
         c_verdict   = c_res.get("verdict", {}).get("verdict", "WAIT") if c_res else "WAIT"
         c_direction = _verdict_direction(c_verdict)
         c_score     = c_res.get("verdict", {}).get("score", 0) if c_res else 0
 
-        print(f"         {CONFIRM_TF} confirm: {c_verdict} ({c_score:+d})")
+        if CONFIRM_TF != "none":
+            print(f"         {CONFIRM_TF} confirm: {c_verdict} ({c_score:+d})")
 
         # 5m confirmation gate: 5m score must not be negative for CE,
         # and must not be positive for PE. This prevents entering when
@@ -921,10 +940,10 @@ if __name__ == "__main__":
             f"Chart Analysis Bot is running!\n"
             f"Time     : {now}\n"
             f"Watching : {', '.join(symbols)}\n"
-            f"Strategy : 15m primary + 5m confirmation\n"
+            f"Strategy : {PRIMARY_TF} signals" + (f" + {CONFIRM_TF} confirmation" if CONFIRM_TF != "none" else "") + "\n"
             f"Signals  : SMC structure + EMA + VWAP + RSI + ADX + OB + CPR\n\n"
             f"You will receive alerts when STRONG BUY or STRONG SELL fires on "
-            f"both timeframes during market hours (09:20–15:25 IST)."
+            f"during market hours (09:30–15:00 IST)."
         )
         print(body)
         ok = send_ntfy(title, body, ntfy_topic)
