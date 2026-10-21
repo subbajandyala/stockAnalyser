@@ -72,6 +72,19 @@ MIN_RR = 1.5
 # Clean signal window: no new signals outside 9:30–15:00 IST
 SIGNAL_OPEN  = datetime.time(9, 30)
 SIGNAL_CLOSE = datetime.time(15, 0)
+# A signal must appear on this many consecutive scans (1 min apart) before acting
+CONFIRM_SCANS = 2
+
+
+def _minutes_between(hhmm: str, now_ist: datetime.datetime) -> float:
+    """Minutes from today's HH:MM to now; large if unparseable."""
+    try:
+        hh, mm = hhmm.split(":")
+        t = now_ist.replace(hour=int(hh), minute=int(mm), second=0, microsecond=0)
+        return (now_ist - t).total_seconds() / 60
+    except Exception:
+        return 1e9
+
 
 def _auto_trade_enabled() -> bool:
     """Check KITE_AUTO_TRADE in env vars first, then .env file."""
@@ -467,7 +480,8 @@ def _monitor_positions(
                     pass  # already triggered/removed by Kite
             for _k in (trade_key, f"{trade_key}:ts", f"{trade_key}:gtt_id",
                        f"{trade_key}:entry_price", f"{trade_key}:target_price",
-                       f"{trade_key}:qty", f"{trade_key}:sl_step"):
+                       f"{trade_key}:qty", f"{trade_key}:sl_step",
+                       f"{trade_key}:reversal_alerted"):
                 state.pop(_k, None)
             # Clear the alerted key too — prevents falling through to immediate re-entry
             state.pop(symbol, None)
@@ -525,7 +539,8 @@ def _monitor_positions(
                 f"  [MONITOR] {symbol}: SIGNAL REVERSED — was {recorded_direction}, "
                 f"now {current_verdict} ({current_score:+d}) — alerting"
             )
-            if ntfy_topic:
+            if ntfy_topic and not state.get(f"{trade_key}:reversal_alerted"):
+                state[f"{trade_key}:reversal_alerted"] = True  # once per trade, not every scan
                 send_ntfy(
                     f"⚠️ Chart Bot: {symbol} signal REVERSED",
                     (
@@ -624,7 +639,8 @@ def scan_once(symbols: list[str], state_file: str, force: bool = False) -> None:
                 "entry_premium": "", "sl_premium": "", "target_premium": "",
                 "order_id": "",
             }
-            _append_chart_log(today, wait_entry)
+            if now_ist.minute % 5 == 0:   # 1-min scans: keep the log at 5-min granularity
+                _append_chart_log(today, wait_entry)
             continue
 
         # Confirm on 5m
@@ -648,7 +664,8 @@ def scan_once(symbols: list[str], state_file: str, force: bool = False) -> None:
             vdict2 = p_res["verdict"]
             entry_z2 = vdict2.get("entry_zone") or []
             today2 = now_ist.strftime("%Y-%m-%d")
-            _append_chart_log(today2, {
+            if now_ist.minute % 5 == 0:
+              _append_chart_log(today2, {
                 "_key": f"{today2}:{symbol}:{now_ist.strftime('%H%M')}",
                 "time": now_ist.strftime("%H:%M IST"), "symbol": symbol,
                 "direction": direction, "verdict": verdict, "score": score, "conf": conf,
@@ -669,7 +686,8 @@ def scan_once(symbols: list[str], state_file: str, force: bool = False) -> None:
             vdict2 = p_res["verdict"]
             entry_z2 = vdict2.get("entry_zone") or []
             today2 = now_ist.strftime("%Y-%m-%d")
-            _append_chart_log(today2, {
+            if now_ist.minute % 5 == 0:
+              _append_chart_log(today2, {
                 "_key": f"{today2}:{symbol}:{now_ist.strftime('%H%M')}",
                 "time": now_ist.strftime("%H:%M IST"), "symbol": symbol,
                 "direction": direction, "verdict": verdict, "score": score, "conf": conf,
@@ -686,9 +704,22 @@ def scan_once(symbols: list[str], state_file: str, force: bool = False) -> None:
             })
             continue
 
+        # 1-min scans score a still-forming 15m candle, so a signal must appear on
+        # CONFIRM_SCANS consecutive scans before alerting/ordering (filters 1-min spikes)
+        today      = now_ist.strftime("%Y-%m-%d")
+        streak_key = f"{today}:{symbol}:streak"
+        prev       = state.get(streak_key) or {}
+        sig_id     = f"{direction}:{verdict}"
+        consecutive = (prev.get("sig") == sig_id
+                       and _minutes_between(prev.get("t", ""), now_ist) <= 2)
+        n_seen = prev.get("n", 0) + 1 if consecutive else 1
+        state[streak_key] = {"sig": sig_id, "n": n_seen, "t": now_ist.strftime("%H:%M")}
+        if n_seen < CONFIRM_SCANS:
+            print(f"         {verdict} seen {n_seen}/{CONFIRM_SCANS} — confirming on next scan")
+            continue
+
         # Dedup: skip if same date+direction+verdict already alerted AND order was placed.
         # Prefix with today's date so stale state from yesterday never blocks today.
-        today     = now_ist.strftime("%Y-%m-%d")
         state_key = f"{today}:{symbol}:{direction}:{verdict}"
         trade_key = f"{today}:{symbol}:trade"
         already_alerted = state.get(symbol) == state_key
@@ -867,7 +898,7 @@ if __name__ == "__main__":
     ap.add_argument("--once", action="store_true", help="Single scan then exit")
     ap.add_argument("--state-file", default="/root/stockAnalyser/chart_bot_state.json")
     ap.add_argument("--loop",        action="store_true", help="Run as daemon, scanning every --interval seconds")
-    ap.add_argument("--interval",    type=int, default=300, help="Loop interval in seconds (default: 300)")
+    ap.add_argument("--interval",    type=int, default=60, help="Loop interval in seconds, aligned to the clock (default: 60)")
     ap.add_argument("--test-notify", action="store_true", help="Send test notification and exit")
     ap.add_argument("--force", action="store_true", help="Run scan even outside market hours")
     args = ap.parse_args()
@@ -899,7 +930,9 @@ if __name__ == "__main__":
                 scan_once(symbols, args.state_file, force=args.force)
             except Exception as e:
                 print(f"[loop] Unhandled error: {e}")
-            time.sleep(args.interval)
+            # Sleep to the next clock boundary (+3 s for the candle to land) so scans
+            # don't drift later each time by however long the scan took
+            time.sleep(args.interval - (time.time() % args.interval) + 3)
     else:
         print("Use --once for cron mode, --loop for daemon mode, or --test-notify.")
         sys.exit(1)

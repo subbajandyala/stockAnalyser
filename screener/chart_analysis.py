@@ -11,6 +11,7 @@ Computes for any Kite symbol / timeframe:
 """
 
 import datetime
+import time
 from io import StringIO
 
 import numpy as np
@@ -39,8 +40,31 @@ def _gex_bs_gamma(S: float, K: float, T: float, sigma: float) -> float:
         return 0.0
 
 
+_GEX_CACHE: dict[str, tuple[float, dict]] = {}
+_GEX_CACHE_TTL = 300  # seconds
+
+
 def _fetch_index_gex(symbol: str, spot: float,
                      api_key: str, access_token: str) -> dict:
+    """GEX with a 5-minute cache per symbol.
+
+    Each fresh fetch downloads the whole instruments master plus option quotes;
+    doing that on every 1-minute scan (15m + 5m + monitor) exhausts the droplet's
+    memory. Only wall_pct depends on spot, so it is recomputed from the cache.
+    """
+    hit = _GEX_CACHE.get(symbol)
+    if hit and time.time() - hit[0] < _GEX_CACHE_TTL:
+        gex = dict(hit[1])
+        if gex.get("gamma_wall") and spot:
+            gex["wall_pct"] = (gex["gamma_wall"] - spot) / spot * 100
+        return gex
+    gex = _fetch_index_gex_uncached(symbol, spot, api_key, access_token)
+    _GEX_CACHE[symbol] = (time.time(), gex)
+    return gex
+
+
+def _fetch_index_gex_uncached(symbol: str, spot: float,
+                              api_key: str, access_token: str) -> dict:
     """
     Fetch option chain + compute GEX for index symbols (NIFTY/BANKNIFTY/SENSEX).
     Returns {} silently on any failure so chart analysis still works.

@@ -145,18 +145,38 @@ def _atm_strike(spot: float, symbol: str) -> int:
     return int(round(spot / step) * step)
 
 
+_INSTR_CACHE: dict[str, tuple[datetime.date, pd.DataFrame]] = {}
+
+
+def _option_instruments(kite: KiteConnect, exchange: str) -> pd.DataFrame | None:
+    """Index option rows from Kite's instrument master, downloaded once per day.
+
+    The full master is tens of thousands of rows and takes seconds to fetch, so
+    it is cached (index options only) instead of re-downloaded on every order.
+    """
+    today = datetime.date.today()
+    hit = _INSTR_CACHE.get(exchange)
+    if hit and hit[0] == today:
+        return hit[1]
+    try:
+        df = pd.DataFrame(kite.instruments(exchange))
+    except Exception as e:
+        _LOG.error(f"instruments({exchange}) failed: {e}")
+        return hit[1] if hit else None
+    df = df[df["name"].isin(list(LOT_SIZE) + ["BANKNIFTY"]) & df["instrument_type"].isin(["CE", "PE"])]
+    df = df[["name", "instrument_type", "strike", "expiry", "tradingsymbol"]].copy()
+    _INSTR_CACHE[exchange] = (today, df)
+    return df
+
+
 def _resolve_tradingsymbol(
     kite: KiteConnect, symbol: str, strike: int, opt_type: str
 ) -> str | None:
     """Return the nearest-expiry tradingsymbol for symbol+strike+type, or None."""
     exchange = _EXCHANGE[symbol]
-    try:
-        instruments = kite.instruments(exchange)
-    except Exception as e:
-        _LOG.error(f"instruments({exchange}) failed: {e}")
+    df = _option_instruments(kite, exchange)
+    if df is None:
         return None
-
-    df = pd.DataFrame(instruments)
     today = datetime.date.today()
 
     mask = (
