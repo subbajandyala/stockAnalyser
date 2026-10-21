@@ -12,6 +12,7 @@
 set -e
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$SCRIPT_DIR"
+rm -f .watchdog_off   # re-enable the chart_bot watchdog (paused by stop_droplet.sh)
 
 PYTHON="${PYTHON:-/root/venv/bin/python}"
 STREAMLIT="${STREAMLIT:-/root/venv/bin/streamlit}"

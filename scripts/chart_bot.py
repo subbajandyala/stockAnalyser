@@ -924,6 +924,19 @@ if __name__ == "__main__":
     elif args.once:
         scan_once(symbols, args.state_file, force=args.force)
     elif args.loop:
+        # Single instance: two loops would both place orders. Wait briefly so a
+        # restart (old copy still exiting) doesn't fail; otherwise exit.
+        import fcntl
+        _lock_file = open("/tmp/chart_bot_loop.lock", "w")
+        for _ in range(15):
+            try:
+                fcntl.flock(_lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except OSError:
+                time.sleep(1)
+        else:
+            print("Another chart_bot --loop is already running — exiting.")
+            sys.exit(0)
         print(f"Chart bot loop started — scanning every {args.interval}s")
         while True:
             try:
