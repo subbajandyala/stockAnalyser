@@ -702,11 +702,6 @@ def scan_once(symbols: list[str], state_file: str, force: bool = False) -> None:
         if already_traded:
             print(f"         [{symbol}] Bot position still open — no new entry")
             continue
-        sent_key = f"{state_key}:sent"
-        if already_alerted and state.get(sent_key):
-            print(f"         Order for this signal already sent at {state[sent_key]} "
-                  f"(rejected/unfilled) — not resending")
-            continue
         if already_alerted:
             print(f"         Already alerted (no trade yet) — will retry order if conditions met")
 
@@ -766,10 +761,7 @@ def scan_once(symbols: list[str], state_file: str, force: bool = False) -> None:
             if "error" in trade:
                 print(f"  [AUTO-TRADE] SKIPPED — {trade['error']}")
                 log_entry["auto_trade"] = f"skipped: {trade['error']}"
-                if trade.get("sent"):
-                    # Reached Kite but rejected/unfilled — don't resend for this same signal
-                    state[sent_key] = now_ist.strftime("%H:%M")
-                    log_entry["order_id"] = trade.get("order_id", "")
+                log_entry["order_id"] = trade.get("order_id", "")
                 if ntfy_topic and (trade.get("sent") or not already_alerted):
                     send_ntfy(
                         f"Chart Auto-Trade SKIPPED: {symbol}",
