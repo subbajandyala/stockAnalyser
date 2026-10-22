@@ -81,7 +81,7 @@ Cron entry:
 | `gamma_blast_bot.py` | cron | ntfy |
 | `red_flag_bot.py` | cron | ntfy |
 | `eod_report.py` | cron, 15:35 | ntfy |
-| `chart_bot.py --loop --interval 30` | start_droplet.sh, every 30 s | ntfy; only Kite order executor (candles engine: book at +10%, exit if not working in 6 min) |
+| `chart_bot.py --loop --interval 30` | start_droplet.sh, every 30 s | ntfy; only Kite order executor (candles engine: book at +20%, exit if not working in 6 min) |
 | `chart_bot.py --preflight` | before 9:15 (no orders) | ntfy READY / NOT READY |
 | `replay_bot.py` | manual, before deploying a rule change | console + data/replay_*.csv |
 

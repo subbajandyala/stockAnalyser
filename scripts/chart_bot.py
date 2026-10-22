@@ -9,7 +9,7 @@ Engine "candles" (default, CHART_ENGINE in .env) — screener/candles.py:
   engulfing, hammer / shooting star → buy CE / PE (either side, any time
   9:30–15:00 when that index has no bot trade open).
     SL      candle low / high → premium (5–15% below entry), then −15 pts NIFTY / −30 SENSEX
-    target  +10% (CHART_BOOK_PCT) — the GTT books the position; the next strong candle re-enters
+    target  +20% (CHART_BOOK_PCT) — the GTT books the position; the next strong candle re-enters
     early   opposite candle → exit and flip; not ≥ +2% after 6 min (CHART_SCALP_MAX_MIN) → exit
     15:15   square-off
 
@@ -101,7 +101,7 @@ SETUP_TF = _env_setting("CHART_SETUP_TF") or "3m"
 # hammer-type candle → buy that side; book the position at +CANDLE_BOOK_PCT;
 # exit early on an opposite candle or when it isn't working after SCALP_MAX_MIN.
 CANDLE_TF       = _env_setting("CHART_CANDLE_TF") or "3m"
-CANDLE_BOOK_PCT = float(_env_setting("CHART_BOOK_PCT") or 0.10)
+CANDLE_BOOK_PCT = float(_env_setting("CHART_BOOK_PCT") or 0.20)
 SCALP_MAX_MIN   = int(_env_setting("CHART_SCALP_MAX_MIN") or 6)
 # Setups engine: losing trades in one direction before that direction stops for
 # the day — 0 = never stop (grab every setup). Set CHART_MAX_LOSSES=2 to cap.
