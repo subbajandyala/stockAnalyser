@@ -15,7 +15,7 @@ pgrep -f "scripts/chart_bot.py --loop" >/dev/null && exit 0
 
 echo "$(date '+%F %T') chart_bot not running — restarting" >> watchdog.log
 export PYTHONUNBUFFERED=1
-nohup "$PYTHON" -u scripts/chart_bot.py --loop >> chart_bot.log 2>&1 &
+nohup "$PYTHON" -u scripts/chart_bot.py --loop --interval 30 >> chart_bot.log 2>&1 &
 
 topic=$(grep '^NTFY_TOPIC=' .env 2>/dev/null | head -1 | cut -d= -f2- | tr -d '"'"'" | tr -d '[:space:]')
 if [ -n "$topic" ]; then

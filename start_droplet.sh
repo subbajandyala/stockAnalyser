@@ -66,7 +66,7 @@ echo "  cpr_adx_bot PID: $CPR_PID"
 # ── Start Chart Analysis bot (15m+5m confirm, every 5 min) ──────────────────
 echo "Starting Chart Analysis bot..."
 pkill -f chart_bot.py 2>/dev/null || true
-nohup "$PYTHON" -u scripts/chart_bot.py --loop >> chart_bot.log 2>&1 &
+nohup "$PYTHON" -u scripts/chart_bot.py --loop --interval 30 >> chart_bot.log 2>&1 &
 CHART_PID=$!
 echo "  chart_bot PID: $CHART_PID"
 

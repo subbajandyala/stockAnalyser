@@ -81,7 +81,7 @@ Cron entry:
 | `gamma_blast_bot.py` | cron | ntfy |
 | `red_flag_bot.py` | cron | ntfy |
 | `eod_report.py` | cron, 15:35 | ntfy |
-| `chart_bot.py --loop` | start_droplet.sh, every 1 min | ntfy; only Kite order executor (setups engine: book 100% at +20%) |
+| `chart_bot.py --loop --interval 30` | start_droplet.sh, every 30 s | ntfy; only Kite order executor (candles engine: book at +10%, exit if not working in 6 min) |
 | `chart_bot.py --preflight` | before 9:15 (no orders) | ntfy READY / NOT READY |
 | `replay_bot.py` | manual, before deploying a rule change | console + data/replay_*.csv |
 
@@ -141,7 +141,8 @@ fetch_ohlcv_yf_compat(symbol, period="1y", interval="1d")  # drop-in for yf.down
 | `technical.py` | Breakout readiness |
 | `agent_flow.py` | Multi-timeframe OI + momentum → CALL/PUT/NO TRADE |
 | `sensex_option_moves.py` | SENSEX intraday option move signals |
-| `setups.py` | chart_bot order engine: regime + setups on 3m (trend pullback, ORB, VWAP reclaim/reject, range fade) |
+| `candles.py` | chart_bot default engine: reads the forming 3m candle (strong / engulfing / hammer / shooting star) → CE / PE |
+| `setups.py` | chart_bot alternative engine: regime + setups on 3m (trend pullback, ORB, VWAP reclaim/reject, range fade) |
 | `open_low.py` | NIFTY100 Open=Low intraday momentum setups |
 | `elder_ray.py` | Elder Ray Bull/Bear Power multi-timeframe |
 | `smart_alerts.py` | Smart money alerts |

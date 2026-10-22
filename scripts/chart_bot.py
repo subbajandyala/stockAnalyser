@@ -1,29 +1,26 @@
 """
 Chart Analysis Signal Bot
 =========================
-Every minute, on closed candles, for NIFTY / SENSEX (BANKNIFTY alerts only).
+Every 30 s (start_droplet.sh: --loop --interval 30) for NIFTY / SENSEX
+(BANKNIFTY alerts only). Quantity: 95% of the Kite balance, min 1 lot.
 
-Engine "setups" (default, CHART_ENGINE in .env):
-  screener/setups.py reads today's 3-minute chart — regime (trend / range) and four
-  setups: trend pullback, opening-range breakout, VWAP reclaim / reject, range fade.
-  A fresh setup on a flat index buys the ATM option (CE or PE, either side):
-    qty     95% of the Kite balance (min 1 lot, so a rejection is visible)
-    SL      setup stop → premium (5–15% below entry), then −15 pts NIFTY / −30 SENSEX
-    target  +20% — the GTT books the WHOLE position; the next fresh setup re-enters
-    exits   GTT target / SL, opposite setup (exit, then flip), 15:15 square-off
+Engine "candles" (default, CHART_ENGINE in .env) — screener/candles.py:
+  reads the 3-minute candle while it is forming. Strong bull / bear candle,
+  engulfing, hammer / shooting star → buy CE / PE (either side, any time
+  9:30–15:00 when that index has no bot trade open).
+    SL      candle low / high → premium (5–15% below entry), then −15 pts NIFTY / −30 SENSEX
+    target  +10% (CHART_BOOK_PCT) — the GTT books the position; the next strong candle re-enters
+    early   opposite candle → exit and flip; not ≥ +2% after 6 min (CHART_SCALP_MAX_MIN) → exit
+    15:15   square-off
 
-Engine "score" (CHART_ENGINE=score): the old ±5 score on 5m, R:R ≥ 1.5,
-half booked at T1 and the rest trailed.
+Engine "setups": regime + setups on 3m, book at +20%.  Engine "score": old ±5 score.
 
 Set KITE_AUTO_TRADE=1 to enable auto order execution.
-
-Run (start_droplet.sh):
-  /root/venv/bin/python -u scripts/chart_bot.py --loop >> chart_bot.log 2>&1
 
 Checks / tests:
   /root/venv/bin/python scripts/chart_bot.py --preflight          # no orders
   /root/venv/bin/python -u scripts/chart_bot.py --test-notify
-  /root/venv/bin/python scripts/replay_bot.py --days 20           # both engines on history
+  /root/venv/bin/python scripts/replay_bot.py --days 20           # all engines on history
 """
 
 import argparse
@@ -43,6 +40,7 @@ import requests
 from kiteconnect import KiteConnect
 
 from screener.chart_analysis import analyze_chart
+from screener import candles as _candles
 from screener import setups as _setups
 from screener.kite_order import (
     BOOK_PROFIT_PCT,
@@ -97,8 +95,14 @@ CONFIRM_TF = _env_setting("CHART_CONFIRM_TF") or "none"
 # Order engine. "setups" (default): regime + setups on 3m candles, book 100% at
 # +20%, re-enter on the next fresh setup either side. "score": the old ±5 score
 # with half-booking + trailing. Switch back with CHART_ENGINE=score in .env.
-ENGINE   = (_env_setting("CHART_ENGINE") or "setups").lower()
+ENGINE   = (_env_setting("CHART_ENGINE") or "candles").lower()
 SETUP_TF = _env_setting("CHART_SETUP_TF") or "3m"
+# Engine "candles" (default): read the forming 3m candle; strong / engulfing /
+# hammer-type candle → buy that side; book the position at +CANDLE_BOOK_PCT;
+# exit early on an opposite candle or when it isn't working after SCALP_MAX_MIN.
+CANDLE_TF       = _env_setting("CHART_CANDLE_TF") or "3m"
+CANDLE_BOOK_PCT = float(_env_setting("CHART_BOOK_PCT") or 0.10)
+SCALP_MAX_MIN   = int(_env_setting("CHART_SCALP_MAX_MIN") or 6)
 # Setups engine: losing trades in one direction before that direction stops for
 # the day — 0 = never stop (grab every setup). Set CHART_MAX_LOSSES=2 to cap.
 SETUP_MAX_LOSSES = int(_env_setting("CHART_MAX_LOSSES") or 0)
@@ -155,7 +159,9 @@ def _auto_trade_enabled() -> bool:
 
 _AUTO_TRADE = _auto_trade_enabled()
 print(f"[chart_bot] AUTO_TRADE={'ON' if _AUTO_TRADE else 'OFF (set KITE_AUTO_TRADE=1 in .env to enable)'}"
-      + (f" | engine setups on {SETUP_TF} | book 100% at +{BOOK_PROFIT_PCT:.0%}" if ENGINE == "setups" else
+      + (f" | engine candles on {CANDLE_TF} | book at +{CANDLE_BOOK_PCT:.0%}, exit if not working in "
+         f"{SCALP_MAX_MIN} min" if ENGINE == "candles" else
+         f" | engine setups on {SETUP_TF} | book 100% at +{BOOK_PROFIT_PCT:.0%}" if ENGINE == "setups" else
          f" | engine score | signal chart {PRIMARY_TF} | confirm {CONFIRM_TF} | orders at score ±{MIN_TRADE_SCORE}"),
       flush=True)
 
@@ -480,9 +486,14 @@ def _manage_trade(kite, symbol: str, state: dict, trade_key: str,
                           f"{ts}: GTT placement failed ({e}). Set a stop loss in Kite manually.",
                           ntfy_topic, priority="urgent")
             return
-    if state.get(k("mode")) == "book":
-        print(f"  [MONITOR] {symbol}: LTP ₹{ltp:.2f}  entry ₹{entry:.2f}  SL ₹{sl:.2f}  "
-              f"book ₹{far:.2f} (+{(far / entry - 1) * 100:.0f}%, GTT)")
+    if state.get(k("mode")) in ("book", "scalp"):
+        print(f"  [MONITOR] {symbol}: LTP ₹{ltp:.2f} ({(ltp / entry - 1) * 100:+.1f}%)  entry ₹{entry:.2f}  "
+              f"SL ₹{sl:.2f}  book ₹{far:.2f} (+{(far / entry - 1) * 100:.0f}%, GTT)")
+        if state.get(k("mode")) == "scalp":
+            held_min = _minutes_between(state.get(k("entry_t"), ""), now_ist)
+            if held_min >= SCALP_MAX_MIN and ltp < entry * 1.02:
+                _exit_bot_position(kite, symbol, state, trade_key,
+                                   f"not working — {held_min:.0f} min, {(ltp / entry - 1) * 100:+.1f}%", ntfy_topic)
         return  # the GTT books the whole position at the target
     trailing = bool(state.get(k("trailing")))
     stage = f"trailing, peak ₹{state.get(k('peak'))}" if trailing else f"T1 ₹{t1:.2f}"
@@ -593,6 +604,8 @@ def _monitor_positions(
             lost = pnl is not None and pnl < 0 and closed_dir
             n_losses = 0
             act = state.get(f"{today}:{symbol}:active_setup") or {}
+            if lost:
+                state[f"{today}:{symbol}:lost_candle"] = state.get(f"{trade_key}:candle")
             if lost and act.get("side") == closed_dir:
                 state.pop(f"{today}:{symbol}:active_setup", None)   # stopped out → setup failed
                 state[f"{today}:{symbol}:failed_setup"] = act.get("trig")
@@ -632,6 +645,13 @@ def _monitor_positions(
         recorded_direction = direction or recorded_direction
         if not recorded_direction:
             continue
+        if state.get(f"{trade_key}:mode") == "scalp":
+            cres = _candles.scan(symbol, CANDLE_TF, api_key, access_token)
+            if not cres.get("error") and cres.get("signal") and cres["signal"] != recorded_direction:
+                _exit_bot_position(kite, symbol, state, trade_key,
+                                   f"opposite candle — {cres['label']} against the {recorded_direction} trade",
+                                   ntfy_topic)
+            continue
         if state.get(f"{trade_key}:mode") == "book":
             sres = _setups.scan(symbol, SETUP_TF, api_key, access_token)
             if sres.get("error") or not sres.get("signal") or sres["signal"] == recorded_direction:
@@ -662,6 +682,91 @@ def _monitor_positions(
                 kite, symbol, state, trade_key,
                 f"reversal exit — {PRIMARY_TF} now {current_verdict} ({current_score:+d}) against the "
                 f"{recorded_direction} trade", ntfy_topic)
+
+
+# ── Candles engine scan ──────────────────────────────────────────────────────
+
+def _scan_candles(symbols: list[str], state: dict, api_key: str, access_token: str,
+                  ntfy_topic: str, now_ist: datetime.datetime) -> None:
+    """Read the forming candle; a strong candle on a flat index → buy that side."""
+    today = now_ist.strftime("%Y-%m-%d")
+    log_tick = now_ist.minute % 5 == 0 and now_ist.second < 30
+    for symbol in symbols:
+        res = _candles.scan(symbol, CANDLE_TF, api_key, access_token, now=now_ist)
+        if res.get("error"):
+            print(f"  {symbol} {CANDLE_TF}: ERROR — {res['error']}")
+            continue
+        sig = res.get("signal")
+        print(f"  {'🚀' if sig else '  '} {symbol:10s} | {CANDLE_TF} {'forming' if res.get('forming') else 'closed '} "
+              f"| {res['text']}")
+        view = {**res, "regime": f"{CANDLE_TF} candle", "setup": res.get("pattern"),
+                "reasons": [res["text"]]}
+        if not sig:
+            if log_tick:
+                _append_chart_log(today, _setup_log_entry(now_ist, symbol, view, "no signal"))
+            continue
+        candle = f"{sig}@{res['candle_time']:%H:%M}"
+        trade_key = f"{today}:{symbol}:trade"
+        if state.get(trade_key):
+            continue       # one trade per index; an opposite candle exits it first
+        if candle == state.get(f"{today}:{symbol}:lost_candle"):
+            print(f"         [{symbol}] already lost on this candle — waiting for the next one")
+            continue
+        if not (_AUTO_TRADE and symbol in _TRADE_SYMBOLS):
+            if state.get(f"{today}:{symbol}:alerted_candle") != candle:
+                state[f"{today}:{symbol}:alerted_candle"] = candle
+                if ntfy_topic:
+                    send_ntfy(f"Chart Bot: {symbol} {res['label']} → BUY {sig}", res["text"], ntfy_topic)
+                _append_chart_log(today, _setup_log_entry(now_ist, symbol, view, "signal only"))
+            continue
+
+        print(f"  [AUTO-TRADE] {res['label']} → {sig} on {symbol} @ {res['spot']:.0f} (candle stop {res['stop']})")
+        trade = _place_order(symbol, sig, res["spot"], api_key, access_token,
+                             chart_sl=res["stop"], book_pct=CANDLE_BOOK_PCT)
+        if "error" in trade:
+            print(f"  [AUTO-TRADE] NOT PLACED — {trade['error']}")
+            if ntfy_topic and state.get(f"{today}:{symbol}:err_candle") != candle:
+                state[f"{today}:{symbol}:err_candle"] = candle
+                send_ntfy(f"Chart Auto-Trade NOT PLACED: {symbol}",
+                          f"{res['label']} {sig}\nReason: {trade['error']}", ntfy_topic, priority="default")
+            if log_tick:
+                _append_chart_log(today, _setup_log_entry(now_ist, symbol, view, f"skipped: {trade['error']}", trade))
+            continue
+
+        state.update({
+            trade_key: trade["order_id"],
+            f"{trade_key}:ts": trade["tradingsymbol"],
+            f"{trade_key}:gtt_id": trade.get("gtt_id") or "",
+            f"{trade_key}:entry_price": trade.get("entry_price", 0),
+            f"{trade_key}:target_price": trade.get("target", 0),
+            f"{trade_key}:qty": trade.get("qty", 0),
+            f"{trade_key}:sl": trade.get("sl", 0),
+            f"{trade_key}:t1": trade.get("t1", 0),
+            f"{trade_key}:trailing": False,
+            f"{trade_key}:direction": sig,
+            f"{trade_key}:mode": "scalp",
+            f"{trade_key}:candle": candle,
+            f"{trade_key}:entry_t": now_ist.strftime("%H:%M"),
+        })
+        state[symbol] = f"{today}:{symbol}:{sig}:{res['label']}"
+        entry, sl, tgt = trade["entry_price"], trade["sl"], trade["target"]
+        print(f"  [AUTO-TRADE] ORDER — {trade['tradingsymbol']} | qty {trade['qty']} | entry ₹{entry} "
+              f"| SL ₹{sl} | book ₹{tgt}")
+        _append_chart_log(today, _setup_log_entry(now_ist, symbol, view, "placed", trade))
+        if ntfy_topic:
+            send_ntfy(f"Chart ORDER PLACED: {trade['tradingsymbol']}",
+                      (f"{res['label']} → {sig}\n"
+                       f"Qty   : {trade['qty']}\n"
+                       f"Entry : ₹{entry}\n"
+                       f"Book  : ₹{tgt} (+{CANDLE_BOOK_PCT:.0%})\n"
+                       f"SL    : ₹{sl} (candle stop − {int(_SL_EXTRA.get(symbol, 15))} pts)\n"
+                       f"Exit early: opposite candle, or not working after {SCALP_MAX_MIN} min"),
+                      ntfy_topic)
+        try:
+            sk = _place_sk_order(symbol, sig, res["spot"], option_ltp=entry, option_sl=sl, option_target=tgt)
+            print(f"  [SHAREKHAN] " + (f"SKIPPED — {sk['error']}" if "error" in sk else f"ORDER — {sk['order_id']}"))
+        except Exception as _sk_err:
+            print(f"  [SHAREKHAN] ERROR — {_sk_err}")
 
 
 # ── Setups engine scan ───────────────────────────────────────────────────────
@@ -860,6 +965,11 @@ def scan_once(symbols: list[str], state_file: str, force: bool = False) -> None:
         print(f"Outside clean signal window ({SIGNAL_OPEN}–{SIGNAL_CLOSE} IST) — skipping new signals.")
         return
 
+    if ENGINE == "candles":
+        _scan_candles(symbols, state, api_key, access_token, ntfy_topic, now_ist)
+        _save_state(state_file, state)
+        print("Done.")
+        return
     if ENGINE == "setups":
         _scan_setups(symbols, state, api_key, access_token, ntfy_topic, now_ist)
         _save_state(state_file, state)
@@ -1221,7 +1331,11 @@ def preflight(symbols: list[str], state_file: str, notify: bool = False) -> bool
     now_ist = datetime.datetime.now(_IST)
     print(f"[{now_ist:%Y-%m-%d %H:%M IST}] chart_bot preflight — no orders are placed\n")
     add("PASS" if _AUTO_TRADE else "FAIL", "auto-trade", "ON" if _AUTO_TRADE else "OFF — set KITE_AUTO_TRADE=1 in .env")
-    if ENGINE == "setups":
+    if ENGINE == "candles":
+        add("PASS", "rules", f"candles engine on {CANDLE_TF} (forming candle), book at +{CANDLE_BOOK_PCT:.0%}, "
+                             f"exit if not working after {SCALP_MAX_MIN} min, SL buffer NIFTY "
+                             f"{_SL_EXTRA['NIFTY']:.0f} / SENSEX {_SL_EXTRA['SENSEX']:.0f} pts")
+    elif ENGINE == "setups":
         add("PASS", "rules", f"setups engine on {SETUP_TF}, book 100% at +{BOOK_PROFIT_PCT:.0%}, SL buffer "
                              f"NIFTY {_SL_EXTRA['NIFTY']:.0f} / SENSEX {_SL_EXTRA['SENSEX']:.0f} pts, "
                              f"loss limit {SETUP_MAX_LOSSES or 'off'}, window {SIGNAL_OPEN:%H:%M}–{SIGNAL_CLOSE:%H:%M}")
@@ -1265,6 +1379,9 @@ def preflight(symbols: list[str], state_file: str, notify: bool = False) -> bool
         vol = "futures volume" if df["Volume"].tail(20).sum() > 0 else "NO volume (price-only VWAP)"
         add("PASS", f"{sym} chart", f"{len(df)} candles, last {last:%d-%b %H:%M}, {vol}; "
                                     f"now {v['verdict']} {v['score']:+d} R:R {v.get('rr')}")
+        if ENGINE == "candles":
+            cres = _candles.scan(sym, CANDLE_TF, api_key, access_token)
+            add("FAIL" if cres.get("error") else "PASS", f"{sym} candle", cres.get("error") or cres["text"])
         if ENGINE == "setups":
             sres = _setups.scan(sym, SETUP_TF, api_key, access_token)
             if sres.get("error"):

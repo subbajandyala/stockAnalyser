@@ -53,6 +53,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).parent.parent))
 import pandas as pd
 
 from screener.chart_analysis import _INDEX_TOKENS, analyze_df, front_future_token
+from screener import candles as _candles
 from screener import setups as _setups
 from screener.kite_order import (BOOK_PROFIT_PCT, LOT_SIZE, SL_MAX_PCT, SL_MIN_PCT, T1_MIN_PCT,
                                  _spot_to_option_levels, _tick, book_levels)
@@ -302,6 +303,93 @@ def run_setups(sig: pd.DataFrame, bars: dict, lots: int, max_losses: int, verbos
     return pd.DataFrame(trades)
 
 
+# ── Candles engine ───────────────────────────────────────────────────────────
+
+def build_candle_signals(symbol: str, df3: pd.DataFrame, days: list) -> pd.DataFrame:
+    """candles.read() on each CLOSED 3m candle (history has no forming candles, so
+    live entries come earlier, mid-candle, than this replay assumes)."""
+    rows = []
+    for day in days:
+        hist_all = df3[df3.index.date <= day]
+        for i in range(len(hist_all)):
+            t = hist_all.index[i]
+            if t.date() != day:
+                continue
+            r = _candles.read(hist_all.iloc[max(0, i - 39): i + 1])
+            rows.append({"t": t + pd.Timedelta(minutes=3), "day": day, "symbol": symbol, "signal": r["signal"],
+                         "setup": r["pattern"], "stop": r["stop"], "spot": r["spot"]})
+    return pd.DataFrame(rows)
+
+
+def run_candles(sig: pd.DataFrame, bars: dict, lots: int, book_pct: float, max_min: int,
+                verbose: bool) -> pd.DataFrame:
+    trades = []
+    for (symbol, day), g in sig.groupby(["symbol", "day"]):
+        if symbol not in cb._TRADE_SYMBOLS:
+            continue
+        lot = LOT_SIZE.get(symbol, 1)
+        b = bars[symbol]
+        b = b[b.index.date == day]
+        g = g.set_index("t")
+        pos, pending, lost_candle = None, None, None
+
+        def _done(p_, px, t, why):
+            nonlocal lost_candle
+            tr = _close(p_, px, t, why, symbol, day, lot)
+            tr["engine"] = "candles"
+            trades.append(tr)
+            if tr["pnl"] < 0:
+                lost_candle = p_["candle"]
+            if verbose:
+                print(f"    {t:%H:%M} {symbol} EXIT {p_['d']} ({why}) → ₹{tr['pnl']:,.0f}")
+
+        for t, bar in b.iterrows():
+            close_t = t + pd.Timedelta(minutes=3)
+            if pos:
+                p_open = _premium(pos["entry"], pos["spot"], bar["Open"], pos["d"])
+                held = (t - pos["t"]).total_seconds() / 60
+                why = ("15:15 square-off" if t.time() >= _SQUARE_OFF else pos["exit_next"]
+                       or ("not working" if held >= max_min and p_open < pos["entry"] * 1.02 else None))
+                if why:
+                    p_, pos = pos, None
+                    _done(p_, p_open, t, why)
+            if pending is not None and pos is None and t.time() < _SQUARE_OFF:
+                a = pending
+                entry = _PREMIUM.get(symbol, 150.0)
+                sl, tgt = book_levels(symbol, a["signal"], a["spot"], entry, a["stop"], book_pct)
+                pos = {"d": a["signal"], "t": t, "spot": bar["Open"], "entry": entry, "sl": sl, "tgt": tgt,
+                       "qty": lots * lot, "setup": a["setup"], "exit_next": None, "candle": a["candle"]}
+                if verbose:
+                    print(f"    {t:%H:%M} {symbol} ENTER {a['signal']} ({a['setup']}) ₹{entry:.0f}  SL ₹{sl}  "
+                          f"book ₹{tgt}")
+            pending = None
+            if pos:
+                d = pos["d"]
+                adverse, favour = (bar["Low"], bar["High"]) if d == "CE" else (bar["High"], bar["Low"])
+                p_open = _premium(pos["entry"], pos["spot"], bar["Open"], d)
+                if _premium(pos["entry"], pos["spot"], adverse, d) <= pos["sl"]:
+                    p_, pos = pos, None
+                    _done(p_, min(p_["sl"], p_open), t, "stop loss")
+                elif _premium(pos["entry"], pos["spot"], favour, d) >= pos["tgt"]:
+                    p_, pos = pos, None
+                    _done(p_, max(p_["tgt"], p_open), t, f"booked +{book_pct:.0%}")
+            if close_t not in g.index:
+                continue
+            s = g.loc[close_t]
+            if not isinstance(s["signal"], str):
+                continue
+            cand = (s["signal"], close_t)
+            if pos:
+                if s["signal"] != pos["d"]:
+                    pos["exit_next"] = f"opposite candle ({s['setup']})"
+                    pending = {**s.to_dict(), "candle": cand}
+                continue
+            if cand == lost_candle or not (_SIG_OPEN <= close_t.time() <= _SIG_CLOSE):
+                continue
+            pending = {**s.to_dict(), "candle": cand}
+    return pd.DataFrame(trades)
+
+
 def _close(pos: dict, px: float, t, why: str, symbol: str, day, lot: int) -> dict:
     pnl = pos["qty"] * (px - pos["entry"])
     return {"engine": "setups", "symbol": symbol, "day": day, "dir": pos["d"], "setup": pos["setup"],
@@ -348,7 +436,8 @@ def main() -> None:
     ap.add_argument("symbols", nargs="*", default=["NIFTY", "SENSEX"])
     ap.add_argument("--days", type=int, default=20, help="Trading days to replay (default 20)")
     ap.add_argument("--day", help="Replay only this date (YYYY-MM-DD)")
-    ap.add_argument("--engine", choices=["both", "setups", "score"], default="both")
+    ap.add_argument("--engine", choices=["all", "both", "candles", "setups", "score"], default="all",
+                    help="all = candles + setups + score; both = setups + score")
     ap.add_argument("--lots", type=int, default=2, help="Lots per trade (default 2)")
     ap.add_argument("--cost", type=float, default=100.0,
                     help="₹ brokerage + taxes per round trip, deducted per trade (default 100)")
@@ -364,7 +453,9 @@ def main() -> None:
     today = now.date()
     end = datetime.date.fromisoformat(args.day) if args.day else today
     start = end - datetime.timedelta(days=int(args.days * 1.5) + 20)
-    want_setups, want_score = args.engine in ("both", "setups"), args.engine in ("both", "score")
+    want_candles = args.engine in ("all", "candles")
+    want_setups = args.engine in ("all", "both", "setups")
+    want_score = args.engine in ("all", "both", "score")
 
     def _days(df):
         all_d = sorted(set(df.index.date))
@@ -372,13 +463,13 @@ def main() -> None:
             return [end]
         return [d for d in all_d if d < today or now.time() > datetime.time(15, 30)][-args.days:]
 
-    sig3, sig5, bars3, bars5, sym_days = [], [], {}, {}, []
+    sig3, sigc, sig5, bars3, bars5, sym_days = [], [], [], {}, {}, []
     for sym in [s.upper() for s in args.symbols]:
         tok = _INDEX_TOKENS.get(sym)
         if not tok:
             print(f"{sym}: only NIFTY / BANKNIFTY / SENSEX are supported")
             continue
-        if want_setups:
+        if want_setups or want_candles:
             print(f"Fetching {sym} 3m history…")
             df3 = _fetch(tok, "3minute", start, end, api_key, access_token)
             if df3.empty:
@@ -389,7 +480,10 @@ def main() -> None:
                 days = _days(df3)
                 sym_days += [(sym, d) for d in days if sym in cb._TRADE_SYMBOLS]
                 bars3[sym] = df3
-                sig3.append(build_setup_signals(sym, df3, days))
+                if want_setups:
+                    sig3.append(build_setup_signals(sym, df3, days))
+                if want_candles:
+                    sigc.append(build_candle_signals(sym, df3, days))
         if want_score:
             print(f"Fetching {sym} 5m history…")
             df5 = _fetch(tok, "5minute", start, end, api_key, access_token)
@@ -399,7 +493,7 @@ def main() -> None:
             df5, cov = _with_future_volume(sym, df5, start, end, api_key, access_token)
             print(f"  futures volume on {cov:.0%} of 5m candles")
             days = _days(df5)
-            if not want_setups:
+            if not (want_setups or want_candles):
                 sym_days += [(sym, d) for d in days if sym in cb._TRADE_SYMBOLS]
             bars5[sym] = df5
             sig5.append(build_signals(sym, df5, days))
@@ -407,16 +501,25 @@ def main() -> None:
     out = _ROOT / "data"
     out.mkdir(exist_ok=True)
     engines, trades_by = {}, {}
-    if sig3:
+    if sigc:
         if args.verbose:
+            print("\nCandles engine, decision by decision:")
+        tr = run_candles(pd.concat(sigc, ignore_index=True), bars3, args.lots, cb.CANDLE_BOOK_PCT,
+                         cb.SCALP_MAX_MIN, args.verbose)
+        trades_by["candles (live)"] = tr
+        engines["candles (live)"] = _engine_summary(tr, sym_days, args.cost)
+        tr.to_csv(out / "replay_candles_trades.csv", index=False)
+    if sig3:
+        if args.verbose and not sigc:
             print("\nSetups engine, decision by decision:")
-        tr = run_setups(pd.concat(sig3, ignore_index=True), bars3, args.lots, args.max_losses, args.verbose)
-        trades_by["setups (live)"] = tr
-        engines["setups (live)"] = _engine_summary(tr, sym_days, args.cost)
+        tr = run_setups(pd.concat(sig3, ignore_index=True), bars3, args.lots, args.max_losses,
+                        args.verbose and not sigc)
+        trades_by["setups"] = tr
+        engines["setups"] = _engine_summary(tr, sym_days, args.cost)
         tr.to_csv(out / "replay_setups_trades.csv", index=False)
     if sig5:
         sig = pd.concat(sig5, ignore_index=True)
-        tr, sk = run_variant("live", VARIANTS["live"], sig, bars5, args.lots, args.verbose and not sig3)
+        tr, sk = run_variant("live", VARIANTS["live"], sig, bars5, args.lots, args.verbose and not (sig3 or sigc))
         trades_by["score (old)"] = tr
         engines["score (old)"] = _engine_summary(tr, sym_days, args.cost)
         tr.to_csv(out / "replay_score_trades.csv", index=False)
@@ -437,15 +540,17 @@ def main() -> None:
 
     print(f"\n{'=' * 78}\nEngines compared\n{'=' * 78}")
     print(pd.DataFrame(engines).T.to_string())
-    if "setups (live)" in trades_by and not trades_by["setups (live)"].empty:
-        st = trades_by["setups (live)"]
-        print("\nSetups engine by setup:")
+    for name in ("candles (live)", "setups"):
+        if name not in trades_by or trades_by[name].empty:
+            continue
+        st = trades_by[name]
+        print(f"\n{name} by pattern / setup:")
         print(st.groupby("setup").agg(trades=("pnl", "size"), win_pct=("win", "mean"),
                                       pnl=("pnl", "sum")).assign(win_pct=lambda x: (x.win_pct * 100).round(0))
               .to_string())
         print("Exits:", ", ".join(f"{k} {c}" for k, c in st["exit_reason"].str.replace(r" \(.*", "", regex=True)
                                      .value_counts().items()))
-    print(f"\nTrades → {out}/replay_setups_trades.csv, replay_score_trades.csv")
+    print(f"\nTrades → {out}/replay_candles_trades.csv, replay_setups_trades.csv, replay_score_trades.csv")
     print("P&L uses delta 0.5 on a typical ATM premium (NIFTY ₹150, SENSEX ₹350), no theta/IV — "
           "compare engines, don't read it as exact rupees.")
 
