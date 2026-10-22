@@ -592,6 +592,10 @@ def _monitor_positions(
             closed_dir = direction or recorded_direction
             lost = pnl is not None and pnl < 0 and closed_dir
             n_losses = 0
+            act = state.get(f"{today}:{symbol}:active_setup") or {}
+            if lost and act.get("side") == closed_dir:
+                state.pop(f"{today}:{symbol}:active_setup", None)   # stopped out → setup failed
+                state[f"{today}:{symbol}:failed_setup"] = act.get("trig")
             if lost:
                 loss_key = f"{today}:{symbol}:losses:{closed_dir}"
                 n_losses = int(state.get(loss_key) or 0) + 1
@@ -696,16 +700,36 @@ def _scan_setups(symbols: list[str], state: dict, api_key: str, access_token: st
         marker = "🚀" if sig else "  "
         print(f"  {marker} {symbol:10s} | {SETUP_TF} | {regime:10s} | "
               f"{(res['label'] + ' ' + sig) if sig else 'no setup':28s} | {info}")
-        if not sig:
+        trade_key = f"{today}:{symbol}:trade"
+        active_key, alert_key = f"{today}:{symbol}:active_setup", f"{today}:{symbol}:setup_alerted"
+        active = state.get(active_key)
+        if sig:
+            trig = f"{sig}@{res['trigger_time']:%H:%M}"
+            if trig == state.get(f"{today}:{symbol}:failed_setup"):
+                print(f"         [{symbol}] {res['label']} {sig} ({trig}) already stopped out — waiting for a new setup")
+                if not active or active.get("trig") == trig:
+                    continue
+            elif not active or active.get("trig") != trig:
+                # A fresh setup (either side) becomes the one in force
+                active = {"side": sig, "setup": res["setup"], "label": res["label"],
+                          "stop": res["stop"], "trig": trig, "entries": 0}
+                state[active_key] = active
+        elif active and not _setups.still_valid(active, res):
+            print(f"         [{symbol}] {active['label']} {active['side']} no longer valid "
+                  f"(price back through VWAP or index stop {active['stop']} broken)")
+            state.pop(active_key, None)
+            active = None
+        if not active:
             if log_tick:
                 _append_chart_log(today, _setup_log_entry(now_ist, symbol, res, "no setup"))
             continue
 
-        trig = f"{sig}@{res['trigger_time']:%H:%M}"
-        trade_key = f"{today}:{symbol}:trade"
-        done_key, alert_key = f"{today}:{symbol}:setup_done", f"{today}:{symbol}:setup_alerted"
-        if state.get(done_key) == trig:
-            continue   # this setup candle already traded / handled
+        # Trade the setup in force — a fresh one, or an earlier one that is still valid
+        trig, reentry = active["trig"], not sig
+        sig = active["side"]
+        res = {**res, "signal": sig, "setup": active["setup"], "label": active["label"], "stop": active["stop"]}
+        if reentry:
+            print(f"         [{symbol}] {active['label']} {sig} ({trig}) still valid")
 
         if state.get(alert_key) != trig:
             state[alert_key] = trig
@@ -722,33 +746,33 @@ def _scan_setups(symbols: list[str], state: dict, api_key: str, access_token: st
             n_lost = int(state.get(f"{today}:{symbol}:losses:{sig}") or 0)
             if n_lost >= SETUP_MAX_LOSSES:
                 print(f"         [{symbol}] {n_lost} {sig} losses today — no more {sig} entries")
-                state[done_key] = trig
                 continue
         if not (_AUTO_TRADE and symbol in _TRADE_SYMBOLS):
             why = "no auto-trade for this symbol" if symbol not in _TRADE_SYMBOLS else "auto-trade off"
-            state[done_key] = trig
-            _append_chart_log(today, _setup_log_entry(now_ist, symbol, res, f"signal only ({why})"))
+            if not reentry or log_tick:
+                _append_chart_log(today, _setup_log_entry(now_ist, symbol, res, f"signal only ({why})"))
             continue
 
         print(f"  [AUTO-TRADE] {res['label']} → {sig} on {symbol} @ {res['spot']:.0f} "
-              f"(index stop {res['stop']})")
+              f"(index stop {res['stop']}){' — re-entry' if active['entries'] else ''}")
         trade = _place_order(symbol, sig, res["spot"], api_key, access_token,
                              chart_sl=res["stop"], book_pct=BOOK_PROFIT_PCT)
         if "error" in trade:
-            # Retried every minute while this setup candle is the latest one
+            # Retried every minute while the setup stays valid
             print(f"  [AUTO-TRADE] NOT PLACED — {trade['error']}")
             if ntfy_topic and state.get(f"{alert_key}:err") != trig:
                 state[f"{alert_key}:err"] = trig
                 send_ntfy(f"Chart Auto-Trade NOT PLACED: {symbol}",
                           f"Setup: {res['label']} {sig}\nReason: {trade['error']}\n"
-                          f"Retrying each minute while the setup is current.",
+                          f"Retrying each minute while the setup is valid.",
                           ntfy_topic, priority="default")
             if log_tick:
                 _append_chart_log(today, _setup_log_entry(now_ist, symbol, res, f"skipped: {trade['error']}",
                                                           trade))
             continue
 
-        state[done_key] = trig
+        active["entries"] += 1
+        state[active_key] = active
         state.update({
             trade_key: trade["order_id"],
             f"{trade_key}:ts": trade["tradingsymbol"],
@@ -767,10 +791,13 @@ def _scan_setups(symbols: list[str], state: dict, api_key: str, access_token: st
         entry, sl, tgt = trade["entry_price"], trade["sl"], trade["target"]
         print(f"  [AUTO-TRADE] ORDER — {trade['tradingsymbol']} | qty {trade['qty']} | entry ₹{entry} "
               f"| SL ₹{sl} | book ₹{tgt}")
-        _append_chart_log(today, _setup_log_entry(now_ist, symbol, res, "placed", trade))
+        _append_chart_log(today, _setup_log_entry(now_ist, symbol, res,
+                                                  "placed (re-entry)" if active["entries"] > 1 else "placed", trade))
         if ntfy_topic:
             send_ntfy(f"Chart ORDER PLACED: {trade['tradingsymbol']}",
-                      (f"Setup   : {res['label']} ({regime})\n"
+                      (f"Setup   : {res['label']} ({regime})"
+                       + (f" — re-entry #{active['entries'] - 1}, setup still valid" if active["entries"] > 1 else "")
+                       + "\n"
                        f"Qty     : {trade['qty']}\n"
                        f"Entry   : ₹{entry}\n"
                        f"SL      : ₹{sl} (structure − {int(_SL_EXTRA.get(symbol, 15))} pts buffer)\n"

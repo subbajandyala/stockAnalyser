@@ -215,14 +215,19 @@ def build_setup_signals(symbol: str, df3: pd.DataFrame, days: list) -> pd.DataFr
                 continue
             r = _setups.detect(hist)
             rows.append({"t": t, "day": day, "symbol": symbol, "signal": r["signal"], "setup": r["setup"],
-                         "regime": r["regime"], "stop": r["stop"], "spot": r["spot"]})
+                         "regime": r["regime"], "stop": r["stop"], "spot": r["spot"], "vwap": r["vwap"]})
         print(f"  {symbol}: setups {day} ({di + 1}/{len(days)})", end="\r", flush=True)
     print()
     return pd.DataFrame(rows)
 
 
 def run_setups(sig: pd.DataFrame, bars: dict, lots: int, max_losses: int, verbose: bool) -> pd.DataFrame:
-    """Bar-by-bar on 3m candles: SL checked before target inside a bar (conservative)."""
+    """Bar-by-bar on 3m candles, same rules as chart_bot's setups engine.
+
+    The setup in force stays tradeable after a +20% booking while it is still
+    valid (setups.still_valid); a stop-out ends it. SL is checked before the
+    target inside a bar (conservative).
+    """
     trades = []
     for (symbol, day), g in sig.groupby(["symbol", "day"]):
         if symbol not in cb._TRADE_SYMBOLS:
@@ -232,59 +237,68 @@ def run_setups(sig: pd.DataFrame, bars: dict, lots: int, max_losses: int, verbos
         b = b[b.index.date == day]
         g = g.set_index("t")
         losses = {"CE": 0, "PE": 0}
-        pos, pending = None, None           # pending: (signal row, why) to act on at next open
+        pos, pending, active, failed = None, None, None, None
+
+        def _closed(tr):
+            nonlocal active, failed
+            trades.append(tr)
+            if tr["pnl"] < 0:
+                losses[tr["dir"]] += 1
+                if active and active["side"] == tr["dir"]:
+                    failed, active = active["trig"], None
+            if verbose:
+                print(f"    {tr['exit_t']} {symbol} EXIT {tr['dir']} ({tr['exit_reason']}) → ₹{tr['pnl']:,.0f}")
+
         for t, bar in b.iterrows():
             close_t = t + pd.Timedelta(minutes=3)
             if pos and (t.time() >= _SQUARE_OFF or pos.get("exit_next")):
                 why = "15:15 square-off" if t.time() >= _SQUARE_OFF else pos["exit_next"]
-                trades.append(_close(pos, _premium(pos["entry"], pos["spot"], bar["Open"], pos["d"]),
-                                     t, why, symbol, day, lot))
-                losses[pos["d"]] += trades[-1]["pnl"] < 0
-                if verbose:
-                    print(f"    {t:%H:%M} {symbol} EXIT {pos['d']} ({why}) → ₹{trades[-1]['pnl']:,.0f}")
-                pos = None
+                px = _premium(pos["entry"], pos["spot"], bar["Open"], pos["d"])
+                p_, pos = pos, None
+                _closed(_close(p_, px, t, why, symbol, day, lot))
             if pending is not None and pos is None and t.time() < _SQUARE_OFF:
-                s = pending
+                a = pending
                 entry = _PREMIUM.get(symbol, 150.0)
-                sl, tgt = book_levels(symbol, s["signal"], s["spot"], entry, s["stop"], BOOK_PROFIT_PCT)
-                pos = {"d": s["signal"], "t": t, "spot": bar["Open"], "entry": entry, "sl": sl, "tgt": tgt,
-                       "qty": lots * lot, "setup": s["setup"], "exit_next": None}
+                sl, tgt = book_levels(symbol, a["side"], a["spot"], entry, a["stop"], BOOK_PROFIT_PCT)
+                pos = {"d": a["side"], "t": t, "spot": bar["Open"], "entry": entry, "sl": sl, "tgt": tgt,
+                       "qty": lots * lot, "setup": a["setup"], "exit_next": None}
                 if verbose:
-                    print(f"    {t:%H:%M} {symbol} ENTER {s['signal']} ({s['setup']}, {s['regime']}) "
+                    print(f"    {t:%H:%M} {symbol} ENTER {a['side']} ({a['setup']}{', re-entry' if a['re'] else ''}) "
                           f"₹{entry:.0f}  SL ₹{sl}  book ₹{tgt}")
             pending = None
             if pos:
                 d = pos["d"]
                 adverse, favour = (bar["Low"], bar["High"]) if d == "CE" else (bar["High"], bar["Low"])
                 p_open = _premium(pos["entry"], pos["spot"], bar["Open"], d)
+                px = why = None
                 if _premium(pos["entry"], pos["spot"], adverse, d) <= pos["sl"]:
                     px, why = min(pos["sl"], p_open), "stop loss"
                 elif _premium(pos["entry"], pos["spot"], favour, d) >= pos["tgt"]:
                     px, why = max(pos["tgt"], p_open), "booked +20%"
-                else:
-                    px = None
                 if px is not None:
-                    trades.append(_close(pos, px, t, why, symbol, day, lot))
-                    losses[d] += trades[-1]["pnl"] < 0
-                    if verbose:
-                        print(f"    {t:%H:%M} {symbol} EXIT {d} ({why}) → ₹{trades[-1]['pnl']:,.0f}")
-                    pos = None
+                    p_, pos = pos, None
+                    _closed(_close(p_, px, t, why, symbol, day, lot))
             if close_t not in g.index:
                 continue
             s = g.loc[close_t]
-            if not isinstance(s["signal"], str):      # None / NaN = no setup
-                continue
+            fresh = isinstance(s["signal"], str)
+            if fresh:
+                trig = (s["signal"], close_t)
+                if trig != failed and (not active or active["trig"] != trig):
+                    active = {"side": s["signal"], "setup": s["setup"], "stop": s["stop"], "trig": trig}
+            elif active and not _setups.still_valid(active, {"spot": s["spot"], "vwap": s["vwap"]}):
+                active = None
             if pos:
-                if s["signal"] != pos["d"]:
+                if fresh and s["signal"] != pos["d"]:
                     pos["exit_next"] = f"reversal ({s['setup']} {s['signal']})"
-                    if _SIG_OPEN <= close_t.time() <= _SIG_CLOSE:
-                        pending = s
+                    if active and active["side"] == s["signal"] and _SIG_OPEN <= close_t.time() <= _SIG_CLOSE:
+                        pending = {**active, "spot": s["spot"], "re": False}
                 continue
-            if not (_SIG_OPEN <= close_t.time() <= _SIG_CLOSE):
+            if not active or not (_SIG_OPEN <= close_t.time() <= _SIG_CLOSE):
                 continue
-            if max_losses and losses[s["signal"]] >= max_losses:
+            if max_losses and losses[active["side"]] >= max_losses:
                 continue
-            pending = s
+            pending = {**active, "spot": s["spot"], "re": not fresh or active["trig"] != (s["signal"], close_t)}
     return pd.DataFrame(trades)
 
 

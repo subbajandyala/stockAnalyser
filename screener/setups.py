@@ -127,7 +127,7 @@ def _candidates(t: pd.DataFrame, regime: str, or_hi: float | None, or_lo: float 
 
 def detect(df: pd.DataFrame) -> dict:
     """Read the last CLOSED candle of df (multi-day, IST index). Never raises on short data."""
-    res = {"signal": None, "setup": None, "label": "", "regime": "range", "stop": None,
+    res = {"signal": None, "setup": None, "label": "", "regime": "range", "stop": None, "vwap": None,
            "trigger_time": None, "spot": None, "reasons": [], "gap_pct": 0.0}
     if df is None or len(df) < 30:
         res["reasons"].append("not enough candles")
@@ -138,6 +138,7 @@ def detect(df: pd.DataFrame) -> dict:
     prev = d[d.index.date < today]
     c = d.iloc[-1]
     res["spot"], res["trigger_time"] = float(c["Close"]), d.index[-1]
+    res["vwap"] = float(c["VWAP"]) if pd.notna(c["VWAP"]) else None
     if len(t) < 3:
         res["reasons"].append("waiting for the first candles of the day")
         return res
@@ -179,6 +180,21 @@ def detect(df: pd.DataFrame) -> dict:
     res["reasons"].insert(0, f"{_LABEL[name]} → {'BUY CE' if side == 'CE' else 'BUY PE'}, "
                              f"index stop {stop:,.1f}")
     return res
+
+
+def still_valid(active: dict, res: dict) -> bool:
+    """Is an earlier setup still in force on the latest closed candle?
+
+    Valid while price stays on the setup's side of VWAP and hasn't broken the
+    setup's index stop. (Opposite setups and stopped-out trades are handled by
+    the caller.)
+    """
+    spot, vwap, stop = res.get("spot"), res.get("vwap"), active.get("stop")
+    if spot is None or vwap is None or stop is None:
+        return False
+    if active.get("side") == "CE":
+        return spot > vwap and spot > stop
+    return spot < vwap and spot < stop
 
 
 def scan(symbol: str, interval: str, api_key: str, access_token: str) -> dict:
