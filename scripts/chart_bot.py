@@ -413,10 +413,12 @@ def _exit_bot_position(kite, symbol: str, state: dict, trade_key: str, reason: s
     """
     k = lambda name: f"{trade_key}:{name}"
     ts, qty, gtt_id = state.get(k("ts")), int(state.get(k("qty")) or 0), state.get(k("gtt_id"))
-    held = open_qty(kite, ts)          # sell what is really held (a cancelled sell may have part-filled)
+    # Sell the bot's quantity, less any part-fill of an earlier cancelled sell — never
+    # more than the bot bought (a manual position in the same contract stays untouched)
+    held = open_qty(kite, ts)
     if held is not None:
-        qty = held
-        state[k("qty")] = held
+        qty = max(0, min(qty, held))
+        state[k("qty")] = qty
     ok, info = (True, "already flat") if qty <= 0 else sell_and_confirm(kite, symbol, ts, qty, discount=0.02)
     if not ok:
         fails = int(state.get(k("exit_fails")) or 0) + 1
@@ -504,7 +506,7 @@ def _manage_trade(kite, symbol: str, state: dict, trade_key: str,
         sold_ok, sold_info = (sell_and_confirm(kite, symbol, ts, half) if half else (True, ""))
         if not sold_ok:
             held = open_qty(kite, ts)
-            held = qty if held is None else held   # may be < qty if the sell part-filled
+            held = qty if held is None else min(qty, held)   # < qty if the sell part-filled
             print(f"  [TRAIL] {symbol}: partial sell not filled ({sold_info}) — GTT back to {held} units")
             try:   # partial sell failed — protect what is actually held
                 modify_oco_gtt(kite, symbol, ts, gtt_id, held, new_sl, far, ltp)
