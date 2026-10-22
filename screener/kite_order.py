@@ -65,6 +65,15 @@ SL_MAX_PCT = 0.25
 # T1 at least +15%, so the trailing floor (entry +10%) is always below the price at T1
 T1_MIN_PCT = 0.15
 
+# Book mode (setups engine): sell everything at +20% via the GTT target, then the
+# bot looks for the next setup. Stop = the setup's structure stop on the index,
+# converted to premium (kept 5–15% below entry), then pushed further away by a
+# fixed buffer so routine stop-hunting wicks don't take it out.
+BOOK_PROFIT_PCT = 0.20
+SL_EXTRA_PTS    = {"NIFTY": 15.0, "SENSEX": 30.0, "BANKNIFTY": 30.0}
+BOOK_SL_MIN_PCT = 0.05
+BOOK_SL_MAX_PCT = 0.15
+
 
 _ORDER_LOCK_PATH = "/tmp/kite_order.lock"
 
@@ -464,6 +473,23 @@ def exit_position(symbol: str, api_key: str, access_token: str,
     return {"exits": exits}
 
 
+def book_levels(symbol: str, opt_type: str, spot: float, entry: float,
+                stop_spot: float | None, book_pct: float = BOOK_PROFIT_PCT) -> tuple[float, float]:
+    """(option SL, option target) for book mode.
+
+    SL: premium where the index reaches the setup's stop (delta 0.5), kept 5–15%
+    below entry, then SL_EXTRA_PTS lower (NIFTY 15, SENSEX 30) against stop hunts.
+    Target: entry × (1 + book_pct).
+    """
+    dist = None
+    if stop_spot and spot:
+        dist = (spot - stop_spot) if opt_type == "CE" else (stop_spot - spot)
+    base = entry - _ATM_DELTA * dist if dist and dist > 0 else entry * 0.90
+    base = min(max(base, entry * (1 - BOOK_SL_MAX_PCT)), entry * (1 - BOOK_SL_MIN_PCT))
+    sl = max(base - SL_EXTRA_PTS.get(symbol, 15.0), entry * 0.40)
+    return _tick(sl), _tick(entry * (1 + book_pct))
+
+
 def place_order_for_signal(
     symbol: str,
     direction: str,
@@ -475,12 +501,15 @@ def place_order_for_signal(
     chart_sl: float | None = None,
     chart_target: float | None = None,
     trailing: bool = False,
+    book_pct: float | None = None,
 ) -> dict:
     """
     Place ATM option order + GTT for the given signal.
 
     trailing=True: the GTT gets the SL and a far target; the returned "t1" is the
     take-profit activation level the caller manages (book half, trail the rest).
+    book_pct=0.20: the GTT target is entry +20% (whole position booked there) and
+    the SL is book_levels() — chart_sl is the setup's structure stop on the index.
 
     Args:
         symbol:           "NIFTY" or "SENSEX"
@@ -570,6 +599,9 @@ def place_order_for_signal(
     sl_price = _tick(min(max(sl_price, entry_price * (1 - SL_MAX_PCT)),
                          entry_price * (1 - SL_MIN_PCT)))
     target_price = _tick(max(target_price, entry_price * (1 + T1_MIN_PCT)))
+    if book_pct:
+        sl_price, target_price = book_levels(symbol, opt_type, spot, entry_price, chart_sl, book_pct)
+        trailing = False
     _LOG.info(f"Option SL ₹{sl_price} ({(1 - sl_price / entry_price) * 100:.0f}% below entry), T1 ₹{target_price}")
 
     # 7. GTT two-leg (OCO): [sl_trigger, target_trigger]
@@ -604,7 +636,7 @@ def place_order_for_signal(
         "target":        gtt_target,
         "t1":            t1_price,
         "gtt_id":        gtt_id,
-        "trade_mode":    trade_mode,
+        "trade_mode":    "book" if book_pct else trade_mode,
     }
 
 

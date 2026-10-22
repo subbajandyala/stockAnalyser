@@ -141,6 +141,7 @@ _INDEX_TOKENS: dict[str, int] = {
 INTERVAL_CFG: dict[str, dict] = {
     "1m":  {"kite": "minute",   "days": 2,   "label": "1 Min"},
     "2m":  {"kite": "2minute",  "days": 3,   "label": "2 Min"},
+    "3m":  {"kite": "3minute",  "days": 4,   "label": "3 Min"},
     "5m":  {"kite": "5minute",  "days": 5,   "label": "5 Min"},
     "10m": {"kite": "10minute", "days": 7,   "label": "10 Min"},
     "15m": {"kite": "15minute", "days": 15,  "label": "15 Min"},
@@ -931,7 +932,7 @@ def analyze_chart(symbol: str, interval: str,
 # ── Helpers for offline tools (backtest_chart.py, noise_area.py) ──────────────
 # Not used by chart_bot; analyze_chart above is unchanged.
 
-_INTERVAL_MINUTES = {"1m": 1, "2m": 2, "5m": 5, "10m": 10, "15m": 15, "1H": 60}
+_INTERVAL_MINUTES = {"1m": 1, "2m": 2, "3m": 3, "5m": 5, "10m": 10, "15m": 15, "1H": 60}
 _FUT_SOURCE = {"NIFTY": ("NFO", "NIFTY"), "BANKNIFTY": ("NFO", "BANKNIFTY"), "SENSEX": ("BFO", "SENSEX")}
 _FUT_TOKEN_CACHE: dict = {}
 

@@ -1,6 +1,16 @@
 """
 Replay of the LIVE chart_bot rules on Kite history — run before deploying a change.
 
+Two engines, side by side on the same days (--engine both, the default):
+
+  setups   (live default) regime + setups on closed 3m candles (screener/setups.py);
+           enter on a fresh setup, either side; whole position booked at +20%;
+           SL = setup stop → premium (5–15%) minus 15 pts NIFTY / 30 pts SENSEX;
+           opposite setup exits and flips; 15:15 square-off
+  score    the old ±5 score on 5m candles (details below)
+
+The score engine, as before:
+
 At every 5-minute candle close (09:30–15:00) it scores the closed 5m candles with
 the same analyze_df pipeline chart_bot uses, then applies the bot's rules:
 
@@ -43,10 +53,14 @@ sys.path.insert(0, str(pathlib.Path(__file__).parent.parent))
 import pandas as pd
 
 from screener.chart_analysis import _INDEX_TOKENS, analyze_df, front_future_token
-from screener.kite_order import (LOT_SIZE, SL_MAX_PCT, SL_MIN_PCT, T1_MIN_PCT,
-                                 _spot_to_option_levels, _tick)
+from screener import setups as _setups
+from screener.kite_order import (BOOK_PROFIT_PCT, LOT_SIZE, SL_MAX_PCT, SL_MIN_PCT, T1_MIN_PCT,
+                                 _spot_to_option_levels, _tick, book_levels)
+from scripts import backtest_chart as _bt
 from scripts.backtest_chart import _fetch
 from scripts import chart_bot as cb
+
+_bt._MAX_DAYS_PER_CALL.setdefault("3minute", 90)
 
 _ROOT = pathlib.Path(__file__).parent.parent
 _IST  = datetime.timezone(datetime.timedelta(hours=5, minutes=30))
@@ -187,12 +201,124 @@ def run_variant(name: str, v: dict, sig: pd.DataFrame, bars: dict, lots: int, ve
     return pd.DataFrame(trades), pd.DataFrame(skips)
 
 
-def _with_future_volume(symbol: str, df5: pd.DataFrame, start, end, api_key, access_token) -> tuple:
+# ── Setups engine ────────────────────────────────────────────────────────────
+
+def build_setup_signals(symbol: str, df3: pd.DataFrame, days: list) -> pd.DataFrame:
+    """The setups engine's read at every 3m close (same detect() the bot calls)."""
+    rows = []
+    ends = df3.index + pd.Timedelta(minutes=3)
+    for di, day in enumerate(days):
+        steps = pd.date_range(f"{day} 09:21", f"{day} 15:27", freq="3min", tz="Asia/Kolkata")
+        for t in steps:
+            hist = df3[ends <= t].tail(600)
+            if len(hist) < 30 or hist.index[-1].date() != day:
+                continue
+            r = _setups.detect(hist)
+            rows.append({"t": t, "day": day, "symbol": symbol, "signal": r["signal"], "setup": r["setup"],
+                         "regime": r["regime"], "stop": r["stop"], "spot": r["spot"]})
+        print(f"  {symbol}: setups {day} ({di + 1}/{len(days)})", end="\r", flush=True)
+    print()
+    return pd.DataFrame(rows)
+
+
+def run_setups(sig: pd.DataFrame, bars: dict, lots: int, max_losses: int, verbose: bool) -> pd.DataFrame:
+    """Bar-by-bar on 3m candles: SL checked before target inside a bar (conservative)."""
+    trades = []
+    for (symbol, day), g in sig.groupby(["symbol", "day"]):
+        if symbol not in cb._TRADE_SYMBOLS:
+            continue
+        lot = LOT_SIZE.get(symbol, 1)
+        b = bars[symbol]
+        b = b[b.index.date == day]
+        g = g.set_index("t")
+        losses = {"CE": 0, "PE": 0}
+        pos, pending = None, None           # pending: (signal row, why) to act on at next open
+        for t, bar in b.iterrows():
+            close_t = t + pd.Timedelta(minutes=3)
+            if pos and (t.time() >= _SQUARE_OFF or pos.get("exit_next")):
+                why = "15:15 square-off" if t.time() >= _SQUARE_OFF else pos["exit_next"]
+                trades.append(_close(pos, _premium(pos["entry"], pos["spot"], bar["Open"], pos["d"]),
+                                     t, why, symbol, day, lot))
+                losses[pos["d"]] += trades[-1]["pnl"] < 0
+                if verbose:
+                    print(f"    {t:%H:%M} {symbol} EXIT {pos['d']} ({why}) → ₹{trades[-1]['pnl']:,.0f}")
+                pos = None
+            if pending is not None and pos is None and t.time() < _SQUARE_OFF:
+                s = pending
+                entry = _PREMIUM.get(symbol, 150.0)
+                sl, tgt = book_levels(symbol, s["signal"], s["spot"], entry, s["stop"], BOOK_PROFIT_PCT)
+                pos = {"d": s["signal"], "t": t, "spot": bar["Open"], "entry": entry, "sl": sl, "tgt": tgt,
+                       "qty": lots * lot, "setup": s["setup"], "exit_next": None}
+                if verbose:
+                    print(f"    {t:%H:%M} {symbol} ENTER {s['signal']} ({s['setup']}, {s['regime']}) "
+                          f"₹{entry:.0f}  SL ₹{sl}  book ₹{tgt}")
+            pending = None
+            if pos:
+                d = pos["d"]
+                adverse, favour = (bar["Low"], bar["High"]) if d == "CE" else (bar["High"], bar["Low"])
+                p_open = _premium(pos["entry"], pos["spot"], bar["Open"], d)
+                if _premium(pos["entry"], pos["spot"], adverse, d) <= pos["sl"]:
+                    px, why = min(pos["sl"], p_open), "stop loss"
+                elif _premium(pos["entry"], pos["spot"], favour, d) >= pos["tgt"]:
+                    px, why = max(pos["tgt"], p_open), "booked +20%"
+                else:
+                    px = None
+                if px is not None:
+                    trades.append(_close(pos, px, t, why, symbol, day, lot))
+                    losses[d] += trades[-1]["pnl"] < 0
+                    if verbose:
+                        print(f"    {t:%H:%M} {symbol} EXIT {d} ({why}) → ₹{trades[-1]['pnl']:,.0f}")
+                    pos = None
+            if close_t not in g.index:
+                continue
+            s = g.loc[close_t]
+            if not isinstance(s["signal"], str):      # None / NaN = no setup
+                continue
+            if pos:
+                if s["signal"] != pos["d"]:
+                    pos["exit_next"] = f"reversal ({s['setup']} {s['signal']})"
+                    if _SIG_OPEN <= close_t.time() <= _SIG_CLOSE:
+                        pending = s
+                continue
+            if not (_SIG_OPEN <= close_t.time() <= _SIG_CLOSE):
+                continue
+            if max_losses and losses[s["signal"]] >= max_losses:
+                continue
+            pending = s
+    return pd.DataFrame(trades)
+
+
+def _close(pos: dict, px: float, t, why: str, symbol: str, day, lot: int) -> dict:
+    pnl = pos["qty"] * (px - pos["entry"])
+    return {"engine": "setups", "symbol": symbol, "day": day, "dir": pos["d"], "setup": pos["setup"],
+            "entry_t": pos["t"].strftime("%H:%M"), "exit_t": t.strftime("%H:%M"),
+            "entry": round(pos["entry"], 1), "exit": round(px, 1), "sl": pos["sl"], "target": pos["tgt"],
+            "exit_reason": why, "pnl": round(pnl), "win": pnl > 0}
+
+
+def _engine_summary(tr: pd.DataFrame, all_days: list, cost: float) -> dict:
+    n = len(tr)
+    if not n:
+        return {"trades": 0, "trades/day": 0, "days w/o trade": len(all_days), "win %": "—",
+                "avg win ₹": "—", "avg loss ₹": "—", "P&L after costs ₹": 0, "worst day ₹": "—"}
+    net = tr["pnl"] - cost
+    by_day = net.groupby([tr["symbol"], tr["day"]]).sum()
+    traded = set(zip(tr["symbol"], tr["day"]))
+    return {"trades": n, "trades/day": round(n / max(1, len(all_days)), 1),
+            "days w/o trade": sum(1 for k in all_days if k not in traded),
+            "win %": f"{(net > 0).mean() * 100:.0f}%",
+            "avg win ₹": f"{net[net > 0].mean():,.0f}" if (net > 0).any() else "—",
+            "avg loss ₹": f"{net[net <= 0].mean():,.0f}" if (net <= 0).any() else "—",
+            "P&L after costs ₹": f"{net.sum():,.0f}", "worst day ₹": f"{by_day.min():,.0f}"}
+
+
+def _with_future_volume(symbol: str, df5: pd.DataFrame, start, end, api_key, access_token,
+                        interval: str = "5minute") -> tuple:
     tok = front_future_token(symbol, api_key, access_token)
     if not tok:
         return df5, 0.0
     try:
-        fut = _fetch(tok, "5minute", start, end, api_key, access_token)
+        fut = _fetch(tok, interval, start, end, api_key, access_token)
     except Exception:
         return df5, 0.0
     vol = fut["Volume"].reindex(df5.index).fillna(0) if not fut.empty else None
@@ -208,90 +334,106 @@ def main() -> None:
     ap.add_argument("symbols", nargs="*", default=["NIFTY", "SENSEX"])
     ap.add_argument("--days", type=int, default=20, help="Trading days to replay (default 20)")
     ap.add_argument("--day", help="Replay only this date (YYYY-MM-DD)")
-    ap.add_argument("--lots", type=int, default=2, help="Lots per trade (default 2, so T1 books half)")
-    ap.add_argument("-v", "--verbose", action="store_true", help="Print every entry / skip / exit (live rules)")
+    ap.add_argument("--engine", choices=["both", "setups", "score"], default="both")
+    ap.add_argument("--lots", type=int, default=2, help="Lots per trade (default 2)")
+    ap.add_argument("--cost", type=float, default=100.0,
+                    help="₹ brokerage + taxes per round trip, deducted per trade (default 100)")
+    ap.add_argument("--max-losses", type=int, default=cb.SETUP_MAX_LOSSES,
+                    help="Setups: losses per direction before it stops for the day (0 = off)")
+    ap.add_argument("-v", "--verbose", action="store_true", help="Print every entry / exit")
     args = ap.parse_args()
 
     api_key, access_token = cb._kite_creds()
     if not (api_key and access_token):
         sys.exit("KITE_API_KEY / KITE_ACCESS_TOKEN missing")
-    today = datetime.datetime.now(_IST).date()
+    now = datetime.datetime.now(_IST)
+    today = now.date()
     end = datetime.date.fromisoformat(args.day) if args.day else today
-    start = end - datetime.timedelta(days=int(args.days * 1.5) + 30)
+    start = end - datetime.timedelta(days=int(args.days * 1.5) + 20)
+    want_setups, want_score = args.engine in ("both", "setups"), args.engine in ("both", "score")
 
-    sigs, bars = [], {}
+    def _days(df):
+        all_d = sorted(set(df.index.date))
+        if args.day:
+            return [end]
+        return [d for d in all_d if d < today or now.time() > datetime.time(15, 30)][-args.days:]
+
+    sig3, sig5, bars3, bars5, sym_days = [], [], {}, {}, []
     for sym in [s.upper() for s in args.symbols]:
         tok = _INDEX_TOKENS.get(sym)
         if not tok:
             print(f"{sym}: only NIFTY / BANKNIFTY / SENSEX are supported")
             continue
-        print(f"Fetching {sym} 5m history…")
-        df5 = _fetch(tok, "5minute", start, end, api_key, access_token)
-        if df5.empty:
-            print(f"{sym}: no data")
-            continue
-        df5, cov = _with_future_volume(sym, df5, start, end, api_key, access_token)
-        print(f"  futures volume on {cov:.0%} of candles (rest: price-only VWAP)")
-        all_days = sorted(set(df5.index.date))
-        days = [end] if args.day else [d for d in all_days if d < today or
-                                       datetime.datetime.now(_IST).time() > datetime.time(15, 30)][-args.days:]
-        bars[sym] = df5
-        sigs.append(build_signals(sym, df5, days))
-    if not sigs:
-        return
-    sig = pd.concat(sigs, ignore_index=True)
-
-    summary, all_trades, all_skips = {}, [], []
-    for name, v in VARIANTS.items():
-        if args.verbose and name == "live":
-            print("\nLive rules, decision by decision:")
-        tr, sk = run_variant(name, v, sig, bars, args.lots, args.verbose and name == "live")
-        all_trades.append(tr)
-        all_skips.append(sk)
-        n = len(tr)
-        summary[name] = {
-            "trades": n,
-            "win %": f"{tr['win'].mean() * 100:.0f}%" if n else "—",
-            "est P&L ₹": f"{tr['pnl'].sum():,.0f}" if n else "0",
-            "worst ₹": f"{tr['pnl'].min():,.0f}" if n else "—",
-            "STRONG skipped": len(sk),
-        }
-
-    strong = sig[(sig["direction"] != "WAIT") & (sig["score"].abs() >= cb.MIN_TRADE_SCORE)
-                 & sig["symbol"].isin(cb._TRADE_SYMBOLS)]
-    live_tr, live_sk = all_trades[0], all_skips[0]
-
-    print(f"\n{'=' * 72}\nDay by day — live rules ({args.lots} lots/trade)\n{'=' * 72}")
-    rows = []
-    for (sym, day), g in sig[sig["symbol"].isin(cb._TRADE_SYMBOLS)].groupby(["symbol", "day"]):
-        t_ = live_tr[(live_tr["symbol"] == sym) & (live_tr["day"] == day)] if not live_tr.empty else live_tr
-        s_ = live_sk[(live_sk["symbol"] == sym) & (live_sk["day"] == day)] if not live_sk.empty else live_sk
-        st_ = strong[(strong["symbol"] == sym) & (strong["day"] == day)]
-        rows.append({"day": str(day), "symbol": sym,
-                     "max |score|": int(g["score"].abs().max()),
-                     "STRONG scans": len(st_), "trades": len(t_),
-                     "est P&L ₹": int(t_["pnl"].sum()) if len(t_) else 0,
-                     "skipped (why)": "; ".join(f"{k} ×{c}" for k, c in s_["reason"].str.replace(r"[\d.]+ <", "<", regex=True)
-                                                .value_counts().items()) if len(s_) else "",
-                     "flag": "NO TRADE" if not len(t_) else ""})
-    print(pd.DataFrame(rows).to_string(index=False))
-
-    print(f"\n{'=' * 72}\nVariants (same signals)\n{'=' * 72}")
-    print(pd.DataFrame(summary).T.to_string())
-    if not live_tr.empty:
-        print("\nLive-rule exits:", ", ".join(f"{k} {c}" for k, c in live_tr["exit_reason"]
-                                              .str.replace(r" \(.*", "", regex=True).value_counts().items()))
-    no_trade = sum(1 for r in rows if r["flag"])
-    print(f"\n{no_trade} of {len(rows)} symbol-days had no trade under the live rules.")
+        if want_setups:
+            print(f"Fetching {sym} 3m history…")
+            df3 = _fetch(tok, "3minute", start, end, api_key, access_token)
+            if df3.empty:
+                print(f"{sym}: no 3m data")
+            else:
+                df3, cov = _with_future_volume(sym, df3, start, end, api_key, access_token, "3minute")
+                print(f"  futures volume on {cov:.0%} of 3m candles")
+                days = _days(df3)
+                sym_days += [(sym, d) for d in days if sym in cb._TRADE_SYMBOLS]
+                bars3[sym] = df3
+                sig3.append(build_setup_signals(sym, df3, days))
+        if want_score:
+            print(f"Fetching {sym} 5m history…")
+            df5 = _fetch(tok, "5minute", start, end, api_key, access_token)
+            if df5.empty:
+                print(f"{sym}: no 5m data")
+                continue
+            df5, cov = _with_future_volume(sym, df5, start, end, api_key, access_token)
+            print(f"  futures volume on {cov:.0%} of 5m candles")
+            days = _days(df5)
+            if not want_setups:
+                sym_days += [(sym, d) for d in days if sym in cb._TRADE_SYMBOLS]
+            bars5[sym] = df5
+            sig5.append(build_signals(sym, df5, days))
 
     out = _ROOT / "data"
     out.mkdir(exist_ok=True)
-    pd.concat(all_trades, ignore_index=True).to_csv(out / "replay_trades.csv", index=False)
-    pd.concat(all_skips, ignore_index=True).to_csv(out / "replay_skips.csv", index=False)
-    sig.to_csv(out / "replay_signals.csv", index=False)
-    print(f"Details → {out}/replay_trades.csv, replay_skips.csv, replay_signals.csv")
-    print("P&L uses delta 0.5 on a typical ATM premium and ignores theta/IV — compare variants, "
-          "don't read it as exact rupees.")
+    engines, trades_by = {}, {}
+    if sig3:
+        if args.verbose:
+            print("\nSetups engine, decision by decision:")
+        tr = run_setups(pd.concat(sig3, ignore_index=True), bars3, args.lots, args.max_losses, args.verbose)
+        trades_by["setups (live)"] = tr
+        engines["setups (live)"] = _engine_summary(tr, sym_days, args.cost)
+        tr.to_csv(out / "replay_setups_trades.csv", index=False)
+    if sig5:
+        sig = pd.concat(sig5, ignore_index=True)
+        tr, sk = run_variant("live", VARIANTS["live"], sig, bars5, args.lots, args.verbose and not sig3)
+        trades_by["score (old)"] = tr
+        engines["score (old)"] = _engine_summary(tr, sym_days, args.cost)
+        tr.to_csv(out / "replay_score_trades.csv", index=False)
+
+    if not engines:
+        return
+    print(f"\n{'=' * 78}\nDay by day ({args.lots} lots/trade, ₹{args.cost:.0f} costs per trade)\n{'=' * 78}")
+    rows = []
+    for sym, day in sym_days:
+        row = {"day": str(day), "symbol": sym}
+        for name, tr in trades_by.items():
+            t_ = tr[(tr["symbol"] == sym) & (tr["day"] == day)] if not tr.empty else tr
+            short = name.split()[0]
+            row[f"{short} trades"] = len(t_)
+            row[f"{short} ₹"] = int((t_["pnl"] - args.cost).sum()) if len(t_) else 0
+        rows.append(row)
+    print(pd.DataFrame(rows).to_string(index=False))
+
+    print(f"\n{'=' * 78}\nEngines compared\n{'=' * 78}")
+    print(pd.DataFrame(engines).T.to_string())
+    if "setups (live)" in trades_by and not trades_by["setups (live)"].empty:
+        st = trades_by["setups (live)"]
+        print("\nSetups engine by setup:")
+        print(st.groupby("setup").agg(trades=("pnl", "size"), win_pct=("win", "mean"),
+                                      pnl=("pnl", "sum")).assign(win_pct=lambda x: (x.win_pct * 100).round(0))
+              .to_string())
+        print("Exits:", ", ".join(f"{k} {c}" for k, c in st["exit_reason"].str.replace(r" \(.*", "", regex=True)
+                                     .value_counts().items()))
+    print(f"\nTrades → {out}/replay_setups_trades.csv, replay_score_trades.csv")
+    print("P&L uses delta 0.5 on a typical ATM premium (NIFTY ₹150, SENSEX ₹350), no theta/IV — "
+          "compare engines, don't read it as exact rupees.")
 
 
 if __name__ == "__main__":
