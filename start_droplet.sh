@@ -21,7 +21,12 @@ STREAMLIT="${STREAMLIT:-/root/venv/bin/streamlit}"
 export PYTHONUNBUFFERED=1
 
 # Export KITE_AUTO_TRADE from .env so bots can see it even if not in shell env
-_auto_trade_val=$(grep '^KITE_AUTO_TRADE=' .env 2>/dev/null | head -1 | cut -d= -f2 | tr -d '"'"'" | tr -d '[:space:]' || true)
+# Read NAME=value from .env, tolerating spaces around "=", quotes and Windows line endings
+_env_val() {
+    grep -E "^[[:space:]]*(export[[:space:]]+)?$1[[:space:]]*=" .env 2>/dev/null | tail -1 \
+        | cut -d= -f2- | tr -d '"'"'" | tr -d '[:space:]' || true
+}
+_auto_trade_val=$(_env_val KITE_AUTO_TRADE)
 if [ "$_auto_trade_val" = "1" ]; then
     export KITE_AUTO_TRADE=1
     echo "  KITE_AUTO_TRADE=1 (from .env)"
@@ -32,10 +37,14 @@ fi
 
 # TRADE_ONLY=1 in .env (second trading droplet): only the live feed + chart_bot run —
 # no dashboard, no alert bots, so the shared ntfy topic gets no duplicate alerts.
-_trade_only=$(grep '^TRADE_ONLY=' .env 2>/dev/null | head -1 | cut -d= -f2 | tr -d '"'"'" | tr -d '[:space:]' || true)
+_trade_only=$(_env_val TRADE_ONLY)
 
 echo "=== MarketPulse — Starting services ==="
-[ "$_trade_only" = "1" ] && echo "  TRADE_ONLY=1 — live feed + chart_bot only"
+if [ "$_trade_only" = "1" ]; then
+    echo "  TRADE_ONLY=1 — live feed + chart_bot only"
+else
+    echo "  TRADE_ONLY not set — starting everything (dashboard + alert bots too)"
+fi
 
 # ── Kill old processes ──────────────────────────────────────────────────────
 pkill -f ticker_daemon.py  2>/dev/null || true
