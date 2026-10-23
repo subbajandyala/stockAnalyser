@@ -246,3 +246,16 @@ Kite REST API
 ## Development branch
 
 Active development: `claude/sensex-option-moves-analysis-ma3tr7`
+
+### Reference branch: `chart-success`
+
+`chart-success` is a frozen copy of the working trading setup (commit `662b8e9`,
+23 Oct 2026): candles engine on 3m, book at +20%, ride mode, 6-min exit, SL buffer
+NIFTY 15 / SENSEX 30, lot cap NIFTY 2 / SENSEX 3, fill chasing, second account
+support, TRADE_ONLY droplet mode.
+
+- Never commit to `chart-success` unless the user explicitly asks.
+- Before changing trading logic on the active branch, compare against it
+  (`git diff chart-success -- <file>`) and say what differs from it.
+- To roll a droplet back: `git fetch origin chart-success && git checkout chart-success`
+  then `bash start_droplet.sh`.
