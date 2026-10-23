@@ -11,7 +11,8 @@ feed when the ticker daemon runs) against the previous candles, and names it:
   engulfing
   hammer / shooting star long lower / upper wick (≥ 2× body) at a recent low /
                          high, close in the top / bottom third      → CE / PE
-  small / doji / mixed   nothing to trade
+  small / doji / mixed   nothing to trade — "small" = range under MIN_RANGE_MULT
+                         (1.2) × the average of the last 10 candles
 
 Stop for the trade = the candle's low (CE) or high (PE); kite_order turns it
 into the option stop and subtracts the anti-hunt buffer.
@@ -24,6 +25,10 @@ import pandas as pd
 from screener.chart_analysis import _IST, fetch_candles, resolve_token
 
 MIN_AGE_SEC = 60          # a candle younger than this hasn't shown its shape yet
+# Only trade candles at least this many times the average range of the last 10.
+# 1.2 cut whipsaw / chop losses by about two-thirds in the stress test (23 Oct);
+# chart_bot sets it from CHART_CANDLE_MIN_MULT.
+MIN_RANGE_MULT = 1.2
 _LABEL = {
     "strong_bull": "Strong bull candle", "strong_bear": "Strong bear candle",
     "bull_engulf": "Bullish engulfing",  "bear_engulf": "Bearish engulfing",
@@ -44,8 +49,9 @@ def read(df: pd.DataFrame) -> dict:
     rng, body = h - l, cl - o
     avg = float((d["High"] - d["Low"]).iloc[-11:-1].mean()) or 1e-9
     res.update(spot=cl, candle_time=d.index[-1])
-    if rng <= 0 or rng < 0.6 * avg:
-        res["text"] = f"small candle ({rng:.1f} pts vs avg {avg:.1f}) — no trade"
+    if rng <= 0 or rng < MIN_RANGE_MULT * avg:
+        res["text"] = (f"small candle ({rng:.1f} pts, needs {MIN_RANGE_MULT:g}× avg {avg:.1f} "
+                       f"= {MIN_RANGE_MULT * avg:.1f}) — no trade")
         return res
     pos = (cl - l) / rng                       # 0 = closed at the low, 1 = at the high
     upper, lower = h - max(o, cl), min(o, cl) - l

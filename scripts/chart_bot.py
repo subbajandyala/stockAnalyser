@@ -5,7 +5,8 @@ Every 30 s (start_droplet.sh: --loop --interval 30) for NIFTY / SENSEX
 (BANKNIFTY alerts only). Quantity: 95% of the Kite balance, min 1 lot.
 
 Engine "candles" (default, CHART_ENGINE in .env) — screener/candles.py:
-  reads the 3-minute candle while it is forming. Strong bull / bear candle,
+  reads the 3-minute candle while it is forming. Only candles ≥ 1.2× the average
+  range (CHART_CANDLE_MIN_MULT) count. Strong bull / bear candle,
   engulfing, hammer / shooting star → buy CE / PE (either side, any time
   9:30–15:00 when that index has no bot trade open).
     SL      candle low / high → premium (5–15% below entry), then −15 pts NIFTY / −30 SENSEX
@@ -103,6 +104,7 @@ SETUP_TF = _env_setting("CHART_SETUP_TF") or "3m"
 CANDLE_TF       = _env_setting("CHART_CANDLE_TF") or "3m"
 CANDLE_BOOK_PCT = float(_env_setting("CHART_BOOK_PCT") or 0.20)
 SCALP_MAX_MIN   = int(_env_setting("CHART_SCALP_MAX_MIN") or 6)
+_candles.MIN_RANGE_MULT = float(_env_setting("CHART_CANDLE_MIN_MULT") or _candles.MIN_RANGE_MULT)
 # Setups engine: losing trades in one direction before that direction stops for
 # the day — 0 = never stop (grab every setup). Set CHART_MAX_LOSSES=2 to cap.
 SETUP_MAX_LOSSES = int(_env_setting("CHART_MAX_LOSSES") or 0)
@@ -159,8 +161,8 @@ def _auto_trade_enabled() -> bool:
 
 _AUTO_TRADE = _auto_trade_enabled()
 print(f"[chart_bot] AUTO_TRADE={'ON' if _AUTO_TRADE else 'OFF (set KITE_AUTO_TRADE=1 in .env to enable)'}"
-      + (f" | engine candles on {CANDLE_TF} | book at +{CANDLE_BOOK_PCT:.0%}, exit if not working in "
-         f"{SCALP_MAX_MIN} min" if ENGINE == "candles" else
+      + (f" | engine candles on {CANDLE_TF} (≥ {_candles.MIN_RANGE_MULT:g}× avg range) | book at "
+         f"+{CANDLE_BOOK_PCT:.0%}, exit if not working in {SCALP_MAX_MIN} min" if ENGINE == "candles" else
          f" | engine setups on {SETUP_TF} | book 100% at +{BOOK_PROFIT_PCT:.0%}" if ENGINE == "setups" else
          f" | engine score | signal chart {PRIMARY_TF} | confirm {CONFIRM_TF} | orders at score ±{MIN_TRADE_SCORE}"),
       flush=True)
@@ -1332,7 +1334,8 @@ def preflight(symbols: list[str], state_file: str, notify: bool = False) -> bool
     print(f"[{now_ist:%Y-%m-%d %H:%M IST}] chart_bot preflight — no orders are placed\n")
     add("PASS" if _AUTO_TRADE else "FAIL", "auto-trade", "ON" if _AUTO_TRADE else "OFF — set KITE_AUTO_TRADE=1 in .env")
     if ENGINE == "candles":
-        add("PASS", "rules", f"candles engine on {CANDLE_TF} (forming candle), book at +{CANDLE_BOOK_PCT:.0%}, "
+        add("PASS", "rules", f"candles engine on {CANDLE_TF} (forming candle, ≥ {_candles.MIN_RANGE_MULT:g}× avg "
+                             f"range), book at +{CANDLE_BOOK_PCT:.0%}, "
                              f"exit if not working after {SCALP_MAX_MIN} min, SL buffer NIFTY "
                              f"{_SL_EXTRA['NIFTY']:.0f} / SENSEX {_SL_EXTRA['SENSEX']:.0f} pts")
     elif ENGINE == "setups":

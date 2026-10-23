@@ -141,7 +141,7 @@ fetch_ohlcv_yf_compat(symbol, period="1y", interval="1d")  # drop-in for yf.down
 | `technical.py` | Breakout readiness |
 | `agent_flow.py` | Multi-timeframe OI + momentum → CALL/PUT/NO TRADE |
 | `sensex_option_moves.py` | SENSEX intraday option move signals |
-| `candles.py` | chart_bot default engine: reads the forming 3m candle (strong / engulfing / hammer / shooting star) → CE / PE |
+| `candles.py` | chart_bot default engine: reads the forming 3m candle (strong / engulfing / hammer / shooting star, range ≥ 1.2× avg) → CE / PE |
 | `setups.py` | chart_bot alternative engine: regime + setups on 3m (trend pullback, ORB, VWAP reclaim/reject, range fade) |
 | `open_low.py` | NIFTY100 Open=Low intraday momentum setups |
 | `elder_ray.py` | Elder Ray Bull/Bear Power multi-timeframe |
