@@ -30,7 +30,12 @@ else
     echo "  KITE_AUTO_TRADE=0 (auto-trade disabled)"
 fi
 
+# TRADE_ONLY=1 in .env (second trading droplet): only the live feed + chart_bot run —
+# no dashboard, no alert bots, so the shared ntfy topic gets no duplicate alerts.
+_trade_only=$(grep '^TRADE_ONLY=' .env 2>/dev/null | head -1 | cut -d= -f2 | tr -d '"'"'" | tr -d '[:space:]' || true)
+
 echo "=== MarketPulse — Starting services ==="
+[ "$_trade_only" = "1" ] && echo "  TRADE_ONLY=1 — live feed + chart_bot only"
 
 # ── Kill old processes ──────────────────────────────────────────────────────
 pkill -f ticker_daemon.py  2>/dev/null || true
@@ -47,6 +52,7 @@ echo "  ticker_daemon PID: $TICKER_PID"
 sleep 3
 
 # ── Start Streamlit ─────────────────────────────────────────────────────────
+if [ "$_trade_only" != "1" ]; then
 echo "Starting Streamlit on port 8501..."
 nohup "$STREAMLIT" run app.py \
     --server.port 8501 \
@@ -62,6 +68,7 @@ pkill -f cpr_adx_bot.py 2>/dev/null || true
 nohup "$PYTHON" -u scripts/cpr_adx_bot.py >> cpr_adx.log 2>&1 &
 CPR_PID=$!
 echo "  cpr_adx_bot PID: $CPR_PID"
+fi
 
 # ── Start Chart Analysis bot (15m+5m confirm, every 5 min) ──────────────────
 echo "Starting Chart Analysis bot..."
@@ -71,11 +78,13 @@ CHART_PID=$!
 echo "  chart_bot PID: $CHART_PID"
 
 # ── Start Agent Flow bot (OI + momentum, every 5 min) ────────────────────────
+if [ "$_trade_only" != "1" ]; then
 echo "Starting Agent Flow bot..."
 pkill -f agent_flow_bot.py 2>/dev/null || true
 nohup "$PYTHON" -u scripts/agent_flow_bot.py NIFTY BANKNIFTY SENSEX --loop >> agent_flow.log 2>&1 &
 AF_PID=$!
 echo "  agent_flow_bot PID: $AF_PID"
+fi
 
 echo ""
 echo "=== Done ==="

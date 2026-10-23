@@ -64,6 +64,10 @@ KITE2_PROXY=http://<ip>:8888  # Zerodha links each static IP to ONE account: acc
                               # calls go out through a tinyproxy relay on its whitelisted IP
 ```
 
+Alternative to KITE2_*: a separate trading droplet with its own `.env` (that account's
+details as `KITE_*`, `KITE_NAME=<name>` to tag its pushes, `TRADE_ONLY=1` so
+`start_droplet.sh` runs only `ticker_daemon.py` + `chart_bot.py` — no duplicate alerts).
+
 `~/.kite_creds.json` on the droplet holds `api_key`, `access_token`, and optionally `ntfy_agent_topic` / `telegram_bot_token` / `telegram_chat_id`.
 
 ---

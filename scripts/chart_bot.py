@@ -313,7 +313,9 @@ class _PerThreadStdout:
 def send_ntfy(title: str, body: str, topic: str, priority: str = "high") -> bool:
     if not topic:
         return False
-    tag = getattr(_CTX, "tag", "")
+    # Account name on every push — the thread's account when trading two, else KITE_NAME
+    # (a second droplet with its own bot shares the ntfy topic)
+    tag = getattr(_CTX, "tag", "") or _env_setting("KITE_NAME")
     if tag:
         title = f"[{tag}] {title}"
     try:
