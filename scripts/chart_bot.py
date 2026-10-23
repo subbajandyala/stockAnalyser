@@ -51,6 +51,7 @@ from kiteconnect import KiteConnect
 
 from screener.chart_analysis import analyze_chart
 from screener import candles as _candles
+from screener import kite_order as _ko
 from screener import setups as _setups
 from screener.kite_order import (
     BOOK_PROFIT_PCT,
@@ -65,7 +66,6 @@ from screener.kite_order import (
     sell_and_confirm,
 )
 from screener.kite_order import SL_EXTRA_PTS as _SL_EXTRA
-from screener import kite_order as _ko
 from screener.sharekhan_order import place_sk_order as _place_sk_order
 
 logging.basicConfig(
@@ -115,6 +115,11 @@ CANDLE_TF       = _env_setting("CHART_CANDLE_TF") or "3m"
 CANDLE_BOOK_PCT = float(_env_setting("CHART_BOOK_PCT") or 0.20)
 SCALP_MAX_MIN   = int(_env_setting("CHART_SCALP_MAX_MIN") or 6)
 _candles.MIN_RANGE_MULT = float(_env_setting("CHART_CANDLE_MIN_MULT") or _candles.MIN_RANGE_MULT)
+# Lot cap per order (0 = only the balance limits it)
+for _sym in list(_ko.MAX_LOTS):
+    _v = _env_setting(f"CHART_MAX_LOTS_{_sym}")
+    if _v.strip().isdigit():
+        _ko.MAX_LOTS[_sym] = int(_v)
 # Ride mode: a strong bull / bear candle at least this many times the average range
 # is not sold at +CANDLE_BOOK_PCT — the stop moves to entry +10% there and trails
 # 12% below the peak premium. 0 = off (every trade books at the target).
@@ -177,7 +182,9 @@ _AUTO_TRADE = _auto_trade_enabled()
 print(f"[chart_bot] AUTO_TRADE={'ON' if _AUTO_TRADE else 'OFF (set KITE_AUTO_TRADE=1 in .env to enable)'}"
       + (f" | engine candles on {CANDLE_TF} (≥ {_candles.MIN_RANGE_MULT:g}× avg range) | book at "
          f"+{CANDLE_BOOK_PCT:.0%}, exit if not working in {SCALP_MAX_MIN} min | ride "
-         + (f"strong candles ≥ {RIDE_MULT:g}× avg" if RIDE_MULT else "off") if ENGINE == "candles" else
+         + (f"strong candles ≥ {RIDE_MULT:g}× avg" if RIDE_MULT else "off")
+         + " | max lots " + ", ".join(f"{k} {v or 'no cap'}" for k, v in _ko.MAX_LOTS.items())
+         if ENGINE == "candles" else
          f" | engine setups on {SETUP_TF} | book 100% at +{BOOK_PROFIT_PCT:.0%}" if ENGINE == "setups" else
          f" | engine score | signal chart {PRIMARY_TF} | confirm {CONFIRM_TF} | orders at score ±{MIN_TRADE_SCORE}"),
       flush=True)
@@ -1522,7 +1529,9 @@ def preflight(symbols: list[str], state_file: str, notify: bool = False) -> bool
         add("PASS", "rules", f"candles engine on {CANDLE_TF} (forming candle, ≥ {_candles.MIN_RANGE_MULT:g}× avg "
                              f"range), book at +{CANDLE_BOOK_PCT:.0%}, "
                              f"exit if not working after {SCALP_MAX_MIN} min, ride "
-                             + (f"strong candles ≥ {RIDE_MULT:g}× avg" if RIDE_MULT else "off") + ", SL buffer NIFTY "
+                             + (f"strong candles ≥ {RIDE_MULT:g}× avg" if RIDE_MULT else "off")
+                             + ", max lots " + ", ".join(f"{k} {v or 'no cap'}" for k, v in _ko.MAX_LOTS.items())
+                             + ", SL buffer NIFTY "
                              f"{_SL_EXTRA['NIFTY']:.0f} / SENSEX {_SL_EXTRA['SENSEX']:.0f} pts")
     elif ENGINE == "setups":
         add("PASS", "rules", f"setups engine on {SETUP_TF}, book 100% at +{BOOK_PROFIT_PCT:.0%}, SL buffer "

@@ -139,6 +139,7 @@ fetch_ohlcv_yf_compat(symbol, period="1y", interval="1d")  # drop-in for yf.down
 - Only fires when `KITE_AUTO_TRADE=1`
 - Supported symbols: `NIFTY` (NFO, lot=65), `SENSEX` (BFO, lot=20)
 - Falls back to 1 lot if margin fetch fails (order always attempts to fire)
+- Lot cap per order: NIFTY 2, SENSEX 3 (`MAX_LOTS`; `.env` `CHART_MAX_LOTS_NIFTY` / `CHART_MAX_LOTS_SENSEX`, 0 = balance only)
 - GTT: SL = entry − scalp_stop_pts, Target = entry + scalp_target_pts
 
 ---

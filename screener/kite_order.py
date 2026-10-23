@@ -37,6 +37,14 @@ LOT_SIZE = {
     "SENSEX": 20,
 }
 
+# Most lots per order, whatever the balance (chart_bot overrides from .env:
+# CHART_MAX_LOTS_NIFTY / CHART_MAX_LOTS_SENSEX; 0 = no cap). Fewer if the
+# balance covers fewer; always at least 1 lot so a shortfall shows as a rejection.
+MAX_LOTS = {
+    "NIFTY":  2,
+    "SENSEX": 3,
+}
+
 
 _EXCHANGE = {
     "NIFTY":  "NFO",
@@ -230,7 +238,8 @@ def _resolve_tradingsymbol(
 
 
 def _calc_qty(kite: KiteConnect, symbol: str, ltp: float, capital_fraction: float = 1.0) -> int:
-    """Return total units to buy based on available cash (95% utilisation, min 1 lot).
+    """Return total units to buy based on available cash (95% utilisation, min 1 lot),
+    capped at MAX_LOTS[symbol].
 
     capital_fraction: 0.5 when splitting between two symbols, 1.0 for single trade.
     Falls back to 1 lot on zero balance or API error so order always fires.
@@ -251,9 +260,14 @@ def _calc_qty(kite: KiteConnect, symbol: str, ltp: float, capital_fraction: floa
     usable   = available * 0.95 * capital_fraction
     max_lots = int(usable / cost_per_lot)
     lots     = max(1, max_lots)
+    cap      = MAX_LOTS.get(symbol, 0)
+    capped   = bool(cap) and lots > cap
+    if capped:
+        lots = cap
     _LOG.info(
         f"Balance ₹{available:.0f} × 95% → "
         f"₹{usable:.0f} usable → {lots} lot(s) of {symbol} @ ₹{ltp} (₹{cost_per_lot:.0f}/lot)"
+        + (f" — capped at {cap} lots (balance allows {max_lots})" if capped else "")
     )
     return lots * lot
 
