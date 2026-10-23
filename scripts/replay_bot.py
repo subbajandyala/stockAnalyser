@@ -317,12 +317,15 @@ def build_candle_signals(symbol: str, df3: pd.DataFrame, days: list) -> pd.DataF
                 continue
             r = _candles.read(hist_all.iloc[max(0, i - 39): i + 1])
             rows.append({"t": t + pd.Timedelta(minutes=3), "day": day, "symbol": symbol, "signal": r["signal"],
-                         "setup": r["pattern"], "stop": r["stop"], "spot": r["spot"]})
+                         "setup": r["pattern"], "stop": r["stop"], "spot": r["spot"],
+                         "range_mult": r.get("range_mult", 0.0)})
     return pd.DataFrame(rows)
 
 
 def run_candles(sig: pd.DataFrame, bars: dict, lots: int, book_pct: float, max_min: int,
-                verbose: bool) -> pd.DataFrame:
+                verbose: bool, ride_mult: float = 0.0) -> pd.DataFrame:
+    """ride_mult > 0: strong candles ≥ ride_mult × avg range don't book at +book_pct —
+    the stop moves to entry +10% there and trails 12% below the peak premium."""
     trades = []
     for (symbol, day), g in sig.groupby(["symbol", "day"]):
         if symbol not in cb._TRADE_SYMBOLS:
@@ -349,7 +352,8 @@ def run_candles(sig: pd.DataFrame, bars: dict, lots: int, book_pct: float, max_m
                 p_open = _premium(pos["entry"], pos["spot"], bar["Open"], pos["d"])
                 held = (t - pos["t"]).total_seconds() / 60
                 why = ("15:15 square-off" if t.time() >= _SQUARE_OFF else pos["exit_next"]
-                       or ("not working" if held >= max_min and p_open < pos["entry"] * 1.02 else None))
+                       or ("not working" if held >= max_min and p_open < pos["entry"] * 1.02
+                           and not pos["trail"] else None))
                 if why:
                     p_, pos = pos, None
                     _done(p_, p_open, t, why)
@@ -357,20 +361,29 @@ def run_candles(sig: pd.DataFrame, bars: dict, lots: int, book_pct: float, max_m
                 a = pending
                 entry = _PREMIUM.get(symbol, 150.0)
                 sl, tgt = book_levels(symbol, a["signal"], a["spot"], entry, a["stop"], book_pct)
+                ride = bool(ride_mult and a["setup"] in ("strong_bull", "strong_bear")
+                            and a.get("range_mult", 0) >= ride_mult)
                 pos = {"d": a["signal"], "t": t, "spot": bar["Open"], "entry": entry, "sl": sl, "tgt": tgt,
-                       "qty": lots * lot, "setup": a["setup"], "exit_next": None, "candle": a["candle"]}
+                       "qty": lots * lot, "setup": a["setup"] + (" (ride)" if ride else ""), "exit_next": None,
+                       "candle": a["candle"], "ride": ride, "trail": False, "peak": entry}
                 if verbose:
-                    print(f"    {t:%H:%M} {symbol} ENTER {a['signal']} ({a['setup']}) ₹{entry:.0f}  SL ₹{sl}  "
-                          f"book ₹{tgt}")
+                    print(f"    {t:%H:%M} {symbol} ENTER {a['signal']} ({pos['setup']}) ₹{entry:.0f}  SL ₹{sl}  "
+                          + (f"ride from ₹{tgt}" if ride else f"book ₹{tgt}"))
             pending = None
             if pos:
                 d = pos["d"]
                 adverse, favour = (bar["Low"], bar["High"]) if d == "CE" else (bar["High"], bar["Low"])
                 p_open = _premium(pos["entry"], pos["spot"], bar["Open"], d)
+                p_fav = _premium(pos["entry"], pos["spot"], favour, d)
                 if _premium(pos["entry"], pos["spot"], adverse, d) <= pos["sl"]:
                     p_, pos = pos, None
-                    _done(p_, min(p_["sl"], p_open), t, "stop loss")
-                elif _premium(pos["entry"], pos["spot"], favour, d) >= pos["tgt"]:
+                    _done(p_, min(p_["sl"], p_open), t, "trailing stop" if p_["trail"] else "stop loss")
+                elif pos["ride"]:
+                    if pos["trail"] or p_fav >= pos["tgt"]:     # +book_pct reached → lock +10%, trail 12%
+                        pos["trail"] = True
+                        pos["peak"] = max(pos["peak"], p_fav)
+                        pos["sl"] = max(pos["sl"], _tick(max(pos["entry"] * 1.10, pos["peak"] * 0.88)))
+                elif p_fav >= pos["tgt"]:
                     p_, pos = pos, None
                     _done(p_, max(p_["tgt"], p_open), t, f"booked +{book_pct:.0%}")
             if close_t not in g.index:
@@ -443,6 +456,8 @@ def main() -> None:
                     help="₹ brokerage + taxes per round trip, deducted per trade (default 100)")
     ap.add_argument("--max-losses", type=int, default=cb.SETUP_MAX_LOSSES,
                     help="Setups: losses per direction before it stops for the day (0 = off)")
+    ap.add_argument("--ride-mult", type=float, default=cb.RIDE_MULT,
+                    help="Candles: strong candles ≥ this × avg range ride instead of booking (0 = off)")
     ap.add_argument("-v", "--verbose", action="store_true", help="Print every entry / exit")
     args = ap.parse_args()
 
@@ -504,11 +519,16 @@ def main() -> None:
     if sigc:
         if args.verbose:
             print("\nCandles engine, decision by decision:")
-        tr = run_candles(pd.concat(sigc, ignore_index=True), bars3, args.lots, cb.CANDLE_BOOK_PCT,
-                         cb.SCALP_MAX_MIN, args.verbose)
+        allc = pd.concat(sigc, ignore_index=True)
+        tr = run_candles(allc, bars3, args.lots, cb.CANDLE_BOOK_PCT, cb.SCALP_MAX_MIN, args.verbose,
+                         ride_mult=args.ride_mult)
         trades_by["candles (live)"] = tr
         engines["candles (live)"] = _engine_summary(tr, sym_days, args.cost)
         tr.to_csv(out / "replay_candles_trades.csv", index=False)
+        if args.ride_mult:
+            tr2 = run_candles(allc, bars3, args.lots, cb.CANDLE_BOOK_PCT, cb.SCALP_MAX_MIN, False, ride_mult=0)
+            trades_by["candles, no ride"] = tr2
+            engines["candles, no ride"] = _engine_summary(tr2, sym_days, args.cost)
     if sig3:
         if args.verbose and not sigc:
             print("\nSetups engine, decision by decision:")

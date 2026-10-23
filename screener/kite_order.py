@@ -502,6 +502,7 @@ def place_order_for_signal(
     chart_target: float | None = None,
     trailing: bool = False,
     book_pct: float | None = None,
+    ride: bool = False,
 ) -> dict:
     """
     Place ATM option order + GTT for the given signal.
@@ -510,6 +511,8 @@ def place_order_for_signal(
     take-profit activation level the caller manages (book half, trail the rest).
     book_pct=0.20: the GTT target is entry +20% (whole position booked there) and
     the SL is book_levels() — chart_sl is the setup's structure stop on the index.
+    ride=True (with book_pct): same SL, but the GTT target sits far away (3× entry);
+    the returned "t1" (+book_pct) is where the caller starts trailing instead.
 
     Args:
         symbol:           "NIFTY" or "SENSEX"
@@ -609,7 +612,7 @@ def place_order_for_signal(
     # bot (half booked, rest trailed), so the GTT's target leg sits far away.
     t1_price  = target_price
     gtt_target = target_price
-    if trailing:
+    if trailing or (book_pct and ride):
         gtt_target = _tick(max(entry_price * _TRAIL_FAR_TARGET_X, t1_price * 1.5))
     gtt_id = None
     try:
@@ -636,7 +639,7 @@ def place_order_for_signal(
         "target":        gtt_target,
         "t1":            t1_price,
         "gtt_id":        gtt_id,
-        "trade_mode":    "book" if book_pct else trade_mode,
+        "trade_mode":    ("ride" if ride else "book") if book_pct else trade_mode,
     }
 
 

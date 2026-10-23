@@ -11,6 +11,8 @@ Engine "candles" (default, CHART_ENGINE in .env) — screener/candles.py:
   9:30–15:00 when that index has no bot trade open).
     SL      candle low / high → premium (5–15% below entry), then −15 pts NIFTY / −30 SENSEX
     target  +20% (CHART_BOOK_PCT) — the GTT books the position; the next strong candle re-enters
+    ride    a strong bull / bear candle ≥ 2× the average range (CHART_RIDE_MULT, 0 = off)
+            is not sold at +20%: the stop moves to entry +10% there, then trails 12% below the peak
     early   opposite candle → exit and flip; not ≥ +2% after 6 min (CHART_SCALP_MAX_MIN) → exit
     15:15   square-off
 
@@ -105,6 +107,10 @@ CANDLE_TF       = _env_setting("CHART_CANDLE_TF") or "3m"
 CANDLE_BOOK_PCT = float(_env_setting("CHART_BOOK_PCT") or 0.20)
 SCALP_MAX_MIN   = int(_env_setting("CHART_SCALP_MAX_MIN") or 6)
 _candles.MIN_RANGE_MULT = float(_env_setting("CHART_CANDLE_MIN_MULT") or _candles.MIN_RANGE_MULT)
+# Ride mode: a strong bull / bear candle at least this many times the average range
+# is not sold at +CANDLE_BOOK_PCT — the stop moves to entry +10% there and trails
+# 12% below the peak premium. 0 = off (every trade books at the target).
+RIDE_MULT = float(_env_setting("CHART_RIDE_MULT") or 2.0)
 # Setups engine: losing trades in one direction before that direction stops for
 # the day — 0 = never stop (grab every setup). Set CHART_MAX_LOSSES=2 to cap.
 SETUP_MAX_LOSSES = int(_env_setting("CHART_MAX_LOSSES") or 0)
@@ -162,7 +168,8 @@ def _auto_trade_enabled() -> bool:
 _AUTO_TRADE = _auto_trade_enabled()
 print(f"[chart_bot] AUTO_TRADE={'ON' if _AUTO_TRADE else 'OFF (set KITE_AUTO_TRADE=1 in .env to enable)'}"
       + (f" | engine candles on {CANDLE_TF} (≥ {_candles.MIN_RANGE_MULT:g}× avg range) | book at "
-         f"+{CANDLE_BOOK_PCT:.0%}, exit if not working in {SCALP_MAX_MIN} min" if ENGINE == "candles" else
+         f"+{CANDLE_BOOK_PCT:.0%}, exit if not working in {SCALP_MAX_MIN} min | ride "
+         + (f"strong candles ≥ {RIDE_MULT:g}× avg" if RIDE_MULT else "off") if ENGINE == "candles" else
          f" | engine setups on {SETUP_TF} | book 100% at +{BOOK_PROFIT_PCT:.0%}" if ENGINE == "setups" else
          f" | engine score | signal chart {PRIMARY_TF} | confirm {CONFIRM_TF} | orders at score ±{MIN_TRADE_SCORE}"),
       flush=True)
@@ -488,6 +495,13 @@ def _manage_trade(kite, symbol: str, state: dict, trade_key: str,
                           f"{ts}: GTT placement failed ({e}). Set a stop loss in Kite manually.",
                           ntfy_topic, priority="urgent")
             return
+    if state.get(k("mode")) == "ride" and not state.get(k("trailing")):
+        # Before +20% a ride trade is a normal scalp: cut it if it isn't working
+        held_min = _minutes_between(state.get(k("entry_t"), ""), now_ist)
+        if held_min >= SCALP_MAX_MIN and ltp < entry * 1.02:
+            _exit_bot_position(kite, symbol, state, trade_key,
+                               f"not working — {held_min:.0f} min, {(ltp / entry - 1) * 100:+.1f}%", ntfy_topic)
+            return
     if state.get(k("mode")) in ("book", "scalp"):
         print(f"  [MONITOR] {symbol}: LTP ₹{ltp:.2f} ({(ltp / entry - 1) * 100:+.1f}%)  entry ₹{entry:.2f}  "
               f"SL ₹{sl:.2f}  book ₹{far:.2f} (+{(far / entry - 1) * 100:.0f}%, GTT)")
@@ -507,6 +521,8 @@ def _manage_trade(kite, symbol: str, state: dict, trade_key: str,
             return
         lot       = LOT_SIZE.get(symbol, 1)
         half      = (qty // lot // 2) * lot if qty // lot >= 2 else 0
+        if state.get(k("mode")) == "ride":
+            half = 0          # ride: keep the whole position, only lock the stop and trail
         remaining = qty - half
         new_sl    = _tick(max(entry * (1 + TRAIL_FLOOR_PCT), ltp * (1 - TRAIL_PCT)))
         far       = max(far, _tick(ltp * 2))
@@ -647,7 +663,7 @@ def _monitor_positions(
         recorded_direction = direction or recorded_direction
         if not recorded_direction:
             continue
-        if state.get(f"{trade_key}:mode") == "scalp":
+        if state.get(f"{trade_key}:mode") in ("scalp", "ride"):
             cres = _candles.scan(symbol, CANDLE_TF, api_key, access_token)
             if not cres.get("error") and cres.get("signal") and cres["signal"] != recorded_direction:
                 _exit_bot_position(kite, symbol, state, trade_key,
@@ -722,9 +738,12 @@ def _scan_candles(symbols: list[str], state: dict, api_key: str, access_token: s
                 _append_chart_log(today, _setup_log_entry(now_ist, symbol, view, "signal only"))
             continue
 
-        print(f"  [AUTO-TRADE] {res['label']} → {sig} on {symbol} @ {res['spot']:.0f} (candle stop {res['stop']})")
+        ride = bool(RIDE_MULT and res.get("pattern") in ("strong_bull", "strong_bear")
+                    and res.get("range_mult", 0) >= RIDE_MULT)
+        print(f"  [AUTO-TRADE] {res['label']} → {sig} on {symbol} @ {res['spot']:.0f} (candle stop {res['stop']})"
+              + (f" — RIDE ({res['range_mult']:.1f}× avg candle)" if ride else ""))
         trade = _place_order(symbol, sig, res["spot"], api_key, access_token,
-                             chart_sl=res["stop"], book_pct=CANDLE_BOOK_PCT)
+                             chart_sl=res["stop"], book_pct=CANDLE_BOOK_PCT, ride=ride)
         if "error" in trade:
             print(f"  [AUTO-TRADE] NOT PLACED — {trade['error']}")
             if ntfy_topic and state.get(f"{today}:{symbol}:err_candle") != candle:
@@ -746,21 +765,26 @@ def _scan_candles(symbols: list[str], state: dict, api_key: str, access_token: s
             f"{trade_key}:t1": trade.get("t1", 0),
             f"{trade_key}:trailing": False,
             f"{trade_key}:direction": sig,
-            f"{trade_key}:mode": "scalp",
+            f"{trade_key}:mode": "ride" if ride else "scalp",
             f"{trade_key}:candle": candle,
             f"{trade_key}:entry_t": now_ist.strftime("%H:%M"),
         })
         state[symbol] = f"{today}:{symbol}:{sig}:{res['label']}"
         entry, sl, tgt = trade["entry_price"], trade["sl"], trade["target"]
+        t1 = trade.get("t1", tgt)
+        plan = (f"ride: at ₹{t1} (+{CANDLE_BOOK_PCT:.0%}) stop → entry +10%, then trails 12% below the peak"
+                if ride else f"book ₹{tgt} (+{CANDLE_BOOK_PCT:.0%})")
         print(f"  [AUTO-TRADE] ORDER — {trade['tradingsymbol']} | qty {trade['qty']} | entry ₹{entry} "
-              f"| SL ₹{sl} | book ₹{tgt}")
-        _append_chart_log(today, _setup_log_entry(now_ist, symbol, view, "placed", trade))
+              f"| SL ₹{sl} | {plan}")
+        _append_chart_log(today, _setup_log_entry(now_ist, symbol, view, "placed (ride)" if ride else "placed",
+                                                  trade))
         if ntfy_topic:
-            send_ntfy(f"Chart ORDER PLACED: {trade['tradingsymbol']}",
-                      (f"{res['label']} → {sig}\n"
+            send_ntfy(f"Chart ORDER PLACED: {trade['tradingsymbol']}" + (" — RIDE" if ride else ""),
+                      (f"{res['label']} → {sig}" + (f" ({res['range_mult']:.1f}× avg candle)" if ride else "")
+                       + "\n"
                        f"Qty   : {trade['qty']}\n"
                        f"Entry : ₹{entry}\n"
-                       f"Book  : ₹{tgt} (+{CANDLE_BOOK_PCT:.0%})\n"
+                       f"Exit  : {plan}\n"
                        f"SL    : ₹{sl} (candle stop − {int(_SL_EXTRA.get(symbol, 15))} pts)\n"
                        f"Exit early: opposite candle, or not working after {SCALP_MAX_MIN} min"),
                       ntfy_topic)
@@ -1336,7 +1360,8 @@ def preflight(symbols: list[str], state_file: str, notify: bool = False) -> bool
     if ENGINE == "candles":
         add("PASS", "rules", f"candles engine on {CANDLE_TF} (forming candle, ≥ {_candles.MIN_RANGE_MULT:g}× avg "
                              f"range), book at +{CANDLE_BOOK_PCT:.0%}, "
-                             f"exit if not working after {SCALP_MAX_MIN} min, SL buffer NIFTY "
+                             f"exit if not working after {SCALP_MAX_MIN} min, ride "
+                             + (f"strong candles ≥ {RIDE_MULT:g}× avg" if RIDE_MULT else "off") + ", SL buffer NIFTY "
                              f"{_SL_EXTRA['NIFTY']:.0f} / SENSEX {_SL_EXTRA['SENSEX']:.0f} pts")
     elif ENGINE == "setups":
         add("PASS", "rules", f"setups engine on {SETUP_TF}, book 100% at +{BOOK_PROFIT_PCT:.0%}, SL buffer "

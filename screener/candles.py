@@ -39,7 +39,7 @@ _LABEL = {
 def read(df: pd.DataFrame) -> dict:
     """Name the LAST candle of df (it may still be forming) → signal CE / PE / None."""
     res = {"signal": None, "pattern": None, "label": "", "stop": None, "spot": None,
-           "candle_time": None, "text": ""}
+           "candle_time": None, "text": "", "range_mult": 0.0}
     if df is None or len(df) < 12:
         res["text"] = "not enough candles"
         return res
@@ -48,7 +48,7 @@ def read(df: pd.DataFrame) -> dict:
     o, h, l, cl = float(c["Open"]), float(c["High"]), float(c["Low"]), float(c["Close"])
     rng, body = h - l, cl - o
     avg = float((d["High"] - d["Low"]).iloc[-11:-1].mean()) or 1e-9
-    res.update(spot=cl, candle_time=d.index[-1])
+    res.update(spot=cl, candle_time=d.index[-1], range_mult=round(rng / avg, 2))
     if rng <= 0 or rng < MIN_RANGE_MULT * avg:
         res["text"] = (f"small candle ({rng:.1f} pts, needs {MIN_RANGE_MULT:g}× avg {avg:.1f} "
                        f"= {MIN_RANGE_MULT * avg:.1f}) — no trade")
@@ -78,7 +78,7 @@ def read(df: pd.DataFrame) -> dict:
     side = "CE" if pattern in ("bull_engulf", "strong_bull", "hammer") else "PE"
     res.update(signal=side, pattern=pattern, label=_LABEL[pattern], stop=round(l if side == "CE" else h, 2))
     res["text"] = (f"{_LABEL[pattern]} → BUY {side} (O {o:,.1f} H {h:,.1f} L {l:,.1f} C {cl:,.1f}, "
-                   f"range {rng:.1f} vs avg {avg:.1f})")
+                   f"range {rng:.1f} = {rng / avg:.1f}× avg {avg:.1f})")
     return res
 
 
