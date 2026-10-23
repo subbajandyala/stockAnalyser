@@ -16,6 +16,11 @@ Engine "candles" (default, CHART_ENGINE in .env) — screener/candles.py:
     early   opposite candle → exit and flip; not ≥ +2% after 6 min (CHART_SCALP_MAX_MIN) → exit
     15:15   square-off
 
+Second Kite account (candles engine): KITE2_API_KEY, KITE2_ACCESS_TOKEN (auto_token.py
+writes it), KITE2_AUTO_TRADE=1, optional KITE2_NAME / KITE2_NTFY_TOPIC in .env. Both accounts
+trade the same candle at the same moment (one thread each), each with its own balance,
+GTTs, exits and state file (chart_bot_state_kite2.json). The Sharekhan copy follows account 1.
+
 Engine "setups": regime + setups on 3m, book at +20%.  Engine "score": old ±5 score.
 
 Set KITE_AUTO_TRADE=1 to enable auto order execution.
@@ -34,7 +39,9 @@ import os
 import pathlib
 import re
 import sys
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 
 sys.path.insert(0, str(pathlib.Path(__file__).parent.parent))
 
@@ -229,11 +236,67 @@ def _ntfy_topic() -> str:
     return t
 
 
+# ── Accounts ─────────────────────────────────────────────────────────────────
+# Account 1 = KITE_* (also the market-data account). Account 2 = KITE2_* in .env,
+# traded at the same moment (candles engine) with its own balance, GTTs and state.
+# auto_token.py refreshes KITE2_ACCESS_TOKEN at 08:00 next to KITE_ACCESS_TOKEN.
+
+_CTX = threading.local()          # the account a worker thread is trading for
+
+
+def _accounts() -> list[dict]:
+    key, tok = _kite_creds()
+    accts = [{"id": "kite1", "name": _env_setting("KITE_NAME") or "Kite 1", "api_key": key,
+              "access_token": tok, "ntfy": _ntfy_topic(), "auto_trade": _AUTO_TRADE,
+              "primary": True, "suffix": ""}]
+    k2 = _env_setting("KITE2_API_KEY")
+    if k2:
+        accts.append({"id": "kite2", "name": _env_setting("KITE2_NAME") or "Kite 2", "api_key": k2,
+                      "access_token": _env_setting("KITE2_ACCESS_TOKEN"),
+                      "ntfy": _env_setting("KITE2_NTFY_TOPIC") or _ntfy_topic(),
+                      "auto_trade": _env_setting("KITE2_AUTO_TRADE") == "1",
+                      "primary": False, "suffix": "_kite2"})
+    return accts
+
+
+def _acct() -> dict:
+    """Account of the current worker thread ({} outside a worker = single-account run)."""
+    return getattr(_CTX, "acct", None) or {}
+
+
+def _acct_state_file(state_file: str, acct: dict) -> str:
+    if not acct.get("suffix"):
+        return state_file
+    p = pathlib.Path(state_file)
+    return str(p.with_name(p.stem + acct["suffix"] + p.suffix))
+
+
+class _PerThreadStdout:
+    """While two accounts run in parallel, each thread's prints are collected and
+    written as one block per account, so the log never interleaves."""
+    def __init__(self, real):
+        self.real = real
+
+    def write(self, text):
+        buf = getattr(_CTX, "buf", None)
+        return buf.append(text) if buf is not None else self.real.write(text)
+
+    def flush(self):
+        if getattr(_CTX, "buf", None) is None:
+            self.real.flush()
+
+    def __getattr__(self, name):
+        return getattr(self.real, name)
+
+
 # ── Notification ──────────────────────────────────────────────────────────────
 
 def send_ntfy(title: str, body: str, topic: str, priority: str = "high") -> bool:
     if not topic:
         return False
+    tag = getattr(_CTX, "tag", "")
+    if tag:
+        title = f"[{tag}] {title}"
     try:
         r = requests.post(
             f"https://ntfy.sh/{topic}",
@@ -362,7 +425,20 @@ def _chart_log_path(date_str: str) -> pathlib.Path:
     return pathlib.Path(f"/tmp/chart_bot_log_{date_str}.json")
 
 
+_LOG_LOCK = threading.Lock()
+
+
 def _append_chart_log(date_str: str, entry: dict) -> None:
+    acct = _acct()
+    if acct and not acct.get("primary"):
+        if not str(entry.get("auto_trade", "")).startswith(("placed", "skipped")):
+            return                    # signal rows are already logged for account 1
+        entry = {**entry, "_key": f"{entry.get('_key')}:{acct['id']}", "account": acct["name"]}
+    with _LOG_LOCK:
+        _append_chart_log_unlocked(date_str, entry)
+
+
+def _append_chart_log_unlocked(date_str: str, entry: dict) -> None:
     path = _chart_log_path(date_str)
     try:
         log = json.loads(path.read_text()) if path.exists() else {"date": date_str, "signals": []}
@@ -664,7 +740,7 @@ def _monitor_positions(
         if not recorded_direction:
             continue
         if state.get(f"{trade_key}:mode") in ("scalp", "ride"):
-            cres = _candles.scan(symbol, CANDLE_TF, api_key, access_token)
+            cres = _read_candle(symbol, api_key, access_token, now_ist)
             if not cres.get("error") and cres.get("signal") and cres["signal"] != recorded_direction:
                 _exit_bot_position(kite, symbol, state, trade_key,
                                    f"opposite candle — {cres['label']} against the {recorded_direction} trade",
@@ -704,13 +780,22 @@ def _monitor_positions(
 
 # ── Candles engine scan ──────────────────────────────────────────────────────
 
+_CANDLE_CACHE: dict = {}          # symbol → this scan's reading (filled before the account workers)
+
+
+def _read_candle(symbol: str, api_key: str, access_token: str, now_ist: datetime.datetime) -> dict:
+    if symbol not in _CANDLE_CACHE:
+        _CANDLE_CACHE[symbol] = _candles.scan(symbol, CANDLE_TF, api_key, access_token, now=now_ist)
+    return _CANDLE_CACHE[symbol]
+
+
 def _scan_candles(symbols: list[str], state: dict, api_key: str, access_token: str,
                   ntfy_topic: str, now_ist: datetime.datetime) -> None:
     """Read the forming candle; a strong candle on a flat index → buy that side."""
     today = now_ist.strftime("%Y-%m-%d")
     log_tick = now_ist.minute % 5 == 0 and now_ist.second < 30
     for symbol in symbols:
-        res = _candles.scan(symbol, CANDLE_TF, api_key, access_token, now=now_ist)
+        res = _read_candle(symbol, api_key, access_token, now_ist)
         if res.get("error"):
             print(f"  {symbol} {CANDLE_TF}: ERROR — {res['error']}")
             continue
@@ -730,7 +815,8 @@ def _scan_candles(symbols: list[str], state: dict, api_key: str, access_token: s
         if candle == state.get(f"{today}:{symbol}:lost_candle"):
             print(f"         [{symbol}] already lost on this candle — waiting for the next one")
             continue
-        if not (_AUTO_TRADE and symbol in _TRADE_SYMBOLS):
+        auto = _acct().get("auto_trade", _AUTO_TRADE)
+        if not (auto and symbol in _TRADE_SYMBOLS):
             if state.get(f"{today}:{symbol}:alerted_candle") != candle:
                 state[f"{today}:{symbol}:alerted_candle"] = candle
                 if ntfy_topic:
@@ -788,6 +874,8 @@ def _scan_candles(symbols: list[str], state: dict, api_key: str, access_token: s
                        f"SL    : ₹{sl} (candle stop − {int(_SL_EXTRA.get(symbol, 15))} pts)\n"
                        f"Exit early: opposite candle, or not working after {SCALP_MAX_MIN} min"),
                       ntfy_topic)
+        if not _acct().get("primary", True):
+            continue          # the Sharekhan copy follows account 1 only
         try:
             sk = _place_sk_order(symbol, sig, res["spot"], option_ltp=entry, option_sl=sl, option_target=tgt)
             print(f"  [SHAREKHAN] " + (f"SKIPPED — {sk['error']}" if "error" in sk else f"ORDER — {sk['order_id']}"))
@@ -944,9 +1032,68 @@ def _scan_setups(symbols: list[str], state: dict, api_key: str, access_token: st
 
 # ── Single scan ───────────────────────────────────────────────────────────────
 
+def _prepare_state(state: dict, today: str) -> None:
+    """Carry open trades from earlier days to today's keys; prune everything else that is stale."""
+    for key in [k for k in state if re.fullmatch(r"\d{4}-\d{2}-\d{2}:\w+:trade", k)]:
+        day, sym, _ = key.split(":")
+        new_key = f"{today}:{sym}:trade"
+        if day < today and new_key not in state:
+            for old in [k for k in list(state) if k == key or k.startswith(key + ":")]:
+                state[new_key + old[len(key):]] = state.pop(old)
+            print(f"  [STATE] Carried open {sym} trade from {day} forward")
+    stale = [k for k in state if k[:10].count("-") == 2 and k[:10] < today]
+    for k in stale:
+        state.pop(k, None)
+    if stale:
+        print(f"  [STATE] Pruned {len(stale)} entries from previous days")
+
+
+def _account_pass(acct: dict, symbols: list[str], state_file: str, now_ist: datetime.datetime,
+                  force: bool) -> None:
+    """One account's turn: manage its open trades, then enter on this scan's candles."""
+    path = _acct_state_file(state_file, acct)
+    state = _load_state(path)
+    _prepare_state(state, now_ist.strftime("%Y-%m-%d"))
+    key, tok, topic = acct["api_key"], acct["access_token"], acct["ntfy"]
+    _monitor_positions(symbols, state, key, tok, topic, now_ist)
+    _save_state(path, state)
+    if not force and not (SIGNAL_OPEN <= now_ist.time() <= SIGNAL_CLOSE):
+        print(f"Outside clean signal window ({SIGNAL_OPEN}–{SIGNAL_CLOSE} IST) — skipping new signals.")
+        return
+    _scan_candles(symbols, state, key, tok, topic, now_ist)
+    _save_state(path, state)
+
+
+def _run_accounts(accts: list[dict], symbols: list[str], state_file: str,
+                  now_ist: datetime.datetime, force: bool) -> None:
+    """Every account trades this scan's candles at the same moment (one thread each)."""
+    if len(accts) == 1:
+        _account_pass(accts[0], symbols, state_file, now_ist, force)
+        return
+    if not isinstance(sys.stdout, _PerThreadStdout):
+        sys.stdout = _PerThreadStdout(sys.stdout)
+
+    def work(acct):
+        _CTX.acct, _CTX.tag, _CTX.buf = acct, acct["name"], []
+        try:
+            _account_pass(acct, symbols, state_file, now_ist, force)
+        except Exception as e:
+            print(f"  ERROR — {e}")
+        finally:
+            out, _CTX.buf, _CTX.acct, _CTX.tag = "".join(_CTX.buf), None, None, ""
+        return acct["name"], out
+
+    with ThreadPoolExecutor(max_workers=len(accts)) as pool:
+        results = list(pool.map(work, accts))
+    for name, out in results:
+        for line in out.rstrip("\n").splitlines():
+            print(f"[{name}] {line}")
+
+
 def scan_once(symbols: list[str], state_file: str, force: bool = False) -> None:
-    api_key, access_token = _kite_creds()
-    ntfy_topic = _ntfy_topic()
+    accounts = _accounts()
+    api_key, access_token = accounts[0]["api_key"], accounts[0]["access_token"]
+    ntfy_topic = accounts[0]["ntfy"]
 
     if not (api_key and access_token):
         print("ERROR: KITE_API_KEY and KITE_ACCESS_TOKEN required.")
@@ -963,24 +1110,22 @@ def scan_once(symbols: list[str], state_file: str, force: bool = False) -> None:
         print("Market closed — skipping.")
         return
 
-    state = _load_state(state_file)
-    today = now_ist.strftime("%Y-%m-%d")
+    if ENGINE == "candles":
+        ready = [a for a in accounts if a["api_key"] and a["access_token"]]
+        for a in accounts:
+            if a not in ready and now_ist.minute % 5 == 0 and now_ist.second < 30:
+                print(f"  [{a['name']}] no access token in .env — skipped (auto_token.py refreshes it at 08:00)")
+        # Read each candle once with account 1's market data; every account trades the same reading
+        _CANDLE_CACHE.clear()
+        for sym in symbols:
+            _read_candle(sym, api_key, access_token, now_ist)
+        _run_accounts(ready, symbols, state_file, now_ist, force)
+        print("Done.")
+        return
 
-    # Carry trades from earlier days forward so they are still managed (square-off,
-    # trailing) — the monitor only looks at today's keys.
-    for key in [k for k in state if re.fullmatch(r"\d{4}-\d{2}-\d{2}:\w+:trade", k)]:
-        day, sym, _ = key.split(":")
-        new_key = f"{today}:{sym}:trade"
-        if day < today and new_key not in state:
-            for old in [k for k in list(state) if k == key or k.startswith(key + ":")]:
-                state[new_key + old[len(key):]] = state.pop(old)
-            print(f"  [STATE] Carried open {sym} trade from {day} forward")
-    # Prune everything else dated before today
-    stale = [k for k in state if k[:10].count("-") == 2 and k[:10] < today]
-    for k in stale:
-        state.pop(k, None)
-    if stale:
-        print(f"  [STATE] Pruned {len(stale)} entries from previous days")
+    state = _load_state(state_file)
+    _prepare_state(state, now_ist.strftime("%Y-%m-%d"))
+    today = now_ist.strftime("%Y-%m-%d")
 
     # Monitor existing open positions before scanning for new signals
     _monitor_positions(symbols, state, api_key, access_token, ntfy_topic, now_ist)
@@ -991,11 +1136,6 @@ def scan_once(symbols: list[str], state_file: str, force: bool = False) -> None:
         print(f"Outside clean signal window ({SIGNAL_OPEN}–{SIGNAL_CLOSE} IST) — skipping new signals.")
         return
 
-    if ENGINE == "candles":
-        _scan_candles(symbols, state, api_key, access_token, ntfy_topic, now_ist)
-        _save_state(state_file, state)
-        print("Done.")
-        return
     if ENGINE == "setups":
         _scan_setups(symbols, state, api_key, access_token, ntfy_topic, now_ist)
         _save_state(state_file, state)
@@ -1437,22 +1577,7 @@ def preflight(symbols: list[str], state_file: str, notify: bool = False) -> bool
             except Exception as e:
                 add("FAIL", f"{sym} {opt} contract", str(e))
 
-    # Open positions vs GTTs — a GTT on a contract we don't hold would open a short
-    try:
-        held = {p["tradingsymbol"]: int(p["quantity"]) for p in kite.positions().get("net", [])
-                if int(p.get("quantity", 0)) != 0}
-        gtts = [g for g in kite.get_gtts() if g.get("status") == "active"]
-        orphans = [g for g in gtts if g.get("condition", {}).get("tradingsymbol") not in held]
-        unprotected = [ts for ts, q in held.items() if q > 0 and
-                       not any(g.get("condition", {}).get("tradingsymbol") == ts for g in gtts)]
-        add("PASS", "positions", ", ".join(f"{ts} {q}" for ts, q in held.items()) or "none open")
-        add("FAIL" if orphans else "PASS", "orphan GTTs",
-            ", ".join(f"{g['id']} {g['condition']['tradingsymbol']}" for g in orphans) + " — delete in Kite"
-            if orphans else "none")
-        add("WARN" if unprotected else "PASS", "positions w/o GTT",
-            ", ".join(unprotected) + " — no stop loss" if unprotected else "none")
-    except Exception as e:
-        add("FAIL", "positions / GTTs", str(e))
+    _pf_positions(kite, add)
 
     try:
         state = _load_state(state_file)
@@ -1461,6 +1586,29 @@ def preflight(symbols: list[str], state_file: str, notify: bool = False) -> bool
                                   + (", ".join(open_trades) if open_trades else "none"))
     except Exception as e:
         add("FAIL", "state file", str(e))
+
+    for acct in _accounts()[1:]:
+        n = acct["name"]
+        add("PASS" if acct["auto_trade"] else "WARN", f"{n}: auto-trade",
+            "ON" if acct["auto_trade"] else "OFF — set KITE2_AUTO_TRADE=1 in .env")
+        if not acct["access_token"]:
+            add("FAIL", f"{n}: kite token", "KITE2_ACCESS_TOKEN missing — run auto_token.py")
+            continue
+        k2 = KiteConnect(api_key=acct["api_key"])
+        k2.set_access_token(acct["access_token"])
+        try:
+            add("PASS", f"{n}: kite token", f"valid ({k2.profile().get('user_id', '?')})")
+        except Exception as e:
+            add("FAIL", f"{n}: kite token", f"{e} — run auto_token.py")
+            continue
+        try:
+            add("PASS", f"{n}: balance", f"₹{float(k2.margins()['equity']['available']['live_balance']):,.0f}")
+        except Exception as e:
+            add("WARN", f"{n}: balance", f"margin fetch failed ({e}) — orders will use 1 lot")
+        _pf_positions(k2, add, f"{n}: ")
+        st2 = _load_state(_acct_state_file(state_file, acct))
+        open2 = [k for k in st2 if re.fullmatch(r"\d{4}-\d{2}-\d{2}:\w+:trade", k)]
+        add("PASS", f"{n}: state file", "open bot trades: " + (", ".join(open2) if open2 else "none"))
 
     try:
         with open("/tmp/chart_bot_loop.lock", "w") as lf:
@@ -1471,6 +1619,25 @@ def preflight(symbols: list[str], state_file: str, notify: bool = False) -> bool
         add("PASS", "chart_bot loop", "running")
 
     return _preflight_report(results, topic, notify)
+
+
+def _pf_positions(kite, add, label: str = "") -> None:
+    """Open positions vs GTTs — a GTT on a contract we don't hold would open a short."""
+    try:
+        held = {p["tradingsymbol"]: int(p["quantity"]) for p in kite.positions().get("net", [])
+                if int(p.get("quantity", 0)) != 0}
+        gtts = [g for g in kite.get_gtts() if g.get("status") == "active"]
+        orphans = [g for g in gtts if g.get("condition", {}).get("tradingsymbol") not in held]
+        unprotected = [ts for ts, q in held.items() if q > 0 and
+                       not any(g.get("condition", {}).get("tradingsymbol") == ts for g in gtts)]
+        add("PASS", f"{label}positions", ", ".join(f"{ts} {q}" for ts, q in held.items()) or "none open")
+        add("FAIL" if orphans else "PASS", f"{label}orphan GTTs",
+            ", ".join(f"{g['id']} {g['condition']['tradingsymbol']}" for g in orphans) + " — delete in Kite"
+            if orphans else "none")
+        add("WARN" if unprotected else "PASS", f"{label}positions w/o GTT",
+            ", ".join(unprotected) + " — no stop loss" if unprotected else "none")
+    except Exception as e:
+        add("FAIL", f"{label}positions / GTTs", str(e))
 
 
 def _preflight_report(results: list, topic: str, notify: bool) -> bool:
@@ -1537,6 +1704,9 @@ if __name__ == "__main__":
             print("Another chart_bot --loop is already running — exiting.")
             sys.exit(0)
         print(f"Chart bot loop started — scanning every {args.interval}s")
+        for _a in _accounts():
+            print(f"  account {_a['name']}: auto-trade {'ON' if _a['auto_trade'] else 'OFF'}"
+                  + ("" if _a["access_token"] else " — no access token yet (auto_token.py at 08:00)"))
         while True:
             try:
                 scan_once(symbols, args.state_file, force=args.force)

@@ -8,3 +8,4 @@ kite_creds.json
 data/
 chart_bot_shadow_state.json
 .watchdog_off
+chart_bot_state*.json

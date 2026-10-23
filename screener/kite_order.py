@@ -138,9 +138,13 @@ def gtt_leg_prices(sl: float, target: float) -> tuple[float, float]:
 
 
 @contextlib.contextmanager
-def _order_lock():
-    """Cross-process advisory lock — held only during position-check + order placement."""
-    with open(_ORDER_LOCK_PATH, "w") as _f:
+def _order_lock(api_key: str = ""):
+    """Cross-process advisory lock — held only during position-check + order placement.
+
+    One lock per Kite account, so two accounts can place orders at the same moment.
+    """
+    path = _ORDER_LOCK_PATH if not api_key else _ORDER_LOCK_PATH.replace(".lock", f"_{api_key[-6:]}.lock")
+    with open(path, "w") as _f:
         fcntl.flock(_f, fcntl.LOCK_EX)
         try:
             yield
@@ -535,7 +539,7 @@ def place_order_for_signal(
 
     kite = _kite_client(api_key, access_token)
 
-    with _order_lock():
+    with _order_lock(api_key):
         # 1. Resolve ATM tradingsymbol
         strike = _atm_strike(spot, symbol)
         ts = _resolve_tradingsymbol(kite, symbol, strike, opt_type)
@@ -787,7 +791,7 @@ def place_rsi_scalp_order(
     exchange = _EXCHANGE[symbol]
     kite = _kite_client(api_key, access_token)
 
-    with _order_lock():
+    with _order_lock(api_key):
         # MIS only — chart_bot NRML positions never block RSI scalp and vice versa
         open_pos = has_open_position(kite, symbol, product="MIS")
         if open_pos is None:

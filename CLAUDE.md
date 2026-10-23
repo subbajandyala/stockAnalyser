@@ -49,6 +49,17 @@ KITE_PASSWORD=...
 KITE_TOTP_SECRET=...        # base32 TOTP secret from Kite Account Security page
 KITE_AUTO_TRADE=1           # set to 1 to enable live order execution
 NTFY_TOPIC=...              # ntfy.sh topic for push notifications
+
+# Optional second Kite account — trades the same candles at the same moment
+KITE2_NAME=...              # label on its log lines and pushes
+KITE2_USER_ID=...
+KITE2_PASSWORD=...
+KITE2_TOTP_SECRET=...
+KITE2_API_KEY=...           # its own Kite Connect app
+KITE2_API_SECRET=...
+KITE2_ACCESS_TOKEN=...      # written by auto_token.py at 08:00
+KITE2_AUTO_TRADE=1
+KITE2_NTFY_TOPIC=...        # optional; defaults to NTFY_TOPIC
 ```
 
 `~/.kite_creds.json` on the droplet holds `api_key`, `access_token`, and optionally `ntfy_agent_topic` / `telegram_bot_token` / `telegram_chat_id`.
