@@ -12,7 +12,8 @@ feed when the ticker daemon runs) against the previous candles, and names it:
   hammer / shooting star long lower / upper wick (≥ 2× body) at a recent low /
                          high, close in the top / bottom third      → CE / PE
   small / doji / mixed   nothing to trade — "small" = range under MIN_RANGE_MULT
-                         (1.2) × the average of the last 10 candles
+                         (1.2) × the normal range (median of the last 20 candles,
+                         today's 09:15–09:30 opening candles left out)
 
 Stop for the trade = the candle's low (CE) or high (PE); kite_order turns it
 into the option stop and subtracts the anti-hunt buffer.
@@ -25,7 +26,10 @@ import pandas as pd
 from screener.chart_analysis import _IST, fetch_candles, resolve_token
 
 MIN_AGE_SEC = 60          # a candle younger than this hasn't shown its shape yet
-# Only trade candles at least this many times the average range of the last 10.
+OPENING_END = datetime.time(9, 30)   # opening candles are outsized — kept out of "normal size"
+AVG_CANDLES = 20
+# Only trade candles at least this many times the normal range (median of the last 20,
+# today's 09:15–09:30 candles left out).
 # 1.2 cut whipsaw / chop losses by about two-thirds in the stress test (23 Oct);
 # chart_bot sets it from CHART_CANDLE_MIN_MULT.
 MIN_RANGE_MULT = 1.2
@@ -34,6 +38,21 @@ _LABEL = {
     "bull_engulf": "Bullish engulfing",  "bear_engulf": "Bearish engulfing",
     "hammer":      "Hammer",             "shooting_star": "Shooting star",
 }
+
+
+def _normal_range(d: pd.DataFrame) -> float:
+    """Median range of the last AVG_CANDLES candles before the current one.
+
+    Today's opening candles (09:15–09:30) are left out once enough others exist:
+    on 23 Oct they pushed a plain 10-candle mean to 45 pts on NIFTY (normal ≈ 15–25),
+    so nothing qualified all morning. A median also ignores the odd spike candle.
+    """
+    prior = d.iloc[:-1]
+    today = d.index[-1].date()
+    keep = ~((prior.index.date == today) & (prior.index.time < OPENING_END))
+    if keep.sum() >= 10:
+        prior = prior[keep]
+    return float((prior["High"] - prior["Low"]).tail(AVG_CANDLES).median()) or 1e-9
 
 
 def read(df: pd.DataFrame) -> dict:
@@ -47,7 +66,7 @@ def read(df: pd.DataFrame) -> dict:
     c, p = d.iloc[-1], d.iloc[-2]
     o, h, l, cl = float(c["Open"]), float(c["High"]), float(c["Low"]), float(c["Close"])
     rng, body = h - l, cl - o
-    avg = float((d["High"] - d["Low"]).iloc[-11:-1].mean()) or 1e-9
+    avg = _normal_range(d)
     res.update(spot=cl, candle_time=d.index[-1], range_mult=round(rng / avg, 2))
     if rng <= 0 or rng < MIN_RANGE_MULT * avg:
         res["text"] = (f"small candle ({rng:.1f} pts, needs {MIN_RANGE_MULT:g}× avg {avg:.1f} "
