@@ -154,10 +154,23 @@ def _order_lock(api_key: str = ""):
 
 # ── Internal helpers ───────────────────────────────────────────────────
 
-def _kite_client(api_key: str, access_token: str) -> KiteConnect:
-    k = KiteConnect(api_key=api_key)
-    k.set_access_token(access_token)
+# api_key → HTTP proxy URL. Zerodha links each static IP to one account, so a second
+# account's calls go out through a relay on its own whitelisted IP (KITE2_PROXY).
+ACCOUNT_PROXIES: dict[str, str] = {}
+
+
+def kite_for(api_key: str, access_token: str = "", proxy: str | None = None) -> KiteConnect:
+    """KiteConnect client; routed through the account's proxy when it has one."""
+    proxy = proxy if proxy is not None else ACCOUNT_PROXIES.get(api_key, "")
+    k = (KiteConnect(api_key=api_key, proxies={"http": proxy, "https": proxy}) if proxy
+         else KiteConnect(api_key=api_key))
+    if access_token:
+        k.set_access_token(access_token)
     return k
+
+
+def _kite_client(api_key: str, access_token: str) -> KiteConnect:
+    return kite_for(api_key, access_token)
 
 
 def _atm_strike(spot: float, symbol: str) -> int:

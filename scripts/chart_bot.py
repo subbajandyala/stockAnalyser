@@ -65,6 +65,7 @@ from screener.kite_order import (
     sell_and_confirm,
 )
 from screener.kite_order import SL_EXTRA_PTS as _SL_EXTRA
+from screener import kite_order as _ko
 from screener.sharekhan_order import place_sk_order as _place_sk_order
 
 logging.basicConfig(
@@ -253,10 +254,28 @@ def _accounts() -> list[dict]:
     if k2:
         accts.append({"id": "kite2", "name": _env_setting("KITE2_NAME") or "Kite 2", "api_key": k2,
                       "access_token": _env_setting("KITE2_ACCESS_TOKEN"),
+                      "proxy": _env_setting("KITE2_PROXY"),
                       "ntfy": _env_setting("KITE2_NTFY_TOPIC") or _ntfy_topic(),
                       "auto_trade": _env_setting("KITE2_AUTO_TRADE") == "1",
                       "primary": False, "suffix": "_kite2"})
     return accts
+
+
+def _kite(api_key: str, access_token: str):
+    """Kite client for an account — through its proxy (KITE2_PROXY) when it has one."""
+    proxy = _ko.ACCOUNT_PROXIES.get(api_key, "")
+    k = KiteConnect(api_key=api_key, proxies={"http": proxy, "https": proxy}) if proxy else KiteConnect(api_key=api_key)
+    k.set_access_token(access_token)
+    return k
+
+
+def _register_proxies(accts: list[dict]) -> None:
+    """Orders placed through kite_order use the same proxy as the bot's own calls."""
+    for a in accts:
+        if a.get("proxy"):
+            _ko.ACCOUNT_PROXIES[a["api_key"]] = a["proxy"]
+        else:
+            _ko.ACCOUNT_PROXIES.pop(a["api_key"], None)
 
 
 def _acct() -> dict:
@@ -666,8 +685,7 @@ def _monitor_positions(
     """
     today = now_ist.strftime("%Y-%m-%d")
 
-    kite = KiteConnect(api_key=api_key)
-    kite.set_access_token(access_token)
+    kite = _kite(api_key, access_token)
 
     for symbol in symbols:
         trade_key = f"{today}:{symbol}:trade"
@@ -1092,6 +1110,7 @@ def _run_accounts(accts: list[dict], symbols: list[str], state_file: str,
 
 def scan_once(symbols: list[str], state_file: str, force: bool = False) -> None:
     accounts = _accounts()
+    _register_proxies(accounts)
     api_key, access_token = accounts[0]["api_key"], accounts[0]["access_token"]
     ntfy_topic = accounts[0]["ntfy"]
 
@@ -1594,8 +1613,15 @@ def preflight(symbols: list[str], state_file: str, notify: bool = False) -> bool
         if not acct["access_token"]:
             add("FAIL", f"{n}: kite token", "KITE2_ACCESS_TOKEN missing — run auto_token.py")
             continue
-        k2 = KiteConnect(api_key=acct["api_key"])
-        k2.set_access_token(acct["access_token"])
+        if acct.get("proxy"):
+            try:
+                via = requests.get("https://api.ipify.org", timeout=10,
+                                   proxies={"http": acct["proxy"], "https": acct["proxy"]}).text.strip()
+                add("PASS", f"{n}: order IP", f"{via} via {acct['proxy']} — must match this app's IP whitelist")
+            except Exception as e:
+                add("FAIL", f"{n}: order IP", f"proxy {acct['proxy']} unreachable ({e}) — orders will fail")
+        _register_proxies([acct])
+        k2 = _kite(acct["api_key"], acct["access_token"])
         try:
             add("PASS", f"{n}: kite token", f"valid ({k2.profile().get('user_id', '?')})")
         except Exception as e:

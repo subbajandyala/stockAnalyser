@@ -60,6 +60,8 @@ KITE2_API_SECRET=...
 KITE2_ACCESS_TOKEN=...      # written by auto_token.py at 08:00
 KITE2_AUTO_TRADE=1
 KITE2_NTFY_TOPIC=...        # optional; defaults to NTFY_TOPIC
+KITE2_PROXY=http://<ip>:8888  # Zerodha links each static IP to ONE account: account 2's
+                              # calls go out through a tinyproxy relay on its whitelisted IP
 ```
 
 `~/.kite_creds.json` on the droplet holds `api_key`, `access_token`, and optionally `ntfy_agent_topic` / `telegram_bot_token` / `telegram_chat_id`.
