@@ -273,6 +273,64 @@ def _fill_price(kite: KiteConnect, order_id: str, exchange: str, ts: str) -> tup
     return 0.0, "not filled within 8s — cancelled"
 
 
+ENTRY_LIMIT_PCT     = 0.02   # buy limit: option LTP + 2%
+ENTRY_CHASE_MAX_PCT = 0.05   # if unfilled after 4 s, re-price to the new LTP + 2%, never above first LTP + 5%
+
+
+def _fill_chasing(kite: KiteConnect, order_id: str, exchange: str, ts: str, qty: int,
+                  price: float, cap: float) -> tuple[float, int, str]:
+    """Wait up to 8 s for an entry fill → (avg_price, filled_qty, reason).
+
+    On a fast candle the premium can run past the first limit (21 Oct live: a
+    3.7× candle left a +1% limit unfilled). After 4 s the limit is moved up to
+    the fresh LTP + 2%, capped at `cap`. Still open at 8 s → cancelled; a part
+    fill is returned as filled so the caller protects what was bought.
+    """
+    def last():
+        hist = kite.order_history(order_id)
+        return hist[-1] if hist else {}
+
+    for i in range(4):
+        time.sleep(2)
+        try:
+            h = last()
+        except Exception:
+            continue
+        status, filled = h.get("status", ""), int(h.get("filled_quantity") or 0)
+        if status == "COMPLETE" and h.get("average_price", 0) > 0:
+            return float(h["average_price"]), filled or qty, ""
+        if status in ("REJECTED", "CANCELLED"):
+            if filled and h.get("average_price", 0) > 0:
+                return float(h["average_price"]), filled, ""
+            reason = h.get("status_message") or h.get("status_message_raw") or ""
+            _LOG.warning(f"Order {order_id} {status}: {reason}")
+            return 0.0, 0, f"Kite {status}: {reason}".strip(": ")
+        if i == 1:                                   # 4 s, still open → chase once
+            try:
+                ltp = float(kite.ltp([f"{exchange}:{ts}"])[f"{exchange}:{ts}"]["last_price"])
+                new = _tick(min(ltp * (1 + ENTRY_LIMIT_PCT), cap))
+                if new > price:
+                    kite.modify_order(variety=kite.VARIETY_REGULAR, order_id=order_id,
+                                      order_type=kite.ORDER_TYPE_LIMIT, price=new)
+                    _LOG.info(f"Order {order_id} not filled at ₹{price} — limit moved to ₹{new}")
+                    price = new
+            except Exception as e:
+                _LOG.warning(f"Could not re-price order {order_id}: {e}")
+    try:
+        kite.cancel_order(variety=kite.VARIETY_REGULAR, order_id=order_id)
+        _LOG.warning(f"Order {order_id} not filled in 8s — cancelled")
+    except Exception as e:
+        _LOG.warning(f"Could not cancel unfilled order {order_id}: {e}")
+    try:                                             # a part fill before the cancel still counts
+        h = last()
+        filled = int(h.get("filled_quantity") or 0)
+        if filled and h.get("average_price", 0) > 0:
+            return float(h["average_price"]), filled, ""
+    except Exception:
+        pass
+    return 0.0, 0, f"not filled within 8s (limit up to ₹{price}) — cancelled"
+
+
 # ── Public API ───────────────────────────────────────────────────────────────
 
 def has_open_position(
@@ -546,7 +604,7 @@ def place_order_for_signal(
         if not ts:
             return {"error": f"Could not find tradingsymbol for {symbol} {strike} {opt_type}"}
 
-        # 3. Fetch option LTP and compute limit price (1% above to ensure fill)
+        # 3. Fetch option LTP and compute limit price (2% above; chased up to +5% if unfilled)
         try:
             ltp_data = kite.ltp([f"{exchange}:{ts}"])
             option_ltp = float(ltp_data[f"{exchange}:{ts}"]["last_price"])
@@ -554,7 +612,7 @@ def place_order_for_signal(
             return {"error": f"Could not fetch option LTP for {ts}: {e}"}
 
         # Round to nearest 0.05 (NSE tick size for options)
-        limit_price = round(round(option_ltp * 1.01 / 0.05) * 0.05, 2)
+        limit_price = _tick(option_ltp * (1 + ENTRY_LIMIT_PCT))
 
         # Dynamic lot sizing based on available balance and capital fraction
         qty = _calc_qty(kite, symbol, option_ltp, capital_fraction)
@@ -578,11 +636,15 @@ def place_order_for_signal(
 
     _LOG.info(f"Order placed: {order_id}")
 
-    # 5. Confirm the fill — no GTT for a rejected / unfilled order
-    entry_price, reason = _fill_price(kite, order_id, exchange, ts)
+    # 5. Confirm the fill (chasing a fast premium) — no GTT for a rejected / unfilled order
+    entry_price, filled, reason = _fill_chasing(kite, order_id, exchange, ts, qty, limit_price,
+                                                _tick(option_ltp * (1 + ENTRY_CHASE_MAX_PCT)))
     if not entry_price:
         return {"error": f"Order {order_id} for {qty} × {ts} {reason}", "sent": True,
                 "order_id": order_id, "tradingsymbol": ts}
+    if filled < qty:
+        _LOG.warning(f"Order {order_id} part-filled {filled}/{qty} — protecting the {filled} held")
+        qty = filled
 
     # 6. SL and target — chart-derived levels preferred; fall back to scalp/ride
     chart_levels = None
