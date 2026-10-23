@@ -91,14 +91,24 @@ def _get_access_token(user_id: str, password: str, totp_secret: str,
     _log("Password login OK")
 
     # 2. TOTP
-    totp_code = pyotp.TOTP(totp_secret).now()
+    secret = re.sub(r"[\s-]", "", totp_secret).upper()   # setup key is often copied with spaces
+    if len(secret) < 16 or not re.fullmatch(r"[A-Z2-7]+=*", secret):
+        raise RuntimeError(f"TOTP_SECRET doesn't look like a Kite TOTP setup key "
+                           f"({len(secret)} chars) — paste the 32-letter key, not a 6-digit code")
+    totp_code = pyotp.TOTP(secret).now()
     r = sess.post("https://kite.zerodha.com/api/twofa", data={
         "user_id":      user_id,
         "request_id":   request_id,
         "twofa_value":  totp_code,
         "twofa_type":   "totp",
     })
-    r.raise_for_status()
+    if not r.ok:
+        try:
+            msg = r.json().get("message", r.text)
+        except ValueError:
+            msg = r.text
+        raise RuntimeError(f"2FA rejected by Kite ({r.status_code}): {msg} — check TOTP_SECRET is the "
+                           f"current setup key and the server clock is right")
     body = r.json()
     if body.get("status") != "success":
         raise RuntimeError(f"2FA failed: {body}")
