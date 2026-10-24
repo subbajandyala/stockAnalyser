@@ -127,7 +127,11 @@ def _get_access_token(user_id: str, password: str, totp_secret: str,
             request_token = m.group(1)
             break
     if not request_token:
-        raise RuntimeError(f"request_token not found. Final URL: {r.url}")
+        hint = ""
+        if "/connect/authorize" in r.url:
+            hint = (" — this app has never been authorized: open https://kite.zerodha.com/connect/login"
+                    f"?v=3&api_key={api_key} in a browser, log in as this account, tap Authorize, then rerun")
+        raise RuntimeError(f"request_token not found. Final URL: {r.url}{hint}")
     _log(f"request_token: {request_token[:8]}…")
 
     # 4. Generate access token
