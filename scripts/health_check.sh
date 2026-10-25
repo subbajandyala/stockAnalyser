@@ -45,6 +45,9 @@ ln=$(envv CHART_MAX_LOTS_NIFTY); ls=$(envv CHART_MAX_LOTS_SENSEX)
 ok "lot cap" "NIFTY ${ln:-default 2}, SENSEX ${ls:-default 3} (0 = 95% of balance)"
 if [ "$trade_only" = "1" ]; then ok mode "TRADE_ONLY (feed + chart_bot)"
 else ok mode "full (dashboard + alert bots) — expected only on the main machine"; fi
+if grep -qE "^[[:space:]]*KITE2_(API_KEY|USER_ID)=" .env 2>/dev/null; then
+    warn KITE2 "second account ($(envv KITE2_NAME)) also trades from this machine — remove the KITE2_ lines if it has its own machine"
+fi
 if [ -n "$acct" ] && [ -n "$name" ] && [ "$acct" != "$name" ]; then
     warn names "NOTION_ACCOUNT=$acct but KITE_NAME=$name — copied .env?"
 fi
