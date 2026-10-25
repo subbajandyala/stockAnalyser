@@ -1,5 +1,6 @@
 """
 "In hammer" screener on Nifty 500, rebuilt on Kite data → ntfy push.
+A hammer-shaped day: well off the low (long lower wick), back near the high.
 
 Replaces the Trendlyne "in hammer" screener (Trendlyne blocks requests from
 servers with a human-verification page). Every run (cron, every 15 min in market
@@ -9,7 +10,7 @@ hours) it:
   3. keeps the stocks that pass all of the screener's conditions:
        current price ≥ day low  × (1 + 3%)     bounced at least 3% off the day's low
        current price >  15-min Supertrend      15-min trend is up
-       current price ≤ day high × (1 − 1%)     still at least 1% below the day's high
+       day high − current price < 1% of day high   closing in on the day's high (small upper wick)
   4. ranks them by 15-min AROON Down (14), highest first
   5. pushes the top stock (plus the next few) to ntfy
 
@@ -22,7 +23,7 @@ of the last 15) / 14. Stocks tied at the top AROON Down are listed in the push.
 Settings in /root/stockAnalyser/.env (optional):
   HAMMER_NTFY_TOPIC=revanth-kite-hammer-aroon
   HAMMER_ABOVE_LOW_PCT=3         # condition 1: % above the day low
-  HAMMER_BELOW_HIGH_PCT=1        # condition 3: % below the day high
+  HAMMER_NEAR_HIGH_PCT=1         # condition 3: within this % of the day high
   HAMMER_ST_PERIOD=10            # Supertrend ATR period
   HAMMER_ST_MULT=3               # Supertrend multiplier
   HAMMER_TOP_N=3                 # stocks listed in the push
@@ -211,7 +212,7 @@ def evaluate(symbol: str, df: pd.DataFrame, now: datetime.datetime, session: dat
         return None
     if not (price >= day_low * (1 + rules["above_low"] / 100)
             and price > st
-            and price <= day_high * (1 - rules["below_high"] / 100)):
+            and day_high - price < day_high * rules["near_high"] / 100):
         return None
     ad = aroon_down(done["Low"])
     if ad is None:
@@ -263,7 +264,7 @@ def main() -> None:
         return
     topic = _env_value("HAMMER_NTFY_TOPIC", "revanth-kite-hammer-aroon")
     rules = {"above_low": float(_env_value("HAMMER_ABOVE_LOW_PCT", "3")),
-             "below_high": float(_env_value("HAMMER_BELOW_HIGH_PCT", "1")),
+             "near_high": float(_env_value("HAMMER_NEAR_HIGH_PCT", "1")),
              "st_period": int(_env_value("HAMMER_ST_PERIOD", "10")),
              "st_mult": float(_env_value("HAMMER_ST_MULT", "3"))}
     top_n = int(_env_value("HAMMER_TOP_N", "3") or 3)
@@ -291,7 +292,7 @@ def main() -> None:
         lines.append(f"(tied at {top['aroon_down']:g}: {', '.join(tied[:10])}"
                      + (f" +{len(tied) - 10} more" if len(tied) > 10 else "") + ")")
     body = "\n".join(lines) + (f"\n\n{len(hits)} Nifty 500 stocks ≥ {rules['above_low']:g}% off the day low, "
-                                f"above 15-min Supertrend, ≥ {rules['below_high']:g}% below the day high")
+                                f"above 15-min Supertrend, within {rules['near_high']:g}% of the day high")
     title = f"Top: {top['symbol']} — AROON Down {top['aroon_down']:g} ({label})"
     print(title + "\n  " + "\n  ".join(lines))
     if not args.dry_run:
