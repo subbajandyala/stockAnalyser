@@ -9,4 +9,4 @@ data/
 chart_bot_shadow_state.json
 .watchdog_off
 chart_bot_state*.json
-.trendlyne_last_error
+data/nifty500_list.csv
