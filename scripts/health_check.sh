@@ -62,6 +62,14 @@ fi
 
 # Token, balance, positions (no orders)
 echo "--- preflight ---"
-"$PYTHON" scripts/chart_bot.py --preflight 2>&1 | grep -E "kite token|balance|positions|orphan|READY|FAIL|WARN" | sed 's/^/  /'
+pf=$("$PYTHON" scripts/chart_bot.py --preflight 2>&1)
+lines=$(echo "$pf" | grep -E "kite token|balance|positions|orphan|READY|FAIL|WARN")
+if [ -n "$lines" ]; then
+    echo "$lines" | sed 's/^/  /'
+    echo "$pf" | grep -q "NOT READY" && fails=$((fails+1))
+else
+    bad preflight "no report — last lines of its output:"
+    echo "$pf" | tail -8 | sed 's/^/          /'
+fi
 
 echo "=== result: $fails fail, $warns warn ==="
