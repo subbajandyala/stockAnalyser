@@ -17,6 +17,15 @@ envv() {
 name=$(envv KITE_NAME); acct=$(envv NOTION_ACCOUNT); trade_only=$(envv TRADE_ONLY)
 echo "=== $(hostname) — $(curl -s -m 5 https://api.ipify.org) — ${acct:-${name:-(no KITE_NAME)}} — $(TZ=Asia/Kolkata date '+%d-%b %H:%M IST') ==="
 
+# Right after a reboot, @reboot start_droplet.sh (30 s delay) is still starting things and
+# kills any chart_bot process — including our preflight. Wait until it has finished.
+up=$(cut -d. -f1 /proc/uptime)
+if [ "${up:-999}" -lt 120 ]; then
+    echo "  (machine booted ${up}s ago — waiting $((120 - up))s for the services to start)"
+    sleep $((120 - up))
+fi
+[ -z "$name" ] && [ -z "$acct" ] && warn name "no KITE_NAME in .env — Notion rows and pushes won't say whose account"
+
 # Code version
 GIT_TERMINAL_PROMPT=0 timeout 20 git fetch -q origin "$BRANCH" 2>/dev/null
 here=$(git rev-parse --short HEAD 2>/dev/null); there=$(git rev-parse --short "origin/$BRANCH" 2>/dev/null)
