@@ -1,29 +1,34 @@
 """
-Hammer + 15-min AROON Down scanner on Nifty 500 → ntfy push. Kite data only.
+"In hammer" screener on Nifty 500, rebuilt on Kite data → ntfy push.
 
 Replaces the Trendlyne "in hammer" screener (Trendlyne blocks requests from
 servers with a human-verification page). Every run (cron, every 15 min in market
 hours) it:
   1. loads the Nifty 500 list (NSE's CSV, cached a week in data/nifty500_list.csv)
-  2. fetches ~10 days of 15-minute candles per stock from Kite (≤ 3 requests/s)
-  3. keeps the stocks whose last completed 15-minute candle is a hammer
-     (HAMMER_TF=day checks today's daily candle so far instead)
-  4. computes AROON Down (14) on completed 15-minute candles
-  5. pushes the hammer stock with the highest AROON Down (plus the next few) to ntfy
+  2. fetches ~3 weeks of 15-minute candles per stock from Kite (≤ 3 requests/s)
+  3. keeps the stocks that pass all of the screener's conditions:
+       current price ≥ day low  × (1 + 3%)     bounced at least 3% off the day's low
+       current price >  15-min Supertrend      15-min trend is up
+       current price ≤ day high × (1 − 1%)     still at least 1% below the day's high
+  4. ranks them by 15-min AROON Down (14), highest first
+  5. pushes the top stock (plus the next few) to ntfy
 
-Hammer and AROON follow TA-Lib (CDLHAMMER, AROON 14), the definitions screeners
-normally use: small body (< the 10-candle average body), lower wick > body, upper
-wick < 10% of the 10-candle average range, body at or near the previous candle's
-low. AROON Down (14) = 100 × (14 − candles since the lowest low of the last 15) / 14.
-Ranking: highest AROON Down first; stocks tied at the top are listed in the push.
+Current price = the latest price (the forming 15-min candle's close); day high and
+low include the forming candle. Supertrend (10, 3) and AROON Down (14) use completed
+15-min candles. Supertrend: ATR(10, Wilder) bands around (high+low)/2, ×3, with the
+usual carry-forward rules. AROON Down (14) = 100 × (14 − candles since the lowest low
+of the last 15) / 14. Stocks tied at the top AROON Down are listed in the push.
 
 Settings in /root/stockAnalyser/.env (optional):
-  HAMMER_NTFY_TOPIC=revanth-trend-line
-  HAMMER_TF=15m                  # 15m (last completed 15-min candle) | day (today so far)
+  HAMMER_NTFY_TOPIC=revanth-kite-hammer-aroon
+  HAMMER_ABOVE_LOW_PCT=3         # condition 1: % above the day low
+  HAMMER_BELOW_HIGH_PCT=1        # condition 3: % below the day high
+  HAMMER_ST_PERIOD=10            # Supertrend ATR period
+  HAMMER_ST_MULT=3               # Supertrend multiplier
   HAMMER_TOP_N=3                 # stocks listed in the push
 
 Cron (server clock is UTC; runs 1 min after each 15-min close, 09:16 … 15:31 IST —
-the 09:16 run has no completed candle yet and stays quiet; a full scan takes ~3–4 min):
+a full scan takes ~3 min):
   46,1,16,31 3-10 * * 1-5 cd /root/stockAnalyser && /root/venv/bin/python scripts/hammer_aroon_bot.py >> hammer_aroon.log 2>&1
 
 Usage:
@@ -56,7 +61,7 @@ _IST = datetime.timezone(datetime.timedelta(hours=5, minutes=30))
 _LIST_CACHE = _ROOT / "data" / "nifty500_list.csv"
 MARKET_OPEN, MARKET_CLOSE = datetime.time(9, 15), datetime.time(15, 35)   # 15:31 run reads the last candle
 AROON_N = 14
-HISTORY_DAYS = 21          # calendar days of 15-min candles: ≥ 10 prior daily candles for the hammer
+HISTORY_DAYS = 21          # calendar days of 15-min candles: plenty for Supertrend and AROON to settle
 REQ_PER_SEC = 3            # Kite historical-data limit
 
 
@@ -150,35 +155,34 @@ def completed(df: pd.DataFrame, now: datetime.datetime) -> pd.DataFrame:
     return df[df.index <= cutoff]
 
 
-def daily_from_15m(df: pd.DataFrame) -> pd.DataFrame:
-    g = df.groupby(df.index.date)
-    return pd.DataFrame({"Open": g["Open"].first(), "High": g["High"].max(),
-                         "Low": g["Low"].min(), "Close": g["Close"].last()})
-
-
-# ── Rules ─────────────────────────────────────────────────────────────────────
-
-def is_hammer(c: pd.Series, hist: pd.DataFrame) -> bool:
-    """TA-Lib CDLHAMMER rules (the usual screener definition), on candle c after the
-    candles in hist (same timeframe, oldest first, ≥ 10 of them):
-      small body        body < average body of the previous 10 candles
-      long lower wick   lower wick > body
-      tiny upper wick   upper wick < 10% of the average range of the previous 10
-      at the lows       body bottom ≤ previous candle's low + 20% of the 5-candle average range
-    """
-    if len(hist) < 10:
-        return False
-    o, h, l, cl = float(c["Open"]), float(c["High"]), float(c["Low"]), float(c["Close"])
-    body = abs(cl - o)
-    lower, upper = min(o, cl) - l, h - max(o, cl)
-    last10 = hist.tail(10)
-    avg_body10 = float((last10["Close"] - last10["Open"]).abs().mean())
-    avg_range10 = float((last10["High"] - last10["Low"]).mean())
-    avg_range5 = float((hist["High"] - hist["Low"]).tail(5).mean())
-    return (body < avg_body10
-            and lower > body
-            and upper < 0.1 * avg_range10
-            and min(o, cl) <= float(hist["Low"].iloc[-1]) + 0.2 * avg_range5)
+def supertrend(df: pd.DataFrame, period: int = 10, mult: float = 3.0) -> float | None:
+    """Latest Supertrend line value (the usual TradingView / Trendlyne definition)."""
+    if len(df) < period + 2:
+        return None
+    h, l, c = df["High"].values, df["Low"].values, df["Close"].values
+    tr = [h[0] - l[0]] + [max(h[i] - l[i], abs(h[i] - c[i - 1]), abs(l[i] - c[i - 1])) for i in range(1, len(df))]
+    atr = [None] * len(df)
+    atr[period - 1] = sum(tr[:period]) / period
+    for i in range(period, len(df)):
+        atr[i] = (atr[i - 1] * (period - 1) + tr[i]) / period       # Wilder's smoothing
+    upper = lower = st = None
+    up_trend = True
+    for i in range(period - 1, len(df)):
+        mid = (h[i] + l[i]) / 2
+        bu, bl = mid + mult * atr[i], mid - mult * atr[i]
+        if upper is None:
+            upper, lower = bu, bl
+        else:
+            upper = bu if (bu < upper or c[i - 1] > upper) else upper
+            lower = bl if (bl > lower or c[i - 1] < lower) else lower
+        if st is None:
+            up_trend = c[i] > upper
+        elif up_trend and c[i] < lower:
+            up_trend = False
+        elif not up_trend and c[i] > upper:
+            up_trend = True
+        st = lower if up_trend else upper
+    return float(st)
 
 
 def aroon_down(lows: pd.Series, n: int = AROON_N) -> float | None:
@@ -190,34 +194,38 @@ def aroon_down(lows: pd.Series, n: int = AROON_N) -> float | None:
     return round(100.0 * (n - since_low) / n, 2)
 
 
-def evaluate(symbol: str, df: pd.DataFrame, now: datetime.datetime, tf: str,
-             session: datetime.date) -> dict | None:
+def evaluate(symbol: str, df: pd.DataFrame, now: datetime.datetime, session: datetime.date,
+             rules: dict) -> dict | None:
     """session = the trading day to read (today in market hours; last session with --force)."""
-    df = completed(df, now)
     df = df[df.index.date <= session]
-    if len(df) < AROON_N + 1 or df.index[-1].date() != session:
-        return None                       # no completed candle of this session yet
-    if tf == "15m":
-        candle, hist = df.iloc[-1], df.iloc[:-1]
-    else:
-        days = daily_from_15m(df)
-        candle, hist = days.loc[session], days[days.index < session]
-    if not is_hammer(candle, hist):
+    day = df[df.index.date == session]
+    if day.empty:
+        return None                       # no candle of this session yet
+    price = float(day["Close"].iloc[-1])   # latest price (forming candle's close)
+    day_low, day_high = float(day["Low"].min()), float(day["High"].max())
+    done = completed(df, now)
+    if len(done) < AROON_N + 1:
         return None
-    ad = aroon_down(df["Low"])
+    st = supertrend(done, rules["st_period"], rules["st_mult"])
+    if st is None:
+        return None
+    if not (price >= day_low * (1 + rules["above_low"] / 100)
+            and price > st
+            and price <= day_high * (1 - rules["below_high"] / 100)):
+        return None
+    ad = aroon_down(done["Low"])
     if ad is None:
         return None
     prev = df[df.index.date < session]
     prev_close = float(prev["Close"].iloc[-1]) if not prev.empty else None
-    ltp = float(df["Close"].iloc[-1])
-    return {"symbol": symbol, "aroon_down": ad, "ltp": ltp,
-            "day_chg": (ltp / prev_close - 1) * 100 if prev_close else None,
-            "candle_time": df.index[-1]}
+    return {"symbol": symbol, "aroon_down": ad, "ltp": price, "supertrend": st,
+            "off_low": (price / day_low - 1) * 100, "off_high": (1 - price / day_high) * 100,
+            "day_chg": (price / prev_close - 1) * 100 if prev_close else None}
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 
-def scan(now: datetime.datetime, tf: str, session: datetime.date | None,
+def scan(now: datetime.datetime, session: datetime.date | None, rules: dict,
          limit: int | None = None) -> tuple[list[dict], int]:
     symbols = nifty500()[:limit] if limit else nifty500()
     headers = _hdrs()
@@ -232,7 +240,7 @@ def scan(now: datetime.datetime, tf: str, session: datetime.date | None,
         got += 1
         try:
             day = session or df.index[-1].date()     # --force: the stock's last session
-            return evaluate(sym, df, now, tf, day)
+            return evaluate(sym, df, now, day, rules)
         except Exception as e:
             print(f"  {sym}: {e}")
             return None
@@ -243,7 +251,7 @@ def scan(now: datetime.datetime, tf: str, session: datetime.date | None,
 
 
 def main() -> None:
-    ap = argparse.ArgumentParser(description="Nifty 500 hammer stocks ranked by 15-min AROON Down → ntfy")
+    ap = argparse.ArgumentParser(description="In-hammer screener on Nifty 500, ranked by 15-min AROON Down → ntfy")
     ap.add_argument("--force", action="store_true", help="run outside market hours")
     ap.add_argument("--dry-run", action="store_true", help="print, don't push")
     ap.add_argument("--limit", type=int, help="scan only the first N stocks (testing)")
@@ -253,14 +261,17 @@ def main() -> None:
     if not args.force and (now.weekday() >= 5 or not MARKET_OPEN <= now.time() <= MARKET_CLOSE):
         print(f"{now:%a %H:%M} IST — market closed, skipping")
         return
-    topic = _env_value("HAMMER_NTFY_TOPIC", "revanth-trend-line")
-    tf = _env_value("HAMMER_TF", "15m").lower()
+    topic = _env_value("HAMMER_NTFY_TOPIC", "revanth-kite-hammer-aroon")
+    rules = {"above_low": float(_env_value("HAMMER_ABOVE_LOW_PCT", "3")),
+             "below_high": float(_env_value("HAMMER_BELOW_HIGH_PCT", "1")),
+             "st_period": int(_env_value("HAMMER_ST_PERIOD", "10")),
+             "st_mult": float(_env_value("HAMMER_ST_MULT", "3"))}
     top_n = int(_env_value("HAMMER_TOP_N", "3") or 3)
 
     t0 = time.time()
-    hits, got = scan(now, tf, None if args.force else now.date(), args.limit)
+    hits, got = scan(now, None if args.force else now.date(), rules, args.limit)
     label = f"{now:%H:%M} IST"
-    print(f"{label} — {got} stocks with candles, {len(hits)} hammers ({tf}), {time.time() - t0:.0f}s")
+    print(f"{label} — {got} stocks with candles, {len(hits)} pass the screener, {time.time() - t0:.0f}s")
     if got == 0:
         msg = "Kite returned no candles — token expired (run auto_token.py) or market holiday"
         print(f"ERROR: {msg}")
@@ -274,11 +285,13 @@ def main() -> None:
     tied = [h["symbol"] for h in hits if h["aroon_down"] == top["aroon_down"]]
     lines = [f"{h['symbol']}: AROON Down {h['aroon_down']:g}, LTP {h['ltp']:,.2f}"
              + (f", day {h['day_chg']:+.2f}%" if h["day_chg"] is not None else "")
+             + f", +{h['off_low']:.1f}% off low, -{h['off_high']:.1f}% from high"
              for h in hits[:top_n]]
     if len(tied) > 1:
         lines.append(f"(tied at {top['aroon_down']:g}: {', '.join(tied[:10])}"
                      + (f" +{len(tied) - 10} more" if len(tied) > 10 else "") + ")")
-    body = "\n".join(lines) + f"\n\n{len(hits)} hammer stocks in Nifty 500 ({'daily' if tf == 'day' else '15-min'} candle)"
+    body = "\n".join(lines) + (f"\n\n{len(hits)} Nifty 500 stocks ≥ {rules['above_low']:g}% off the day low, "
+                                f"above 15-min Supertrend, ≥ {rules['below_high']:g}% below the day high")
     title = f"Top: {top['symbol']} — AROON Down {top['aroon_down']:g} ({label})"
     print(title + "\n  " + "\n  ".join(lines))
     if not args.dry_run:
