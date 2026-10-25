@@ -11,9 +11,15 @@ After market close it:
 
 Re-running the same day updates rows instead of duplicating them.
 
+Several machines (one Kite account each) write to the same two databases: every
+row carries an "Account" select, and the daily summary is one row per account
+per day. The account name is NOTION_ACCOUNT, else KITE_NAME, else the Kite
+profile's short name.
+
 Needs in /root/stockAnalyser/.env (never committed):
   NOTION_TOKEN=secret_...         # Notion integration token
 Optional overrides:
+  NOTION_ACCOUNT=Subba            # name shown in the Account column
   NOTION_DAILY_DB=<database id>
   NOTION_TRADES_DB=<database id>
 
@@ -23,6 +29,8 @@ Cron (server clock is UTC; 15:50 IST = 10:20 UTC):
 Usage:
   python scripts/notion_daily_log.py                 # today
   python scripts/notion_daily_log.py --date 2026-10-17
+  python scripts/notion_daily_log.py --tag-untagged  # once: put this account's name on rows
+                                                     # written before the Account column existed
 """
 
 import argparse
@@ -91,10 +99,40 @@ def _call(method: str, path: str, body: dict | None = None) -> dict:
     raise RuntimeError(f"Notion {method} {path} rate-limited")
 
 
-def _find(db: str, prop: str, kind: str, value: str) -> str | None:
+def _find(db: str, prop: str, kind: str, value: str, account: str | None = None) -> str | None:
     flt = {"property": prop, kind: {"equals": value}}
+    if account:
+        flt = {"and": [flt, {"property": "Account", "select": {"equals": account}}]}
     res = _call("POST", f"/databases/{db}/query", {"filter": flt, "page_size": 1})
     return res["results"][0]["id"] if res.get("results") else None
+
+
+def _untagged(db: str) -> list[str]:
+    """Page ids of rows with no Account yet."""
+    ids, cursor = [], None
+    while True:
+        body = {"filter": {"property": "Account", "select": {"is_empty": True}}, "page_size": 100}
+        if cursor:
+            body["start_cursor"] = cursor
+        res = _call("POST", f"/databases/{db}/query", body)
+        ids += [r["id"] for r in res.get("results", [])]
+        if not res.get("has_more"):
+            return ids
+        cursor = res.get("next_cursor")
+
+
+def account_name() -> str:
+    name = _env_value("NOTION_ACCOUNT") or _env_value("KITE_NAME")
+    if name:
+        return name.strip()
+    try:
+        api_key, access_token = _kite_creds()
+        k = KiteConnect(api_key=api_key)
+        k.set_access_token(access_token)
+        prof = k.profile()
+        return prof.get("user_shortname") or prof.get("user_id") or "Main"
+    except Exception:
+        return "Main"
 
 
 def _upsert(db: str, page_id: str | None, props: dict) -> str:
@@ -196,7 +234,16 @@ def match_fills(bot_trades: list[dict], fills: list[dict]) -> dict:
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 
+def tag_untagged(account: str) -> None:
+    for db, label in ((TRADES_DB, "trades"), (DAILY_DB, "daily rows")):
+        ids = _untagged(db)
+        for pid in ids:
+            _call("PATCH", f"/pages/{pid}", {"properties": {"Account": {"select": {"name": account}}}})
+        print(f"Tagged {len(ids)} {label} as {account}")
+
+
 def run(date_str: str) -> None:
+    account = account_name()
     try:
         outcomes.process(date_str)
     except Exception as e:
@@ -248,6 +295,7 @@ def run(date_str: str) -> None:
             "P&L":       {"number": _num(pnl)},
             "Result":    {"select": {"name": result}},
             "Order ID":  {"rich_text": _txt(oid)},
+            "Account":   {"select": {"name": account}},
         }
         _upsert(TRADES_DB, _find(TRADES_DB, "Order ID", "rich_text", oid), props)
         trade_rows.append([hhmm, t.get("tradingsymbol", ""), t.get("direction", ""), m.get("qty") or t.get("qty", ""),
@@ -267,12 +315,13 @@ def run(date_str: str) -> None:
         at = str(s.get("auto_trade", ""))
         if at.startswith(("skipped:", "blocked:")):
             skipped[at.split(":", 1)[1].split("—")[0].strip()[:60]] += 1
-    notes = f"{len(signals)} signals, {len(bot_trades)} orders. P&L is chart_bot trades only."
+    notes = f"{account}: {len(signals)} signals, {len(bot_trades)} orders. P&L is chart_bot trades only."
     if skipped:
         notes += " Top skip reasons: " + "; ".join(f"{k} ×{v}" for k, v in sorted(skipped.items(), key=lambda x: -x[1])[:3])
 
     props = {
-        "Day":              {"title": _txt(date_str)},
+        "Day":              {"title": _txt(f"{date_str} · {account}")},
+        "Account":          {"select": {"name": account}},
         "Date":             {"date": {"start": date_str}},
         "Signals":          {"number": len(signals)},
         "Trades":           {"number": len(bot_trades)},
@@ -283,7 +332,7 @@ def run(date_str: str) -> None:
         "SL hit first":     {"number": None if sl_pct is None else round(float(sl_pct), 3)},
         "Notes":            {"rich_text": _txt(notes)},
     }
-    page = _upsert(DAILY_DB, _find(DAILY_DB, "Date", "date", date_str), props)
+    page = _upsert(DAILY_DB, _find(DAILY_DB, "Date", "date", date_str, account), props)
 
     blocks = [_heading("Trades")]
     blocks.append(_table(["Time", "Contract", "Dir", "Qty", "Entry", "Exit", "P&L", "Result"], trade_rows)
@@ -302,11 +351,16 @@ def run(date_str: str) -> None:
     else:
         blocks.append(_para("No outcome data."))
     _replace_body(page, blocks)
-    print(f"Notion updated for {date_str}: {len(signals)} signals, {len(bot_trades)} trades, P&L ₹{day_pnl:,.0f}")
+    print(f"Notion updated for {date_str} ({account}): {len(signals)} signals, {len(bot_trades)} trades, P&L ₹{day_pnl:,.0f}")
 
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser(description="Write the day's chart_bot activity to Notion")
     ap.add_argument("--date", default=datetime.datetime.now(_IST).strftime("%Y-%m-%d"))
+    ap.add_argument("--tag-untagged", action="store_true",
+                    help="set this machine's account name on rows that have no Account yet, then exit")
     args = ap.parse_args()
-    run(args.date)
+    if args.tag_untagged:
+        tag_untagged(account_name())
+    else:
+        run(args.date)
