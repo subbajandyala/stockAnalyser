@@ -6,9 +6,8 @@ servers with a human-verification page). Every run (cron, every 15 min in market
 hours) it:
   1. loads the Nifty 500 list (NSE's CSV, cached a week in data/nifty500_list.csv)
   2. fetches ~10 days of 15-minute candles per stock from Kite (≤ 3 requests/s)
-  3. keeps the stocks whose candle forms a hammer — by default today's daily candle
-     so far, built from the 15-min candles (HAMMER_TF=15m checks the last 15-min
-     candle instead)
+  3. keeps the stocks whose last completed 15-minute candle is a hammer
+     (HAMMER_TF=day checks today's daily candle so far instead)
   4. computes AROON Down (14) on completed 15-minute candles
   5. pushes the hammer stock with the highest AROON Down (plus the next few) to ntfy
 
@@ -20,7 +19,7 @@ Ranking: highest AROON Down first; stocks tied at the top are listed in the push
 
 Settings in /root/stockAnalyser/.env (optional):
   HAMMER_NTFY_TOPIC=revanth-trend-line
-  HAMMER_TF=day                  # day | 15m
+  HAMMER_TF=15m                  # 15m (last completed 15-min candle) | day (today so far)
   HAMMER_TOP_N=3                 # stocks listed in the push
 
 Cron (server clock is UTC; runs 1 min after each 15-min close, 09:16 … 15:31 IST —
@@ -255,7 +254,7 @@ def main() -> None:
         print(f"{now:%a %H:%M} IST — market closed, skipping")
         return
     topic = _env_value("HAMMER_NTFY_TOPIC", "revanth-trend-line")
-    tf = _env_value("HAMMER_TF", "day").lower()
+    tf = _env_value("HAMMER_TF", "15m").lower()
     top_n = int(_env_value("HAMMER_TOP_N", "3") or 3)
 
     t0 = time.time()
