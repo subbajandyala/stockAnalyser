@@ -18,7 +18,7 @@ name=$(envv KITE_NAME); acct=$(envv NOTION_ACCOUNT); trade_only=$(envv TRADE_ONL
 echo "=== $(hostname) — $(curl -s -m 5 https://api.ipify.org) — ${acct:-${name:-(no KITE_NAME)}} — $(TZ=Asia/Kolkata date '+%d-%b %H:%M IST') ==="
 
 # Code version
-git fetch -q origin "$BRANCH" 2>/dev/null
+GIT_TERMINAL_PROMPT=0 timeout 20 git fetch -q origin "$BRANCH" 2>/dev/null
 here=$(git rev-parse --short HEAD 2>/dev/null); there=$(git rev-parse --short "origin/$BRANCH" 2>/dev/null)
 if [ -n "$there" ] && [ "$here" = "$there" ]; then ok code "up to date ($here)"
 else warn code "at $here, latest is ${there:-?} — run git pull + bash start_droplet.sh"; fi
