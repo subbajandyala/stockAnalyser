@@ -39,6 +39,7 @@ import argparse
 import datetime
 import os
 import pathlib
+import re
 import sys
 
 import requests
@@ -82,16 +83,27 @@ def alert_error_once(topic: str, msg: str, dry_run: bool) -> None:
 
 
 def fetch_screener(cookie: str, screen_id: str, group: str, slug: str) -> requests.Response:
-    url = ("https://trendlyne.com/fundamentals/tl-all-in-one-screener-data-get/"
-           f"?screenpk={screen_id}&perPageCount=500&groupType=index&groupName={group}&groupSlug={slug}")
-    return requests.get(url, timeout=30, headers={
+    """The screener page's own data call. Tried as GET first; Trendlyne answers 405 when it
+    wants a POST, which then goes with the same fields as form data plus the CSRF token."""
+    url = "https://trendlyne.com/fundamentals/tl-all-in-one-screener-data-get/"
+    params = {"screenpk": screen_id, "perPageCount": "500", "groupType": "index",
+              "groupName": group, "groupSlug": slug}
+    m = re.search(r"(?:^|;\s*)csrftoken=([^;]+)", cookie)
+    headers = {
         "Cookie": cookie,
         "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) "
                       "Chrome/130 Safari/537.36",
-        "Accept": "application/json",
+        "Accept": "application/json, text/javascript, */*; q=0.01",
         "X-Requested-With": "XMLHttpRequest",
+        "Origin": "https://trendlyne.com",
         "Referer": f"https://trendlyne.com/fundamentals/stock-screener/{screen_id}/",
-    })
+    }
+    if m:
+        headers["X-CSRFToken"] = m.group(1)
+    res = requests.get(url, params=params, headers=headers, timeout=30)
+    if res.status_code == 405:
+        res = requests.post(url, params=params, data=params, headers=headers, timeout=30)
+    return res
 
 
 def top_by_aroon_down(body: dict) -> tuple[dict | None, str]:
@@ -136,8 +148,11 @@ def main() -> None:
     except (requests.RequestException, ValueError) as e:
         return alert_error_once(topic, f"fetch failed: {e}", args.dry_run)
     if not isinstance(body, dict) or not isinstance(body.get("tableData"), list):
-        return alert_error_once(topic, f"fetch failed (HTTP {res.status_code}) — the cookie has probably "
-                                       "expired: copy a new one into TRENDLYNE_COOKIE in .env", args.dry_run)
+        hint = ("the cookie has probably expired: copy a new one into TRENDLYNE_COOKIE in .env"
+                if res.status_code in (200, 401, 403) else "Trendlyne refused the request")
+        print(f"  {res.request.method} → HTTP {res.status_code}, reply starts: "
+              + " ".join(res.text[:200].split()))
+        return alert_error_once(topic, f"fetch failed (HTTP {res.status_code}) — {hint}", args.dry_run)
 
     top, err = top_by_aroon_down(body)
     if err:
