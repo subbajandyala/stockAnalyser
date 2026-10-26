@@ -13,6 +13,7 @@ Engine "candles" (default, CHART_ENGINE in .env) — screener/candles.py:
     target  +20% (CHART_BOOK_PCT) — the GTT books the position; the next strong candle re-enters
     ride    a strong bull / bear candle ≥ 2× the average range (CHART_RIDE_MULT, 0 = off)
             is not sold at +20%: the stop moves to entry +10% there, then trails 12% below the peak
+            (the lock is half the booking level, at most +10%: book 10% → lock +5%; CHART_RIDE_LOCK_PCT)
     early   opposite candle → exit and flip; not ≥ +2% after 6 min (CHART_SCALP_MAX_MIN) → exit
     15:15   square-off
 
@@ -121,9 +122,16 @@ for _sym in list(_ko.MAX_LOTS):
     if _v.strip().isdigit():
         _ko.MAX_LOTS[_sym] = int(_v)
 # Ride mode: a strong bull / bear candle at least this many times the average range
-# is not sold at +CANDLE_BOOK_PCT — the stop moves to entry +10% there and trails
-# 12% below the peak premium. 0 = off (every trade books at the target).
+# is not sold at +CANDLE_BOOK_PCT — the stop moves to entry +RIDE_LOCK_PCT there and
+# trails 12% below the peak premium. 0 = off (every trade books at the target).
 RIDE_MULT = float(_env_setting("CHART_RIDE_MULT") or 2.0)
+# The lock must sit below the booking level, or the stop would land on the price itself:
+# half of it, at most +10% (book 20% → +10%, book 10% → +5%).
+RIDE_LOCK_PCT = float(_env_setting("CHART_RIDE_LOCK_PCT") or min(0.10, CANDLE_BOOK_PCT / 2))
+if RIDE_LOCK_PCT >= CANDLE_BOOK_PCT:
+    print(f"[chart_bot] CHART_RIDE_LOCK_PCT {RIDE_LOCK_PCT:g} is not below CHART_BOOK_PCT "
+          f"{CANDLE_BOOK_PCT:g} — using {CANDLE_BOOK_PCT / 2:g}", flush=True)
+    RIDE_LOCK_PCT = CANDLE_BOOK_PCT / 2
 # Setups engine: losing trades in one direction before that direction stops for
 # the day — 0 = never stop (grab every setup). Set CHART_MAX_LOSSES=2 to cap.
 SETUP_MAX_LOSSES = int(_env_setting("CHART_MAX_LOSSES") or 0)
@@ -182,7 +190,7 @@ _AUTO_TRADE = _auto_trade_enabled()
 print(f"[chart_bot] AUTO_TRADE={'ON' if _AUTO_TRADE else 'OFF (set KITE_AUTO_TRADE=1 in .env to enable)'}"
       + (f" | engine candles on {CANDLE_TF} (≥ {_candles.MIN_RANGE_MULT:g}× avg range) | book at "
          f"+{CANDLE_BOOK_PCT:.0%}, exit if not working in {SCALP_MAX_MIN} min | ride "
-         + (f"strong candles ≥ {RIDE_MULT:g}× avg" if RIDE_MULT else "off")
+         + (f"strong candles ≥ {RIDE_MULT:g}× avg (lock +{RIDE_LOCK_PCT:.0%})" if RIDE_MULT else "off")
          + " | max lots " + ", ".join(f"{k} {v or 'no cap'}" for k, v in _ko.MAX_LOTS.items())
          if ENGINE == "candles" else
          f" | engine setups on {SETUP_TF} | book 100% at +{BOOK_PROFIT_PCT:.0%}" if ENGINE == "setups" else
@@ -628,7 +636,8 @@ def _manage_trade(kite, symbol: str, state: dict, trade_key: str,
         if state.get(k("mode")) == "ride":
             half = 0          # ride: keep the whole position, only lock the stop and trail
         remaining = qty - half
-        new_sl    = _tick(max(entry * (1 + TRAIL_FLOOR_PCT), ltp * (1 - TRAIL_PCT)))
+        floor     = RIDE_LOCK_PCT if state.get(k("mode")) == "ride" else TRAIL_FLOOR_PCT
+        new_sl    = _tick(max(entry * (1 + floor), ltp * (1 - TRAIL_PCT)))
         far       = max(far, _tick(ltp * 2))
         # Shrink the GTT first so it can never sell more than we will still hold
         try:
@@ -654,13 +663,14 @@ def _manage_trade(kite, symbol: str, state: dict, trade_key: str,
         if ntfy_topic:
             send_ntfy(f"💰 Chart Bot: {symbol} target hit — trailing",
                       f"{ts}\n{booked}Trailing {remaining} units: SL ₹{new_sl:.2f} "
-                      f"(12% below peak, never below entry +10%).", ntfy_topic, priority="default")
+                      f"(12% below peak, never below entry +{floor:.0%}).", ntfy_topic, priority="default")
         return
 
     # 3. Trailing — raise the stop as the premium makes new highs
     peak = max(float(state.get(k("peak")) or ltp), ltp)
     state[k("peak")] = peak
-    cand = _tick(max(entry * (1 + TRAIL_FLOOR_PCT), peak * (1 - TRAIL_PCT)))
+    floor = RIDE_LOCK_PCT if state.get(k("mode")) == "ride" else TRAIL_FLOOR_PCT
+    cand = _tick(max(entry * (1 + floor), peak * (1 - TRAIL_PCT)))
     if cand >= sl * (1 + TRAIL_MIN_STEP) and cand < ltp:
         far = max(far, _tick(peak * 2))
         try:
@@ -885,7 +895,7 @@ def _scan_candles(symbols: list[str], state: dict, api_key: str, access_token: s
         state[symbol] = f"{today}:{symbol}:{sig}:{res['label']}"
         entry, sl, tgt = trade["entry_price"], trade["sl"], trade["target"]
         t1 = trade.get("t1", tgt)
-        plan = (f"ride: at ₹{t1} (+{CANDLE_BOOK_PCT:.0%}) stop → entry +10%, then trails 12% below the peak"
+        plan = (f"ride: at ₹{t1} (+{CANDLE_BOOK_PCT:.0%}) stop → entry +{RIDE_LOCK_PCT:.0%}, then trails 12% below the peak"
                 if ride else f"book ₹{tgt} (+{CANDLE_BOOK_PCT:.0%})")
         print(f"  [AUTO-TRADE] ORDER — {trade['tradingsymbol']} | qty {trade['qty']} | entry ₹{entry} "
               f"| SL ₹{sl} | {plan}")

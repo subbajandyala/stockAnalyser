@@ -325,7 +325,8 @@ def build_candle_signals(symbol: str, df3: pd.DataFrame, days: list) -> pd.DataF
 def run_candles(sig: pd.DataFrame, bars: dict, lots: int, book_pct: float, max_min: int,
                 verbose: bool, ride_mult: float = 0.0) -> pd.DataFrame:
     """ride_mult > 0: strong candles ≥ ride_mult × avg range don't book at +book_pct —
-    the stop moves to entry +10% there and trails 12% below the peak premium."""
+    the stop moves to entry +RIDE_LOCK_PCT there (+10% at the default +20% booking)
+    and trails 12% below the peak premium."""
     trades = []
     for (symbol, day), g in sig.groupby(["symbol", "day"]):
         if symbol not in cb._TRADE_SYMBOLS:
@@ -379,10 +380,11 @@ def run_candles(sig: pd.DataFrame, bars: dict, lots: int, book_pct: float, max_m
                     p_, pos = pos, None
                     _done(p_, min(p_["sl"], p_open), t, "trailing stop" if p_["trail"] else "stop loss")
                 elif pos["ride"]:
-                    if pos["trail"] or p_fav >= pos["tgt"]:     # +book_pct reached → lock +10%, trail 12%
+                    if pos["trail"] or p_fav >= pos["tgt"]:     # +book_pct reached → lock, trail 12%
                         pos["trail"] = True
                         pos["peak"] = max(pos["peak"], p_fav)
-                        pos["sl"] = max(pos["sl"], _tick(max(pos["entry"] * 1.10, pos["peak"] * 0.88)))
+                        pos["sl"] = max(pos["sl"], _tick(max(pos["entry"] * (1 + cb.RIDE_LOCK_PCT),
+                                                             pos["peak"] * 0.88)))
                 elif p_fav >= pos["tgt"]:
                     p_, pos = pos, None
                     _done(p_, max(p_["tgt"], p_open), t, f"booked +{book_pct:.0%}")
