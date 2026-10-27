@@ -68,7 +68,7 @@ _IST  = datetime.timezone(datetime.timedelta(hours=5, minutes=30))
 _PREMIUM = {"NIFTY": 150.0, "SENSEX": 350.0}   # typical ATM premium for % levels
 _DELTA = 0.5
 _TRAIL_PCT, _TRAIL_FLOOR = 0.12, 0.10
-_SQUARE_OFF = datetime.time(15, 15)
+_SQUARE_OFF = cb.SQUARE_OFF_TIME
 _SIG_OPEN, _SIG_CLOSE = cb.SIGNAL_OPEN, cb.SIGNAL_CLOSE
 
 VARIANTS = {
@@ -362,7 +362,8 @@ def run_candles(sig: pd.DataFrame, bars: dict, lots: int, book_pct: float, max_m
                 a = pending
                 entry = _PREMIUM.get(symbol, 150.0)
                 pts = cb.CANDLE_BOOK_PTS.get(symbol)
-                sl, tgt = book_levels(symbol, a["signal"], a["spot"], entry, a["stop"], book_pct, pts)
+                sl, tgt = book_levels(symbol, a["signal"], a["spot"], entry, a["stop"], book_pct, pts,
+                                      cb.CANDLE_SL_PCT)
                 ride = bool(ride_mult and a["setup"] in ("strong_bull", "strong_bear")
                             and a.get("range_mult", 0) >= ride_mult)
                 pos = {"d": a["signal"], "t": t, "spot": bar["Open"], "entry": entry, "sl": sl, "tgt": tgt,

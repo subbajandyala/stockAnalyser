@@ -131,6 +131,16 @@ RIDE_LOCK_PCT = float(_env_setting("CHART_RIDE_LOCK_PCT") or min(0.10, CANDLE_BO
 # Fixed booking in option premium points per index (CHART_BOOK_PTS_NIFTY=10 → sell at
 # entry + ₹10); replaces CHART_BOOK_PCT for that index. A ride trade's lock is then
 # half the points (entry + ₹5). Empty / 0 = use the percentage.
+# Fixed stop: CHART_SL_PCT=0.10 → stop at entry −10% instead of the candle stop (0 = candle stop)
+try:
+    CANDLE_SL_PCT = float(_env_setting("CHART_SL_PCT") or 0) or None
+except ValueError:
+    CANDLE_SL_PCT = None
+# CHART_MAX_OPEN_PER_INDEX=3: up to 3 bot trades on one index at once (each its own GTT);
+# a new signal is taken while the earlier ones run, if the money allows. 1 = one at a time.
+MAX_OPEN_PER_INDEX = max(1, int(_env_setting("CHART_MAX_OPEN_PER_INDEX") or 1))
+# CHART_OPPOSITE_EXIT=0: an opposite candle no longer closes a trade (only stop, target, square-off)
+OPPOSITE_EXIT = _env_setting("CHART_OPPOSITE_EXIT") != "0"
 CANDLE_BOOK_PTS = {}
 for _sym in ("NIFTY", "SENSEX"):
     try:
@@ -153,9 +163,26 @@ MIN_NOTIFY_SCORE = 3
 MIN_TRADE_SCORE  = 5
 # Minimum R:R ratio on the underlying to fire a signal
 MIN_RR = 1.5
-# Clean signal window: no new signals outside 9:30–15:00 IST
+def _hhmm_setting(name: str, default: datetime.time) -> datetime.time:
+    """A HH:MM time from .env (e.g. CHART_LAST_ENTRY=14:40), else the default."""
+    v = _env_setting(name)
+    try:
+        h, m = v.split(":")
+        return datetime.time(int(h), int(m))
+    except ValueError:
+        if v:
+            print(f"[chart_bot] {name}={v} is not HH:MM — using {default:%H:%M}", flush=True)
+        return default
+
+
+# Clean signal window: no new signals outside 9:30–15:00 IST (CHART_LAST_ENTRY=14:40 ends it earlier)
 SIGNAL_OPEN  = datetime.time(9, 30)
-SIGNAL_CLOSE = datetime.time(15, 0)
+SIGNAL_CLOSE = _hhmm_setting("CHART_LAST_ENTRY", datetime.time(15, 0))
+# Open bot trades are sold at square-off (CHART_SQUARE_OFF=15:00 moves it)
+SQUARE_OFF_TIME = _hhmm_setting("CHART_SQUARE_OFF", datetime.time(15, 15))
+# CHART_CANCEL_AT_SQUARE_OFF=1: from square-off on, also cancel every open NIFTY / SENSEX
+# option order and delete GTTs on contracts no longer held (manual positions keep theirs).
+CANCEL_AT_SQUARE_OFF = _env_setting("CHART_CANCEL_AT_SQUARE_OFF") == "1"
 # Signals are scored on completed candles (no flicker), so one scan is enough.
 # Raise this to require the signal on N consecutive 1-minute scans.
 CONFIRM_SCANS = 1
@@ -201,7 +228,12 @@ _AUTO_TRADE = _auto_trade_enabled()
 print(f"[chart_bot] AUTO_TRADE={'ON' if _AUTO_TRADE else 'OFF (set KITE_AUTO_TRADE=1 in .env to enable)'}"
       + (f" | engine candles on {CANDLE_TF} (≥ {_candles.MIN_RANGE_MULT:g}× avg range) | book at "
          f"+{CANDLE_BOOK_PCT:.0%}" + "".join(f" ({k} +{v:g} pts)" for k, v in CANDLE_BOOK_PTS.items())
-         + f", exit if not working in {SCALP_MAX_MIN} min | ride "
+         + (f", stop −{CANDLE_SL_PCT:.0%}" if CANDLE_SL_PCT else "")
+         + f", exit if not working in {SCALP_MAX_MIN} min | entries until {SIGNAL_CLOSE:%H:%M}, "
+         f"square-off {SQUARE_OFF_TIME:%H:%M}" + (" + cancel orders" if CANCEL_AT_SQUARE_OFF else "")
+         + ("" if OPPOSITE_EXIT else ", no opposite-candle exit")
+         + (f", up to {MAX_OPEN_PER_INDEX} trades per index" if MAX_OPEN_PER_INDEX > 1 else "")
+         + " | ride "
          + (f"strong candles ≥ {RIDE_MULT:g}× avg (lock +{RIDE_LOCK_PCT:.0%})" if RIDE_MULT else "off")
          + " | max lots " + ", ".join(f"{k} {v or 'no cap'}" for k, v in _ko.MAX_LOTS.items())
          if ENGINE == "candles" else
@@ -512,7 +544,6 @@ def _append_chart_log_unlocked(date_str: str, entry: dict) -> None:
 TRAIL_PCT       = 0.12              # stop sits this far below the peak premium
 TRAIL_FLOOR_PCT = 0.10              # once trailing, the stop never goes below entry +10%
 TRAIL_MIN_STEP  = 0.02              # modify the GTT only when the stop rises ≥ 2%
-SQUARE_OFF_TIME = datetime.time(15, 15)
 _EXCHANGE_MAP = {"NIFTY": "NFO", "SENSEX": "BFO", "BANKNIFTY": "NFO"}
 
 
@@ -529,6 +560,46 @@ def _bot_ltp(kite, symbol: str, ts: str) -> float | None:
         return None
 
 
+def _slot_keys(today: str, symbol: str) -> list[str]:
+    """Trade slots for one index: ':trade' first (the only one at MAX_OPEN_PER_INDEX=1), then ':trade2'…"""
+    return [f"{today}:{symbol}:trade"] + [f"{today}:{symbol}:trade{n}" for n in range(2, MAX_OPEN_PER_INDEX + 1)]
+
+
+def _open_slots(state: dict, today: str, symbol: str) -> list[str]:
+    """Trade keys with a recorded trade today (also slots left over from a higher setting)."""
+    pat = re.compile(rf"{re.escape(today)}:{re.escape(symbol)}:trade\d*")
+    return sorted((k for k in state if pat.fullmatch(k) and state.get(k)), key=lambda k: (len(k), k))
+
+
+def _others_on(state: dict, trade_key: str, ts: str | None) -> int:
+    """Units other open bot slots of this index hold in the same contract."""
+    today, symbol = trade_key.split(":")[0], trade_key.split(":")[1]
+    return sum(int(state.get(f"{k}:qty") or 0) for k in _open_slots(state, today, symbol)
+               if k != trade_key and ts and state.get(f"{k}:ts") == ts and not state.get(f"{k}:exit_reason"))
+
+
+def _clear_slot_gtts(kite, symbol: str, state: dict, trade_key: str, ts: str, ntfy_topic: str) -> None:
+    """Remove this slot's GTT; all GTTs on the contract only when no other slot still holds it."""
+    if not _others_on(state, trade_key, ts):
+        _clear_gtts(kite, symbol, ts, ntfy_topic)
+        return
+    gid = state.get(f"{trade_key}:gtt_id")
+    if gid:
+        try:
+            if kite.get_gtt(gid).get("status") == "active":
+                kite.delete_gtt(gid)
+                print(f"  [MONITOR] {symbol}: deleted GTT {gid} on {ts} (other slots keep theirs)")
+        except Exception as e:
+            print(f"  [MONITOR] {symbol}: GTT {gid} cleanup failed — {e}")
+
+
+def _gtt_active(kite, gtt_id) -> bool:
+    try:
+        return kite.get_gtt(gtt_id).get("status") == "active"
+    except Exception:
+        return True          # unknown → treat as still protecting the position
+
+
 def _clear_gtts(kite, symbol: str, ts: str, ntfy_topic: str) -> None:
     """Delete every active GTT on a contract the bot is now flat in; alert if any remain."""
     deleted, failed = delete_gtts_for(kite, ts)
@@ -541,6 +612,46 @@ def _clear_gtts(kite, symbol: str, ts: str, ntfy_topic: str) -> None:
                       f"Position is flat but the GTT could not be removed ({failed}). "
                       f"If it triggers it will SELL an option you don't hold.",
                       ntfy_topic, priority="urgent")
+
+
+def _square_off_cleanup(kite, state: dict, today: str, ntfy_topic: str) -> None:
+    """After square-off: cancel open index-option orders, delete GTTs on contracts not held.
+
+    Runs on every scan from SQUARE_OFF_TIME (after the bot's own exits), so a late fill is
+    still caught. Equity and other orders are left alone; a GTT protecting a position that
+    is still open (e.g. a manual one) is kept.
+    """
+    names = tuple(_EXCHANGE_MAP)
+    try:
+        orders = kite.orders()
+        held = {p["tradingsymbol"] for p in kite.positions().get("net", []) if int(p.get("quantity", 0)) != 0}
+        gtts = [g for g in kite.get_gtts() if g.get("status") == "active"]
+    except Exception as e:
+        print(f"  [SQUARE-OFF] order / GTT check failed — {e}")
+        return
+    done = []
+    for o in orders:
+        if (o.get("status") in ("OPEN", "TRIGGER PENDING", "AMO REQ RECEIVED")
+                and o.get("exchange") in ("NFO", "BFO") and str(o.get("tradingsymbol", "")).startswith(names)):
+            try:
+                kite.cancel_order(variety=o.get("variety") or kite.VARIETY_REGULAR, order_id=o["order_id"])
+                done.append(f"order {o['tradingsymbol']}")
+            except Exception as e:
+                print(f"  [SQUARE-OFF] cancel {o['order_id']} failed — {e}")
+    for g in gtts:
+        ts = g.get("condition", {}).get("tradingsymbol", "")
+        if ts.startswith(names) and ts not in held:
+            try:
+                kite.delete_gtt(g["id"])
+                done.append(f"GTT {ts}")
+            except Exception as e:
+                print(f"  [SQUARE-OFF] delete GTT {g.get('id')} failed — {e}")
+    if done:
+        print(f"  [SQUARE-OFF] cancelled: {', '.join(done)}")
+        if ntfy_topic and not state.get(f"{today}:squareoff_pushed"):
+            state[f"{today}:squareoff_pushed"] = True
+            send_ntfy(f"Chart Bot: {SQUARE_OFF_TIME:%H:%M} square-off done",
+                      "Cancelled: " + ", ".join(done), ntfy_topic, priority="default")
 
 
 def _exit_bot_position(kite, symbol: str, state: dict, trade_key: str, reason: str,
@@ -568,7 +679,7 @@ def _exit_bot_position(kite, symbol: str, state: dict, trade_key: str, reason: s
                       f"{reason}\n{ts}: {info}\nGTT stop loss kept; retrying every minute.",
                       ntfy_topic, priority="urgent")
         return False
-    _clear_gtts(kite, symbol, ts, ntfy_topic)
+    _clear_slot_gtts(kite, symbol, state, trade_key, ts, ntfy_topic)
     state[k("gtt_id")] = ""
     state[k("exit_reason")] = reason
     print(f"  [EXIT] {symbol}: {reason} — {info}")
@@ -720,8 +831,7 @@ def _monitor_positions(
 
     kite = _kite(api_key, access_token)
 
-    for symbol in symbols:
-        trade_key = f"{today}:{symbol}:trade"
+    for symbol, trade_key in [(sym, tk) for sym in symbols for tk in _open_slots(state, today, sym)]:
         order_id  = state.get(trade_key)
         if not order_id:
             continue  # no recorded trade for this symbol today
@@ -736,7 +846,22 @@ def _monitor_positions(
         parts = state_val.split(":")
         recorded_direction = parts[2] if len(parts) >= 4 else None
 
-        position_open = has_open_position(kite, symbol, only_ts=bot_ts)
+        others = _others_on(state, trade_key, bot_ts)
+        if not others:
+            position_open = has_open_position(kite, symbol, only_ts=bot_ts)
+        else:
+            # Another slot holds the same contract: this slot is closed once its own GTT
+            # has fired, or once the bot's own exit has sold its units
+            held = open_qty(kite, bot_ts)
+            gid = state.get(f"{trade_key}:gtt_id")
+            if held is None:
+                position_open = None
+            elif held <= others:
+                position_open = False
+            elif state.get(f"{trade_key}:exit_reason"):
+                position_open = held > others
+            else:
+                position_open = not (gid and not _gtt_active(kite, gid))
         if position_open is None:
             # Kite API error — never treat it as "closed" (that would delete the GTT)
             print(f"  [MONITOR] {symbol}: position check failed — leaving the trade as is")
@@ -744,7 +869,12 @@ def _monitor_positions(
 
         if not position_open:
             print(f"  [MONITOR] {symbol}: position closed")
-            pnl = contract_pnl(kite, bot_ts) if bot_ts else None
+            if others:   # shared contract: estimate this slot's result from the price now
+                _ltp = _bot_ltp(kite, symbol, bot_ts)
+                _ent = float(state.get(f"{trade_key}:entry_price") or 0)
+                pnl = (_ltp - _ent) * int(state.get(f"{trade_key}:qty") or 0) if _ltp and _ent else None
+            else:
+                pnl = contract_pnl(kite, bot_ts) if bot_ts else None
             closed_dir = direction or recorded_direction
             lost = pnl is not None and pnl < 0 and closed_dir
             n_losses = 0
@@ -760,11 +890,12 @@ def _monitor_positions(
                 state[loss_key] = n_losses
             # Remove any leftover GTT so it can't sell an option we no longer hold
             if bot_ts:
-                _clear_gtts(kite, symbol, bot_ts, ntfy_topic)
+                _clear_slot_gtts(kite, symbol, state, trade_key, bot_ts, ntfy_topic)
             for _k in [x for x in state if x == trade_key or x.startswith(f"{trade_key}:")]:
                 state.pop(_k, None)
             # Clear the alerted key too — prevents falling through to immediate re-entry
-            state.pop(symbol, None)
+            if not _open_slots(state, today, symbol):
+                state.pop(symbol, None)
             pnl_txt = f"P&L ₹{pnl:,.0f}" if pnl is not None else "P&L unknown"
             if ntfy_topic:
                 send_ntfy(
@@ -791,6 +922,8 @@ def _monitor_positions(
         if not recorded_direction:
             continue
         if state.get(f"{trade_key}:mode") in ("scalp", "ride"):
+            if not OPPOSITE_EXIT:
+                continue
             cres = _read_candle(symbol, api_key, access_token, now_ist)
             if not cres.get("error") and cres.get("signal") and cres["signal"] != recorded_direction:
                 _exit_bot_position(kite, symbol, state, trade_key,
@@ -860,9 +993,12 @@ def _scan_candles(symbols: list[str], state: dict, api_key: str, access_token: s
                 _append_chart_log(today, _setup_log_entry(now_ist, symbol, view, "no signal"))
             continue
         candle = f"{sig}@{res['candle_time']:%H:%M}"
-        trade_key = f"{today}:{symbol}:trade"
-        if state.get(trade_key):
-            continue       # one trade per index; an opposite candle exits it first
+        busy = _open_slots(state, today, symbol)
+        if len(busy) >= MAX_OPEN_PER_INDEX:
+            continue       # all trade slots for this index in use; an opposite candle exits one first
+        if any(state.get(f"{k}:candle") == candle for k in busy):
+            continue       # this candle is already being traded
+        trade_key = next(k for k in _slot_keys(today, symbol) if k not in busy)
         if candle == state.get(f"{today}:{symbol}:lost_candle"):
             print(f"         [{symbol}] already lost on this candle — waiting for the next one")
             continue
@@ -881,7 +1017,7 @@ def _scan_candles(symbols: list[str], state: dict, api_key: str, access_token: s
               + (f" — RIDE ({res['range_mult']:.1f}× avg candle)" if ride else ""))
         trade = _place_order(symbol, sig, res["spot"], api_key, access_token,
                              chart_sl=res["stop"], book_pct=CANDLE_BOOK_PCT, ride=ride,
-                             book_pts=CANDLE_BOOK_PTS.get(symbol))
+                             book_pts=CANDLE_BOOK_PTS.get(symbol), sl_pct=CANDLE_SL_PCT)
         if "error" in trade:
             print(f"  [AUTO-TRADE] NOT PLACED — {trade['error']}")
             if ntfy_topic and state.get(f"{today}:{symbol}:err_candle") != candle:
@@ -1091,9 +1227,9 @@ def _scan_setups(symbols: list[str], state: dict, api_key: str, access_token: st
 
 def _prepare_state(state: dict, today: str) -> None:
     """Carry open trades from earlier days to today's keys; prune everything else that is stale."""
-    for key in [k for k in state if re.fullmatch(r"\d{4}-\d{2}-\d{2}:\w+:trade", k)]:
-        day, sym, _ = key.split(":")
-        new_key = f"{today}:{sym}:trade"
+    for key in [k for k in state if re.fullmatch(r"\d{4}-\d{2}-\d{2}:\w+:trade\d*", k)]:
+        day, sym, slot = key.split(":")
+        new_key = f"{today}:{sym}:{slot}"
         if day < today and new_key not in state:
             for old in [k for k in list(state) if k == key or k.startswith(key + ":")]:
                 state[new_key + old[len(key):]] = state.pop(old)
@@ -1114,6 +1250,9 @@ def _account_pass(acct: dict, symbols: list[str], state_file: str, now_ist: date
     key, tok, topic = acct["api_key"], acct["access_token"], acct["ntfy"]
     _monitor_positions(symbols, state, key, tok, topic, now_ist)
     _save_state(path, state)
+    if CANCEL_AT_SQUARE_OFF and now_ist.time() >= SQUARE_OFF_TIME:
+        _square_off_cleanup(_kite(key, tok), state, now_ist.strftime("%Y-%m-%d"), topic)
+        _save_state(path, state)
     if not force and not (SIGNAL_OPEN <= now_ist.time() <= SIGNAL_CLOSE):
         print(f"Outside clean signal window ({SIGNAL_OPEN}–{SIGNAL_CLOSE} IST) — skipping new signals.")
         return
@@ -1641,7 +1780,7 @@ def preflight(symbols: list[str], state_file: str, notify: bool = False) -> bool
 
     try:
         state = _load_state(state_file)
-        open_trades = [k for k in state if re.fullmatch(r"\d{4}-\d{2}-\d{2}:\w+:trade", k)]
+        open_trades = [k for k in state if re.fullmatch(r"\d{4}-\d{2}-\d{2}:\w+:trade\d*", k)]
         add("PASS", "state file", f"{len(state)} keys; open bot trades: "
                                   + (", ".join(open_trades) if open_trades else "none"))
     except Exception as e:
@@ -1674,7 +1813,7 @@ def preflight(symbols: list[str], state_file: str, notify: bool = False) -> bool
             add("WARN", f"{n}: balance", f"margin fetch failed ({e}) — orders will use 1 lot")
         _pf_positions(k2, add, f"{n}: ")
         st2 = _load_state(_acct_state_file(state_file, acct))
-        open2 = [k for k in st2 if re.fullmatch(r"\d{4}-\d{2}-\d{2}:\w+:trade", k)]
+        open2 = [k for k in st2 if re.fullmatch(r"\d{4}-\d{2}-\d{2}:\w+:trade\d*", k)]
         add("PASS", f"{n}: state file", "open bot trades: " + (", ".join(open2) if open2 else "none"))
 
     try:
