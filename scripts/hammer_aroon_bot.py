@@ -3,20 +3,21 @@
 A hammer-shaped day: well off the low (long lower wick), back near the high.
 
 Replaces the Trendlyne "in hammer" screener (Trendlyne blocks requests from
-servers with a human-verification page). Every run (cron, every 15 min in market
+servers with a human-verification page). Every run (cron, every 10 min in market
 hours) it:
   1. loads the Nifty 500 list (NSE's CSV, cached a week in data/nifty500_list.csv)
-  2. fetches ~3 weeks of 15-minute candles per stock from Kite (≤ 3 requests/s)
+  2. fetches ~3 weeks of 10-minute candles per stock from Kite (≤ 3 requests/s;
+     HAMMER_TF_MIN=15 switches back to 15-minute candles)
   3. keeps the stocks that pass all of the screener's conditions:
        current price ≥ day low  × (1 + 3%)     bounced at least 3% off the day's low
-       current price >  15-min Supertrend      15-min trend is up
+       current price >  10-min Supertrend      10-min trend is up
        day high − current price < 1% of day high   closing in on the day's high (small upper wick)
-  4. ranks them by 15-min AROON Down (14), highest first
+  4. ranks them by 10-min AROON Down (14), highest first
   5. pushes the top stock (plus the next few) to ntfy
 
-Current price = the latest price (the forming 15-min candle's close); day high and
+Current price = the latest price (the forming candle's close); day high and
 low include the forming candle. Supertrend (10, 3) and AROON Down (14) use completed
-15-min candles. Supertrend: ATR(10, Wilder) bands around (high+low)/2, ×3, with the
+candles. Supertrend: ATR(10, Wilder) bands around (high+low)/2, ×3, with the
 usual carry-forward rules. AROON Down (14) = 100 × (14 − candles since the lowest low
 of the last 15) / 14. Stocks tied at the top AROON Down are listed in the push.
 
@@ -27,10 +28,12 @@ Settings in /root/stockAnalyser/.env (optional):
   HAMMER_ST_PERIOD=10            # Supertrend ATR period
   HAMMER_ST_MULT=3               # Supertrend multiplier
   HAMMER_TOP_N=3                 # stocks listed in the push
+  HAMMER_TF_MIN=10               # candle size in minutes: 3, 5, 10, 15, 30 or 60
 
-Cron (server clock is UTC; runs 1 min after each 15-min close, 09:16 … 15:31 IST —
-a full scan takes ~3 min):
-  46,1,16,31 3-10 * * 1-5 cd /root/stockAnalyser && /root/venv/bin/python scripts/hammer_aroon_bot.py >> hammer_aroon.log 2>&1
+Cron (server clock is UTC; 10-min candles close at :25, :35 … so it runs 1 min later,
+09:16 … 15:26 IST — a full scan takes ~3 min):
+  6,16,26,36,46,56 3-10 * * 1-5 cd /root/stockAnalyser && /root/venv/bin/python scripts/hammer_aroon_bot.py >> hammer_aroon.log 2>&1
+For 15-min candles (HAMMER_TF_MIN=15): 46,1,16,31 3-10 * * 1-5 …
 
 Usage:
   python scripts/hammer_aroon_bot.py              # one scan (skips outside market hours)
@@ -62,7 +65,9 @@ _IST = datetime.timezone(datetime.timedelta(hours=5, minutes=30))
 _LIST_CACHE = _ROOT / "data" / "nifty500_list.csv"
 MARKET_OPEN, MARKET_CLOSE = datetime.time(9, 15), datetime.time(15, 35)   # 15:31 run reads the last candle
 AROON_N = 14
-HISTORY_DAYS = 21          # calendar days of 15-min candles: plenty for Supertrend and AROON to settle
+HISTORY_DAYS = 21          # calendar days of candles: plenty for Supertrend and AROON to settle
+TF_MIN = 10                # candle size in minutes (HAMMER_TF_MIN in .env)
+_KITE_TF = {3: "3minute", 5: "5minute", 10: "10minute", 15: "15minute", 30: "30minute", 60: "60minute"}
 REQ_PER_SEC = 3            # Kite historical-data limit
 
 
@@ -123,7 +128,7 @@ class _RateLimit:
             time.sleep(delay)
 
 
-def fetch_15m(symbol: str, now: datetime.datetime, limiter: _RateLimit, headers: dict) -> pd.DataFrame:
+def fetch_candles(symbol: str, now: datetime.datetime, limiter: _RateLimit, headers: dict) -> pd.DataFrame:
     token = get_token(symbol)
     if token is None:
         return pd.DataFrame()
@@ -132,7 +137,7 @@ def fetch_15m(symbol: str, now: datetime.datetime, limiter: _RateLimit, headers:
     for attempt in range(3):
         limiter.wait()
         try:
-            r = requests.get(f"{_KITE_BASE}/instruments/historical/{token}/15minute",
+            r = requests.get(f"{_KITE_BASE}/instruments/historical/{token}/{_KITE_TF[TF_MIN]}",
                              headers=headers, params=params, timeout=20)
         except requests.RequestException:
             continue
@@ -151,8 +156,8 @@ def fetch_15m(symbol: str, now: datetime.datetime, limiter: _RateLimit, headers:
 
 
 def completed(df: pd.DataFrame, now: datetime.datetime) -> pd.DataFrame:
-    """Drop the 15-min candle that is still forming."""
-    cutoff = now.replace(tzinfo=None) - datetime.timedelta(minutes=15)
+    """Drop the candle that is still forming."""
+    cutoff = now.replace(tzinfo=None) - datetime.timedelta(minutes=TF_MIN)
     return df[df.index <= cutoff]
 
 
@@ -235,7 +240,7 @@ def scan(now: datetime.datetime, session: datetime.date | None, rules: dict,
 
     def one(sym: str) -> dict | None:
         nonlocal got
-        df = fetch_15m(sym, now, limiter, headers)
+        df = fetch_candles(sym, now, limiter, headers)
         if df.empty:
             return None
         got += 1
@@ -252,7 +257,7 @@ def scan(now: datetime.datetime, session: datetime.date | None, rules: dict,
 
 
 def main() -> None:
-    ap = argparse.ArgumentParser(description="In-hammer screener on Nifty 500, ranked by 15-min AROON Down → ntfy")
+    ap = argparse.ArgumentParser(description="In-hammer screener on Nifty 500, ranked by AROON Down → ntfy")
     ap.add_argument("--force", action="store_true", help="run outside market hours")
     ap.add_argument("--dry-run", action="store_true", help="print, don't push")
     ap.add_argument("--limit", type=int, help="scan only the first N stocks (testing)")
@@ -262,6 +267,11 @@ def main() -> None:
     if not args.force and (now.weekday() >= 5 or not MARKET_OPEN <= now.time() <= MARKET_CLOSE):
         print(f"{now:%a %H:%M} IST — market closed, skipping")
         return
+    global TF_MIN
+    tf = _env_value("HAMMER_TF_MIN", str(TF_MIN)).strip()
+    if not tf.isdigit() or int(tf) not in _KITE_TF:
+        sys.exit(f"HAMMER_TF_MIN={tf} — use one of {', '.join(map(str, _KITE_TF))}")
+    TF_MIN = int(tf)
     topic = _env_value("HAMMER_NTFY_TOPIC", "revanth-kite-hammer-aroon")
     rules = {"above_low": float(_env_value("HAMMER_ABOVE_LOW_PCT", "3")),
              "near_high": float(_env_value("HAMMER_NEAR_HIGH_PCT", "1")),
@@ -292,8 +302,8 @@ def main() -> None:
         lines.append(f"(tied at {top['aroon_down']:g}: {', '.join(tied[:10])}"
                      + (f" +{len(tied) - 10} more" if len(tied) > 10 else "") + ")")
     body = "\n".join(lines) + (f"\n\n{len(hits)} Nifty 500 stocks ≥ {rules['above_low']:g}% off the day low, "
-                                f"above 15-min Supertrend, within {rules['near_high']:g}% of the day high")
-    title = f"Top: {top['symbol']} — AROON Down {top['aroon_down']:g} ({label})"
+                                f"above {TF_MIN}-min Supertrend, within {rules['near_high']:g}% of the day high")
+    title = f"Top: {top['symbol']} — {TF_MIN}m AROON Down {top['aroon_down']:g} ({label})"
     print(title + "\n  " + "\n  ".join(lines))
     if not args.dry_run:
         notify(topic, title, body, tags="hammer,chart_with_downwards_trend")
