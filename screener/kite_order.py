@@ -563,12 +563,13 @@ def exit_position(symbol: str, api_key: str, access_token: str,
 
 
 def book_levels(symbol: str, opt_type: str, spot: float, entry: float,
-                stop_spot: float | None, book_pct: float = BOOK_PROFIT_PCT) -> tuple[float, float]:
+                stop_spot: float | None, book_pct: float = BOOK_PROFIT_PCT,
+                book_pts: float | None = None) -> tuple[float, float]:
     """(option SL, option target) for book mode.
 
     SL: premium where the index reaches the setup's stop (delta 0.5), kept 5–15%
     below entry, then SL_EXTRA_PTS lower (NIFTY 15, SENSEX 30) against stop hunts.
-    Target: entry × (1 + book_pct).
+    Target: entry + book_pts premium points when given, else entry × (1 + book_pct).
     """
     dist = None
     if stop_spot and spot:
@@ -576,7 +577,7 @@ def book_levels(symbol: str, opt_type: str, spot: float, entry: float,
     base = entry - _ATM_DELTA * dist if dist and dist > 0 else entry * 0.90
     base = min(max(base, entry * (1 - BOOK_SL_MAX_PCT)), entry * (1 - BOOK_SL_MIN_PCT))
     sl = max(base - SL_EXTRA_PTS.get(symbol, 15.0), entry * 0.40)
-    return _tick(sl), _tick(entry * (1 + book_pct))
+    return _tick(sl), _tick(entry + book_pts if book_pts else entry * (1 + book_pct))
 
 
 def place_order_for_signal(
@@ -592,6 +593,7 @@ def place_order_for_signal(
     trailing: bool = False,
     book_pct: float | None = None,
     ride: bool = False,
+    book_pts: float | None = None,
 ) -> dict:
     """
     Place ATM option order + GTT for the given signal.
@@ -696,7 +698,7 @@ def place_order_for_signal(
                          entry_price * (1 - SL_MIN_PCT)))
     target_price = _tick(max(target_price, entry_price * (1 + T1_MIN_PCT)))
     if book_pct:
-        sl_price, target_price = book_levels(symbol, opt_type, spot, entry_price, chart_sl, book_pct)
+        sl_price, target_price = book_levels(symbol, opt_type, spot, entry_price, chart_sl, book_pct, book_pts)
         trailing = False
     _LOG.info(f"Option SL ₹{sl_price} ({(1 - sl_price / entry_price) * 100:.0f}% below entry), T1 ₹{target_price}")
 

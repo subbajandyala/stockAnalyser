@@ -128,6 +128,17 @@ RIDE_MULT = float(_env_setting("CHART_RIDE_MULT") or 2.0)
 # The lock must sit below the booking level, or the stop would land on the price itself:
 # half of it, at most +10% (book 20% → +10%, book 10% → +5%).
 RIDE_LOCK_PCT = float(_env_setting("CHART_RIDE_LOCK_PCT") or min(0.10, CANDLE_BOOK_PCT / 2))
+# Fixed booking in option premium points per index (CHART_BOOK_PTS_NIFTY=10 → sell at
+# entry + ₹10); replaces CHART_BOOK_PCT for that index. A ride trade's lock is then
+# half the points (entry + ₹5). Empty / 0 = use the percentage.
+CANDLE_BOOK_PTS = {}
+for _sym in ("NIFTY", "SENSEX"):
+    try:
+        _v = float(_env_setting(f"CHART_BOOK_PTS_{_sym}") or 0)
+    except ValueError:
+        _v = 0.0
+    if _v > 0:
+        CANDLE_BOOK_PTS[_sym] = _v
 if RIDE_LOCK_PCT >= CANDLE_BOOK_PCT:
     print(f"[chart_bot] CHART_RIDE_LOCK_PCT {RIDE_LOCK_PCT:g} is not below CHART_BOOK_PCT "
           f"{CANDLE_BOOK_PCT:g} — using {CANDLE_BOOK_PCT / 2:g}", flush=True)
@@ -189,7 +200,8 @@ def _auto_trade_enabled() -> bool:
 _AUTO_TRADE = _auto_trade_enabled()
 print(f"[chart_bot] AUTO_TRADE={'ON' if _AUTO_TRADE else 'OFF (set KITE_AUTO_TRADE=1 in .env to enable)'}"
       + (f" | engine candles on {CANDLE_TF} (≥ {_candles.MIN_RANGE_MULT:g}× avg range) | book at "
-         f"+{CANDLE_BOOK_PCT:.0%}, exit if not working in {SCALP_MAX_MIN} min | ride "
+         f"+{CANDLE_BOOK_PCT:.0%}" + "".join(f" ({k} +{v:g} pts)" for k, v in CANDLE_BOOK_PTS.items())
+         + f", exit if not working in {SCALP_MAX_MIN} min | ride "
          + (f"strong candles ≥ {RIDE_MULT:g}× avg (lock +{RIDE_LOCK_PCT:.0%})" if RIDE_MULT else "off")
          + " | max lots " + ", ".join(f"{k} {v or 'no cap'}" for k, v in _ko.MAX_LOTS.items())
          if ENGINE == "candles" else
@@ -636,7 +648,8 @@ def _manage_trade(kite, symbol: str, state: dict, trade_key: str,
         if state.get(k("mode")) == "ride":
             half = 0          # ride: keep the whole position, only lock the stop and trail
         remaining = qty - half
-        floor     = RIDE_LOCK_PCT if state.get(k("mode")) == "ride" else TRAIL_FLOOR_PCT
+        floor     = (float(state.get(k("lock_pct")) or RIDE_LOCK_PCT) if state.get(k("mode")) == "ride"
+                     else TRAIL_FLOOR_PCT)
         new_sl    = _tick(max(entry * (1 + floor), ltp * (1 - TRAIL_PCT)))
         far       = max(far, _tick(ltp * 2))
         # Shrink the GTT first so it can never sell more than we will still hold
@@ -669,7 +682,8 @@ def _manage_trade(kite, symbol: str, state: dict, trade_key: str,
     # 3. Trailing — raise the stop as the premium makes new highs
     peak = max(float(state.get(k("peak")) or ltp), ltp)
     state[k("peak")] = peak
-    floor = RIDE_LOCK_PCT if state.get(k("mode")) == "ride" else TRAIL_FLOOR_PCT
+    floor = (float(state.get(k("lock_pct")) or RIDE_LOCK_PCT) if state.get(k("mode")) == "ride"
+             else TRAIL_FLOOR_PCT)
     cand = _tick(max(entry * (1 + floor), peak * (1 - TRAIL_PCT)))
     if cand >= sl * (1 + TRAIL_MIN_STEP) and cand < ltp:
         far = max(far, _tick(peak * 2))
@@ -866,7 +880,8 @@ def _scan_candles(symbols: list[str], state: dict, api_key: str, access_token: s
         print(f"  [AUTO-TRADE] {res['label']} → {sig} on {symbol} @ {res['spot']:.0f} (candle stop {res['stop']})"
               + (f" — RIDE ({res['range_mult']:.1f}× avg candle)" if ride else ""))
         trade = _place_order(symbol, sig, res["spot"], api_key, access_token,
-                             chart_sl=res["stop"], book_pct=CANDLE_BOOK_PCT, ride=ride)
+                             chart_sl=res["stop"], book_pct=CANDLE_BOOK_PCT, ride=ride,
+                             book_pts=CANDLE_BOOK_PTS.get(symbol))
         if "error" in trade:
             print(f"  [AUTO-TRADE] NOT PLACED — {trade['error']}")
             if ntfy_topic and state.get(f"{today}:{symbol}:err_candle") != candle:
@@ -889,14 +904,19 @@ def _scan_candles(symbols: list[str], state: dict, api_key: str, access_token: s
             f"{trade_key}:trailing": False,
             f"{trade_key}:direction": sig,
             f"{trade_key}:mode": "ride" if ride else "scalp",
+            # ride lock: half the booking points when booking in points, else RIDE_LOCK_PCT
+            f"{trade_key}:lock_pct": (CANDLE_BOOK_PTS[symbol] / 2 / trade["entry_price"]
+                                      if symbol in CANDLE_BOOK_PTS and trade.get("entry_price")
+                                      else RIDE_LOCK_PCT),
             f"{trade_key}:candle": candle,
             f"{trade_key}:entry_t": now_ist.strftime("%H:%M"),
         })
         state[symbol] = f"{today}:{symbol}:{sig}:{res['label']}"
         entry, sl, tgt = trade["entry_price"], trade["sl"], trade["target"]
         t1 = trade.get("t1", tgt)
-        plan = (f"ride: at ₹{t1} (+{CANDLE_BOOK_PCT:.0%}) stop → entry +{RIDE_LOCK_PCT:.0%}, then trails 12% below the peak"
-                if ride else f"book ₹{tgt} (+{CANDLE_BOOK_PCT:.0%})")
+        lock = state[f"{trade_key}:lock_pct"]
+        plan = (f"ride: at ₹{t1} ({(t1 / entry - 1) * 100:+.0f}%) stop → entry +{lock:.0%}, then trails 12% below the peak"
+                if ride else f"book ₹{tgt} ({(tgt / entry - 1) * 100:+.0f}%)")
         print(f"  [AUTO-TRADE] ORDER — {trade['tradingsymbol']} | qty {trade['qty']} | entry ₹{entry} "
               f"| SL ₹{sl} | {plan}")
         _append_chart_log(today, _setup_log_entry(now_ist, symbol, view, "placed (ride)" if ride else "placed",

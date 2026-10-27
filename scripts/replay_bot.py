@@ -361,12 +361,14 @@ def run_candles(sig: pd.DataFrame, bars: dict, lots: int, book_pct: float, max_m
             if pending is not None and pos is None and t.time() < _SQUARE_OFF:
                 a = pending
                 entry = _PREMIUM.get(symbol, 150.0)
-                sl, tgt = book_levels(symbol, a["signal"], a["spot"], entry, a["stop"], book_pct)
+                pts = cb.CANDLE_BOOK_PTS.get(symbol)
+                sl, tgt = book_levels(symbol, a["signal"], a["spot"], entry, a["stop"], book_pct, pts)
                 ride = bool(ride_mult and a["setup"] in ("strong_bull", "strong_bear")
                             and a.get("range_mult", 0) >= ride_mult)
                 pos = {"d": a["signal"], "t": t, "spot": bar["Open"], "entry": entry, "sl": sl, "tgt": tgt,
                        "qty": lots * lot, "setup": a["setup"] + (" (ride)" if ride else ""), "exit_next": None,
-                       "candle": a["candle"], "ride": ride, "trail": False, "peak": entry}
+                       "candle": a["candle"], "ride": ride, "trail": False, "peak": entry,
+                       "lock": pts / 2 / entry if pts else cb.RIDE_LOCK_PCT}
                 if verbose:
                     print(f"    {t:%H:%M} {symbol} ENTER {a['signal']} ({pos['setup']}) ₹{entry:.0f}  SL ₹{sl}  "
                           + (f"ride from ₹{tgt}" if ride else f"book ₹{tgt}"))
@@ -383,11 +385,11 @@ def run_candles(sig: pd.DataFrame, bars: dict, lots: int, book_pct: float, max_m
                     if pos["trail"] or p_fav >= pos["tgt"]:     # +book_pct reached → lock, trail 12%
                         pos["trail"] = True
                         pos["peak"] = max(pos["peak"], p_fav)
-                        pos["sl"] = max(pos["sl"], _tick(max(pos["entry"] * (1 + cb.RIDE_LOCK_PCT),
+                        pos["sl"] = max(pos["sl"], _tick(max(pos["entry"] * (1 + pos["lock"]),
                                                              pos["peak"] * 0.88)))
                 elif p_fav >= pos["tgt"]:
                     p_, pos = pos, None
-                    _done(p_, max(p_["tgt"], p_open), t, f"booked +{book_pct:.0%}")
+                    _done(p_, max(p_["tgt"], p_open), t, "booked target")
             if close_t not in g.index:
                 continue
             s = g.loc[close_t]
