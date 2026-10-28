@@ -315,7 +315,7 @@ def build_candle_signals(symbol: str, df3: pd.DataFrame, days: list) -> pd.DataF
             t = hist_all.index[i]
             if t.date() != day:
                 continue
-            # a few sessions of history, for the optional Supertrend / CPR filters
+            # a few sessions of history, for the Supertrend filter
             r = _candles.read(hist_all.iloc[max(0, i - 299): i + 1])
             rows.append({"t": t + pd.Timedelta(minutes=3), "day": day, "symbol": symbol, "signal": r["signal"],
                          "side": r.get("side"), "setup": r["pattern"], "stop": r["stop"], "spot": r["spot"],

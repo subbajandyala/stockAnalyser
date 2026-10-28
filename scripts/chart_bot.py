@@ -16,10 +16,9 @@ Engine "candles" (default, CHART_ENGINE in .env) — screener/candles.py:
     early   opposite candle → exit and flip (no time-based exit: a trade runs until target,
             stop, opposite candle or square-off)
     15:15   square-off
-    filters optional, off by default (screener/trend_filter.py): CHART_SUPERTREND=1 (CE only
-            while Supertrend(10,3) on the 3m candles is up, PE only while down), CHART_CPR_BIAS=1
-            (no CE below the CPR, no PE above it), CHART_CPR_ZONE=1 (no CE just under / inside
-            the CPR, no PE just over / inside it). An opposite candle still exits a trade.
+    filter  Supertrend (screener/trend_filter.py, on; CHART_SUPERTREND=0 turns it off): CE only
+            while Supertrend(10,2) on the 3m candles is up, PE only while it is down
+            (CHART_ST_PERIOD / CHART_ST_MULT). An opposite candle still exits a trade.
 
 Second Kite account (candles engine): KITE2_API_KEY, KITE2_ACCESS_TOKEN (auto_token.py
 writes it), KITE2_AUTO_TRADE=1, optional KITE2_NAME / KITE2_NTFY_TOPIC in .env. Both accounts
@@ -120,13 +119,10 @@ SETUP_TF = _env_setting("CHART_SETUP_TF") or "3m"
 CANDLE_TF       = _env_setting("CHART_CANDLE_TF") or "3m"
 CANDLE_BOOK_PCT = float(_env_setting("CHART_BOOK_PCT") or 0.20)
 _candles.MIN_RANGE_MULT = float(_env_setting("CHART_CANDLE_MIN_MULT") or _candles.MIN_RANGE_MULT)
-# Optional Supertrend / CPR entry filters (screener/trend_filter.py) — off unless set to 1
-_tf.SUPERTREND   = _env_setting("CHART_SUPERTREND").strip() == "1"
-_tf.ST_PERIOD    = int(_env_setting("CHART_ST_PERIOD") or _tf.ST_PERIOD)
-_tf.ST_MULT      = float(_env_setting("CHART_ST_MULT") or _tf.ST_MULT)
-_tf.CPR_BIAS     = _env_setting("CHART_CPR_BIAS").strip() == "1"
-_tf.CPR_ZONE     = _env_setting("CHART_CPR_ZONE").strip() == "1"
-_tf.CPR_ZONE_PCT = float(_env_setting("CHART_CPR_ZONE_PCT") or _tf.CPR_ZONE_PCT)
+# Supertrend entry filter (screener/trend_filter.py) — on unless CHART_SUPERTREND=0
+_tf.SUPERTREND = _env_setting("CHART_SUPERTREND").strip() != "0"
+_tf.ST_PERIOD  = int(_env_setting("CHART_ST_PERIOD") or _tf.ST_PERIOD)
+_tf.ST_MULT    = float(_env_setting("CHART_ST_MULT") or _tf.ST_MULT)
 # Lot cap per order (0 = only the balance limits it)
 for _sym in list(_ko.MAX_LOTS):
     _v = _env_setting(f"CHART_MAX_LOTS_{_sym}")
@@ -849,7 +845,7 @@ def _monitor_positions(
             continue
         if state.get(f"{trade_key}:mode") in ("scalp", "ride"):
             cres = _read_candle(symbol, api_key, access_token, now_ist)
-            # the candle's side, not its signal: a Supertrend / CPR filter blocks entries, never this exit
+            # the candle's side, not its signal: the Supertrend filter blocks entries, never this exit
             opp = cres.get("side") or cres.get("signal")
             if not cres.get("error") and opp and opp != recorded_direction:
                 _exit_bot_position(kite, symbol, state, trade_key,

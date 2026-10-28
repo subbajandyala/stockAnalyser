@@ -18,8 +18,8 @@ feed when the ticker daemon runs) against the previous candles, and names it:
 Stop for the trade = the candle's low (CE) or high (PE); kite_order turns it
 into the option stop and subtracts the anti-hunt buffer.
 
-Optional Supertrend / CPR filters (screener/trend_filter.py, off unless set in
-.env) can block a side: the candle is still named, but signal stays None.
+The Supertrend filter (screener/trend_filter.py) can block a side: the candle
+is still named, but signal stays None.
 """
 
 import datetime
@@ -62,8 +62,8 @@ def _normal_range(d: pd.DataFrame) -> float:
 def read(df: pd.DataFrame) -> dict:
     """Name the LAST candle of df (it may still be forming) → signal CE / PE / None.
 
-    Pass a few sessions of candles when a Supertrend / CPR filter is on (they need
-    the history); the candle itself only looks at the last 40."""
+    Pass a few sessions of candles for the Supertrend filter (it needs the
+    history); the candle itself only looks at the last 40."""
     res = {"signal": None, "pattern": None, "label": "", "stop": None, "spot": None,
            "candle_time": None, "text": "", "range_mult": 0.0, "blocked": None,
            "side": None}
@@ -103,7 +103,7 @@ def read(df: pd.DataFrame) -> dict:
         res["text"] = f"mixed candle (body {body:+.1f}, range {rng:.1f}, close at {pos:.0%} of range)"
         return res
     side = "CE" if pattern in ("bull_engulf", "strong_bull", "hammer") else "PE"
-    # "side" stays set when a filter blocks the entry: an open trade still exits on an opposite candle
+    # "side" stays set when the filter blocks the entry: an open trade still exits on an opposite candle
     res.update(signal=side, side=side, pattern=pattern, label=_LABEL[pattern], stop=round(l if side == "CE" else h, 2))
     res["text"] = (f"{_LABEL[pattern]} → BUY {side} (O {o:,.1f} H {h:,.1f} L {l:,.1f} C {cl:,.1f}, "
                    f"range {rng:.1f} = {rng / avg:.1f}× avg {avg:.1f})")
