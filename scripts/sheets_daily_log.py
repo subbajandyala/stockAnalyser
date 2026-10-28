@@ -53,6 +53,15 @@ def _num(v):
         return None
 
 
+def _held(t1: str | None, t2: str | None) -> float | None:
+    """Minutes between two HH:MM:SS fill times."""
+    try:
+        a, b = (datetime.datetime.strptime(t, "%H:%M:%S") for t in (t1, t2))
+        return round((b - a).total_seconds() / 60, 1)
+    except (TypeError, ValueError):
+        return None
+
+
 def collect(date_str: str, account: str) -> dict:
     """The day's rows for this account: {"trades": [...], "daily": {...}}."""
     try:
@@ -99,6 +108,8 @@ def collect(date_str: str, account: str) -> dict:
             "Entry": _num(m.get("entry") or t.get("entry_premium")),
             "SL": _num(t.get("sl_premium")), "Target": _num(t.get("target_premium")),
             "Exit": _num(m.get("exit")), "P&L": _num(pnl), "Result": result,
+            "Entry time": m.get("entry_time", ""), "Exit time": m.get("exit_time", ""),
+            "Held (min)": _held(m.get("entry_time"), m.get("exit_time")),
         })
 
     oc = pd.DataFrame()

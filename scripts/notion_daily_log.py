@@ -196,22 +196,29 @@ def _load_log(date_str: str) -> list[dict]:
 def match_fills(bot_trades: list[dict], fills: list[dict]) -> dict:
     """FIFO-match each bot BUY order to later SELL fills of the same contract.
 
-    Returns {order_id: {"entry", "exit", "qty", "closed_qty", "pnl"}}.
+    Returns {order_id: {"entry", "exit", "qty", "closed_qty", "pnl", "entry_time", "exit_time"}}
+    (times are the fill times as "HH:MM:SS", "" when unknown).
     """
+    def _hms(f) -> str:
+        t = str(f.get("fill_timestamp") or f.get("exchange_timestamp") or "")
+        return t.split(" ")[-1][:8] if t else ""
+
     by_ts = defaultdict(list)
     for f in fills:
         by_ts[f["tradingsymbol"]].append(f)
     out = {}
     for ts, fl in by_ts.items():
         fl.sort(key=lambda f: str(f.get("fill_timestamp") or f.get("exchange_timestamp") or ""))
-        buys = defaultdict(lambda: [0, 0.0])        # order_id → [qty, cost]
+        buys = defaultdict(lambda: [0, 0.0, ""])    # order_id → [qty, cost, first fill time]
         for f in fl:
             if f["transaction_type"] == "BUY":
                 b = buys[str(f["order_id"])]
                 b[0] += int(f["quantity"]); b[1] += int(f["quantity"]) * float(f["average_price"])
+                b[2] = b[2] or _hms(f)
         queue = [str(t["order_id"]) for t in bot_trades if t.get("tradingsymbol") == ts and str(t["order_id"]) in buys]
         state = {oid: {"qty": buys[oid][0], "entry": buys[oid][1] / buys[oid][0] if buys[oid][0] else 0,
-                       "closed_qty": 0, "proceeds": 0.0} for oid in queue}
+                       "closed_qty": 0, "proceeds": 0.0, "entry_time": buys[oid][2], "exit_time": ""}
+                 for oid in queue}
         qi = 0
         for f in fl:
             if f["transaction_type"] != "SELL":
@@ -222,13 +229,15 @@ def match_fills(bot_trades: list[dict], fills: list[dict]) -> dict:
                 take = min(left, s["qty"] - s["closed_qty"])
                 s["closed_qty"] += take
                 s["proceeds"] += take * float(f["average_price"])
+                s["exit_time"] = _hms(f)
                 left -= take
                 if s["closed_qty"] >= s["qty"]:
                     qi += 1
         for oid, s in state.items():
             exit_px = s["proceeds"] / s["closed_qty"] if s["closed_qty"] else None
             out[oid] = {"entry": s["entry"], "exit": exit_px, "qty": s["qty"], "closed_qty": s["closed_qty"],
-                        "pnl": s["proceeds"] - s["closed_qty"] * s["entry"]}
+                        "pnl": s["proceeds"] - s["closed_qty"] * s["entry"],
+                        "entry_time": s["entry_time"], "exit_time": s["exit_time"] if s["closed_qty"] else ""}
     return out
 
 
