@@ -41,6 +41,13 @@ Usage (on the droplet):
   /root/venv/bin/python scripts/replay_bot.py                 # NIFTY + SENSEX, last 20 days
   /root/venv/bin/python scripts/replay_bot.py SENSEX --days 40
   /root/venv/bin/python scripts/replay_bot.py --day 2026-10-21 -v   # one day, every decision
+
+Exit tests (replay only — the live bot does not have these):
+  --mid-stop        exit when a 3m candle CLOSES back past the middle of the entry
+                    candle (below it for CE, above it for PE)
+  --be-lock 6,18    once the premium is up 6 pts (NIFTY) / 18 pts (SENSEX), move
+                    the stop to entry +1 (break-even)
+  --compare-exits   run live, mid-stop, BE-lock and both side by side
 """
 
 import argparse
@@ -318,15 +325,21 @@ def build_candle_signals(symbol: str, df3: pd.DataFrame, days: list) -> pd.DataF
             r = _candles.read(hist_all.iloc[max(0, i - 39): i + 1])
             rows.append({"t": t + pd.Timedelta(minutes=3), "day": day, "symbol": symbol, "signal": r["signal"],
                          "setup": r["pattern"], "stop": r["stop"], "spot": r["spot"],
-                         "range_mult": r.get("range_mult", 0.0)})
+                         "range_mult": r.get("range_mult", 0.0),
+                         "mid": (hist_all["High"].iloc[i] + hist_all["Low"].iloc[i]) / 2})
     return pd.DataFrame(rows)
 
 
 def run_candles(sig: pd.DataFrame, bars: dict, lots: int, book_pct: float, max_min: int,
-                verbose: bool, ride_mult: float = 0.0) -> pd.DataFrame:
+                verbose: bool, ride_mult: float = 0.0, mid_stop: bool = False,
+                be_lock: dict | None = None) -> pd.DataFrame:
     """ride_mult > 0: strong candles ≥ ride_mult × avg range don't book at +book_pct —
     the stop moves to entry +RIDE_LOCK_PCT there (+10% at the default +20% booking)
-    and trails 12% below the peak premium."""
+    and trails 12% below the peak premium.
+
+    Exit tests (replay only): mid_stop exits at the close of a 3m candle that closes
+    back past the middle of the entry candle; be_lock {symbol: pts} moves the stop
+    to entry +1 once the premium has been up that many points."""
     trades = []
     for (symbol, day), g in sig.groupby(["symbol", "day"]):
         if symbol not in cb._TRADE_SYMBOLS:
@@ -369,7 +382,8 @@ def run_candles(sig: pd.DataFrame, bars: dict, lots: int, book_pct: float, max_m
                 pos = {"d": a["signal"], "t": t, "spot": bar["Open"], "entry": entry, "sl": sl, "tgt": tgt,
                        "qty": lots * lot, "setup": a["setup"] + (" (ride)" if ride else ""), "exit_next": None,
                        "candle": a["candle"], "ride": ride, "trail": False, "peak": entry,
-                       "lock": pts / 2 / entry if pts else cb.RIDE_LOCK_PCT}
+                       "lock": pts / 2 / entry if pts else cb.RIDE_LOCK_PCT, "mid": a.get("mid"),
+                       "be": False}
                 if verbose:
                     print(f"    {t:%H:%M} {symbol} ENTER {a['signal']} ({pos['setup']}) ₹{entry:.0f}  SL ₹{sl}  "
                           + (f"ride from ₹{tgt}" if ride else f"book ₹{tgt}"))
@@ -381,7 +395,13 @@ def run_candles(sig: pd.DataFrame, bars: dict, lots: int, book_pct: float, max_m
                 p_fav = _premium(pos["entry"], pos["spot"], favour, d)
                 if _premium(pos["entry"], pos["spot"], adverse, d) <= pos["sl"]:
                     p_, pos = pos, None
-                    _done(p_, min(p_["sl"], p_open), t, "trailing stop" if p_["trail"] else "stop loss")
+                    _done(p_, min(p_["sl"], p_open), t, "trailing stop" if p_["trail"] else
+                          "break-even stop" if p_["be"] else "stop loss")
+                elif (mid_stop and pd.notna(pos["mid"]) and not pos["trail"]
+                      and (bar["Close"] < pos["mid"] if d == "CE" else bar["Close"] > pos["mid"])
+                      and not p_fav >= pos["tgt"]):
+                    p_, pos = pos, None
+                    _done(p_, _premium(p_["entry"], p_["spot"], bar["Close"], d), close_t, "candle-mid stop")
                 elif pos["ride"]:
                     if pos["trail"] or p_fav >= pos["tgt"]:     # +book_pct reached → lock, trail 12%
                         pos["trail"] = True
@@ -391,6 +411,9 @@ def run_candles(sig: pd.DataFrame, bars: dict, lots: int, book_pct: float, max_m
                 elif p_fav >= pos["tgt"]:
                     p_, pos = pos, None
                     _done(p_, max(p_["tgt"], p_open), t, "booked target")
+                if pos and be_lock and not pos["be"] and p_fav - pos["entry"] >= be_lock.get(symbol, 1e9):
+                    pos["be"] = True                         # takes effect from the next candle
+                    pos["sl"] = max(pos["sl"], _tick(pos["entry"] + 1))
             if close_t not in g.index:
                 continue
             s = g.loc[close_t]
@@ -463,8 +486,18 @@ def main() -> None:
                     help="Setups: losses per direction before it stops for the day (0 = off)")
     ap.add_argument("--ride-mult", type=float, default=cb.RIDE_MULT,
                     help="Candles: strong candles ≥ this × avg range ride instead of booking (0 = off)")
+    ap.add_argument("--mid-stop", action="store_true",
+                    help="Candles test: exit when a 3m candle closes back past the entry candle's middle")
+    ap.add_argument("--be-lock", metavar="NIFTY,SENSEX",
+                    help="Candles test: stop to entry +1 once the premium is up these pts, e.g. 6,18")
+    ap.add_argument("--compare-exits", action="store_true",
+                    help="Candles: run live, mid-stop, BE-lock and both side by side (BE-lock 6,18 if not given)")
     ap.add_argument("-v", "--verbose", action="store_true", help="Print every entry / exit")
     args = ap.parse_args()
+    be = None
+    if args.be_lock or args.compare_exits:
+        n_, s_ = (float(x) for x in (args.be_lock or "6,18").split(","))
+        be = {"NIFTY": n_, "BANKNIFTY": n_, "SENSEX": s_}
 
     api_key, access_token = cb._kite_creds()
     if not (api_key and access_token):
@@ -530,10 +563,19 @@ def main() -> None:
         trades_by["candles (live)"] = tr
         engines["candles (live)"] = _engine_summary(tr, sym_days, args.cost)
         tr.to_csv(out / "replay_candles_trades.csv", index=False)
-        if args.ride_mult:
+        if args.ride_mult and not (args.mid_stop or args.be_lock or args.compare_exits):
             tr2 = run_candles(allc, bars3, args.lots, cb.CANDLE_BOOK_PCT, cb.SCALP_MAX_MIN, False, ride_mult=0)
             trades_by["candles, no ride"] = tr2
             engines["candles, no ride"] = _engine_summary(tr2, sym_days, args.cost)
+        tests = ([("mid-stop", True, None), ("BE-lock", False, be), ("mid+BE", True, be)] if args.compare_exits
+                 else [("mid+BE" if args.mid_stop and be else "mid-stop" if args.mid_stop else "BE-lock",
+                        args.mid_stop, be)] if (args.mid_stop or be) else [])
+        for name, ms, bl in tests:
+            trt = run_candles(allc, bars3, args.lots, cb.CANDLE_BOOK_PCT, cb.SCALP_MAX_MIN, False,
+                              ride_mult=args.ride_mult, mid_stop=ms, be_lock=bl)
+            trades_by[name] = trt
+            engines[name] = _engine_summary(trt, sym_days, args.cost)
+            trt.to_csv(out / f"replay_candles_{name.replace('+', '_')}_trades.csv", index=False)
     if sig3:
         if args.verbose and not sigc:
             print("\nSetups engine, decision by decision:")
@@ -565,14 +607,17 @@ def main() -> None:
 
     print(f"\n{'=' * 78}\nEngines compared\n{'=' * 78}")
     print(pd.DataFrame(engines).T.to_string())
-    for name in ("candles (live)", "setups"):
+    for name in ("candles (live)", "setups", "mid-stop", "BE-lock", "mid+BE"):
         if name not in trades_by or trades_by[name].empty:
             continue
         st = trades_by[name]
-        print(f"\n{name} by pattern / setup:")
-        print(st.groupby("setup").agg(trades=("pnl", "size"), win_pct=("win", "mean"),
-                                      pnl=("pnl", "sum")).assign(win_pct=lambda x: (x.win_pct * 100).round(0))
-              .to_string())
+        if name in ("candles (live)", "setups"):
+            print(f"\n{name} by pattern / setup:")
+            print(st.groupby("setup").agg(trades=("pnl", "size"), win_pct=("win", "mean"),
+                                          pnl=("pnl", "sum")).assign(win_pct=lambda x: (x.win_pct * 100).round(0))
+                  .to_string())
+        else:
+            print(f"\n{name}:")
         print("Exits:", ", ".join(f"{k} {c}" for k, c in st["exit_reason"].str.replace(r" \(.*", "", regex=True)
                                      .value_counts().items()))
     print(f"\nTrades → {out}/replay_candles_trades.csv, replay_setups_trades.csv, replay_score_trades.csv")
