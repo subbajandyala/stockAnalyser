@@ -22,7 +22,8 @@ const SECRET = 'change-me-to-a-long-secret-word';
 
 // New columns go at the end, so rows written by an older version stay aligned
 const TRADE_COLS = ['Order ID', 'Account', 'Date', 'Time', 'Contract', 'Symbol', 'Direction', 'Candle', 'Ride',
-                    'Qty', 'Entry', 'SL', 'Target', 'Exit', 'P&L', 'Result', 'Entry time', 'Exit time', 'Held (min)'];
+                    'Qty', 'Entry', 'SL', 'Target', 'Exit', 'P&L', 'Result', 'SL Diff', 'Target Diff',
+                    'Entry time', 'Exit time', 'Held (min)'];
 const DAILY_COLS = ['Day', 'Account', 'Date', 'Signals', 'Trades', 'Wins', 'Losses', 'Open', 'Day P&L',
                     'Target hit first', 'SL hit first', 'Notes'];
 

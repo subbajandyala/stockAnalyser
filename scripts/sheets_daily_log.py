@@ -53,6 +53,12 @@ def _num(v):
         return None
 
 
+def _diff(a, b) -> float | None:
+    """a − b in premium points (SL Diff = entry − stop, Target Diff = target − entry)."""
+    a, b = _num(a), _num(b)
+    return None if a is None or b is None else round(a - b, 2)
+
+
 def _held(t1: str | None, t2: str | None) -> float | None:
     """Minutes between two HH:MM:SS fill times."""
     try:
@@ -108,6 +114,8 @@ def collect(date_str: str, account: str) -> dict:
             "Entry": _num(m.get("entry") or t.get("entry_premium")),
             "SL": _num(t.get("sl_premium")), "Target": _num(t.get("target_premium")),
             "Exit": _num(m.get("exit")), "P&L": _num(pnl), "Result": result,
+            "SL Diff": _diff(m.get("entry") or t.get("entry_premium"), t.get("sl_premium")),
+            "Target Diff": _diff(t.get("target_premium"), m.get("entry") or t.get("entry_premium")),
             "Entry time": m.get("entry_time", ""), "Exit time": m.get("exit_time", ""),
             "Held (min)": _held(m.get("entry_time"), m.get("exit_time")),
         })
