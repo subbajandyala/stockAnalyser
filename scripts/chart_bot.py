@@ -15,6 +15,10 @@ Engine "candles" (default, CHART_ENGINE in .env) — screener/candles.py:
             is not sold at +20%: the stop moves to entry +10% there, then trails 12% below the peak
     early   opposite candle → exit and flip; not ≥ +2% after 6 min (CHART_SCALP_MAX_MIN) → exit
     15:15   square-off
+    filters optional, off by default (screener/trend_filter.py): CHART_SUPERTREND=1 (CE only
+            while Supertrend(10,3) on the 3m candles is up, PE only while down), CHART_CPR_BIAS=1
+            (no CE below the CPR, no PE above it), CHART_CPR_ZONE=1 (no CE just under / inside
+            the CPR, no PE just over / inside it). An opposite candle still exits a trade.
 
 Second Kite account (candles engine): KITE2_API_KEY, KITE2_ACCESS_TOKEN (auto_token.py
 writes it), KITE2_AUTO_TRADE=1, optional KITE2_NAME / KITE2_NTFY_TOPIC in .env. Both accounts
@@ -51,6 +55,7 @@ from kiteconnect import KiteConnect
 
 from screener.chart_analysis import analyze_chart
 from screener import candles as _candles
+from screener import trend_filter as _tf
 from screener import kite_order as _ko
 from screener import setups as _setups
 from screener.kite_order import (
@@ -115,6 +120,13 @@ CANDLE_TF       = _env_setting("CHART_CANDLE_TF") or "3m"
 CANDLE_BOOK_PCT = float(_env_setting("CHART_BOOK_PCT") or 0.20)
 SCALP_MAX_MIN   = int(_env_setting("CHART_SCALP_MAX_MIN") or 6)
 _candles.MIN_RANGE_MULT = float(_env_setting("CHART_CANDLE_MIN_MULT") or _candles.MIN_RANGE_MULT)
+# Optional Supertrend / CPR entry filters (screener/trend_filter.py) — off unless set to 1
+_tf.SUPERTREND   = _env_setting("CHART_SUPERTREND").strip() == "1"
+_tf.ST_PERIOD    = int(_env_setting("CHART_ST_PERIOD") or _tf.ST_PERIOD)
+_tf.ST_MULT      = float(_env_setting("CHART_ST_MULT") or _tf.ST_MULT)
+_tf.CPR_BIAS     = _env_setting("CHART_CPR_BIAS").strip() == "1"
+_tf.CPR_ZONE     = _env_setting("CHART_CPR_ZONE").strip() == "1"
+_tf.CPR_ZONE_PCT = float(_env_setting("CHART_CPR_ZONE_PCT") or _tf.CPR_ZONE_PCT)
 # Lot cap per order (0 = only the balance limits it)
 for _sym in list(_ko.MAX_LOTS):
     _v = _env_setting(f"CHART_MAX_LOTS_{_sym}")
@@ -184,6 +196,7 @@ print(f"[chart_bot] AUTO_TRADE={'ON' if _AUTO_TRADE else 'OFF (set KITE_AUTO_TRA
          f"+{CANDLE_BOOK_PCT:.0%}, exit if not working in {SCALP_MAX_MIN} min | ride "
          + (f"strong candles ≥ {RIDE_MULT:g}× avg" if RIDE_MULT else "off")
          + " | max lots " + ", ".join(f"{k} {v or 'no cap'}" for k, v in _ko.MAX_LOTS.items())
+         + (f" | filters: {_tf.describe()}" if _tf.enabled() else "")
          if ENGINE == "candles" else
          f" | engine setups on {SETUP_TF} | book 100% at +{BOOK_PROFIT_PCT:.0%}" if ENGINE == "setups" else
          f" | engine score | signal chart {PRIMARY_TF} | confirm {CONFIRM_TF} | orders at score ±{MIN_TRADE_SCORE}"),
@@ -768,7 +781,9 @@ def _monitor_positions(
             continue
         if state.get(f"{trade_key}:mode") in ("scalp", "ride"):
             cres = _read_candle(symbol, api_key, access_token, now_ist)
-            if not cres.get("error") and cres.get("signal") and cres["signal"] != recorded_direction:
+            # the candle's side, not its signal: a Supertrend / CPR filter blocks entries, never this exit
+            opp = cres.get("side") or cres.get("signal")
+            if not cres.get("error") and opp and opp != recorded_direction:
                 _exit_bot_position(kite, symbol, state, trade_key,
                                    f"opposite candle — {cres['label']} against the {recorded_direction} trade",
                                    ntfy_topic)

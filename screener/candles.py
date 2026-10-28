@@ -17,12 +17,16 @@ feed when the ticker daemon runs) against the previous candles, and names it:
 
 Stop for the trade = the candle's low (CE) or high (PE); kite_order turns it
 into the option stop and subtracts the anti-hunt buffer.
+
+Optional Supertrend / CPR filters (screener/trend_filter.py, off unless set in
+.env) can block a side: the candle is still named, but signal stays None.
 """
 
 import datetime
 
 import pandas as pd
 
+from screener import trend_filter
 from screener.chart_analysis import _IST, fetch_candles, resolve_token
 
 MIN_AGE_SEC = 60          # a candle younger than this hasn't shown its shape yet
@@ -56,9 +60,13 @@ def _normal_range(d: pd.DataFrame) -> float:
 
 
 def read(df: pd.DataFrame) -> dict:
-    """Name the LAST candle of df (it may still be forming) → signal CE / PE / None."""
+    """Name the LAST candle of df (it may still be forming) → signal CE / PE / None.
+
+    Pass a few sessions of candles when a Supertrend / CPR filter is on (they need
+    the history); the candle itself only looks at the last 40."""
     res = {"signal": None, "pattern": None, "label": "", "stop": None, "spot": None,
-           "candle_time": None, "text": "", "range_mult": 0.0}
+           "candle_time": None, "text": "", "range_mult": 0.0, "blocked": None,
+           "side": None}
     if df is None or len(df) < 12:
         res["text"] = "not enough candles"
         return res
@@ -95,9 +103,14 @@ def read(df: pd.DataFrame) -> dict:
         res["text"] = f"mixed candle (body {body:+.1f}, range {rng:.1f}, close at {pos:.0%} of range)"
         return res
     side = "CE" if pattern in ("bull_engulf", "strong_bull", "hammer") else "PE"
-    res.update(signal=side, pattern=pattern, label=_LABEL[pattern], stop=round(l if side == "CE" else h, 2))
+    # "side" stays set when a filter blocks the entry: an open trade still exits on an opposite candle
+    res.update(signal=side, side=side, pattern=pattern, label=_LABEL[pattern], stop=round(l if side == "CE" else h, 2))
     res["text"] = (f"{_LABEL[pattern]} → BUY {side} (O {o:,.1f} H {h:,.1f} L {l:,.1f} C {cl:,.1f}, "
                    f"range {rng:.1f} = {rng / avg:.1f}× avg {avg:.1f})")
+    blocked = trend_filter.check(df, side, cl)
+    if blocked:
+        res.update(signal=None, blocked=blocked)
+        res["text"] += f" — skipped: {blocked}"
     return res
 
 
@@ -126,7 +139,7 @@ def scan(symbol: str, interval: str, api_key: str, access_token: str,
     start = res.get("candle_time")
     age = (now - start).total_seconds() if start is not None else 0
     res["forming"] = age < {"1m": 60, "3m": 180, "5m": 300}.get(interval, 180)
-    if res["signal"] and res["forming"] and age < MIN_AGE_SEC:
+    if res["side"] and res["forming"] and age < MIN_AGE_SEC:
         res["text"] += f" — candle only {age:.0f}s old, waiting for its shape"
-        res["signal"] = None
+        res["signal"] = res["side"] = None
     return res

@@ -315,10 +315,11 @@ def build_candle_signals(symbol: str, df3: pd.DataFrame, days: list) -> pd.DataF
             t = hist_all.index[i]
             if t.date() != day:
                 continue
-            r = _candles.read(hist_all.iloc[max(0, i - 39): i + 1])
+            # a few sessions of history, for the optional Supertrend / CPR filters
+            r = _candles.read(hist_all.iloc[max(0, i - 299): i + 1])
             rows.append({"t": t + pd.Timedelta(minutes=3), "day": day, "symbol": symbol, "signal": r["signal"],
-                         "setup": r["pattern"], "stop": r["stop"], "spot": r["spot"],
-                         "range_mult": r.get("range_mult", 0.0)})
+                         "side": r.get("side"), "setup": r["pattern"], "stop": r["stop"], "spot": r["spot"],
+                         "range_mult": r.get("range_mult", 0.0), "blocked": r.get("blocked")})
     return pd.DataFrame(rows)
 
 
@@ -389,14 +390,15 @@ def run_candles(sig: pd.DataFrame, bars: dict, lots: int, book_pct: float, max_m
             if close_t not in g.index:
                 continue
             s = g.loc[close_t]
-            if not isinstance(s["signal"], str):
+            if pos and isinstance(s["side"], str) and s["side"] != pos["d"]:
+                # a filtered candle still exits (as live); it only flips when it may trade
+                pos["exit_next"] = f"opposite candle ({s['setup']})"
+                if isinstance(s["signal"], str):
+                    pending = {**s.to_dict(), "candle": (s["signal"], close_t)}
+                continue
+            if pos or not isinstance(s["signal"], str):
                 continue
             cand = (s["signal"], close_t)
-            if pos:
-                if s["signal"] != pos["d"]:
-                    pos["exit_next"] = f"opposite candle ({s['setup']})"
-                    pending = {**s.to_dict(), "candle": cand}
-                continue
             if cand == lost_candle or not (_SIG_OPEN <= close_t.time() <= _SIG_CLOSE):
                 continue
             pending = {**s.to_dict(), "candle": cand}
@@ -520,6 +522,10 @@ def main() -> None:
         if args.verbose:
             print("\nCandles engine, decision by decision:")
         allc = pd.concat(sigc, ignore_index=True)
+        if cb._tf.enabled():
+            why = allc["blocked"].dropna().str.replace(r" \(.*", "", regex=True).value_counts()
+            print(f"\nFilters ({cb._tf.describe()}): {int(why.sum())} candles skipped — "
+                  + (", ".join(f"{k} {v}" for k, v in why.items()) or "none"))
         tr = run_candles(allc, bars3, args.lots, cb.CANDLE_BOOK_PCT, cb.SCALP_MAX_MIN, args.verbose,
                          ride_mult=args.ride_mult)
         trades_by["candles (live)"] = tr
