@@ -323,7 +323,7 @@ def build_candle_signals(symbol: str, df3: pd.DataFrame, days: list) -> pd.DataF
     return pd.DataFrame(rows)
 
 
-def run_candles(sig: pd.DataFrame, bars: dict, lots: int, book_pct: float, max_min: int,
+def run_candles(sig: pd.DataFrame, bars: dict, lots: int, book_pct: float,
                 verbose: bool, ride_mult: float = 0.0) -> pd.DataFrame:
     """ride_mult > 0: strong candles ≥ ride_mult × avg range don't book at +book_pct —
     the stop moves to entry +10% there and trails 12% below the peak premium."""
@@ -351,10 +351,7 @@ def run_candles(sig: pd.DataFrame, bars: dict, lots: int, book_pct: float, max_m
             close_t = t + pd.Timedelta(minutes=3)
             if pos:
                 p_open = _premium(pos["entry"], pos["spot"], bar["Open"], pos["d"])
-                held = (t - pos["t"]).total_seconds() / 60
-                why = ("15:15 square-off" if t.time() >= _SQUARE_OFF else pos["exit_next"]
-                       or ("not working" if held >= max_min and p_open < pos["entry"] * 1.02
-                           and not pos["trail"] else None))
+                why = "15:15 square-off" if t.time() >= _SQUARE_OFF else pos["exit_next"]
                 if why:
                     p_, pos = pos, None
                     _done(p_, p_open, t, why)
@@ -526,13 +523,13 @@ def main() -> None:
             why = allc["blocked"].dropna().str.replace(r" \(.*", "", regex=True).value_counts()
             print(f"\nFilters ({cb._tf.describe()}): {int(why.sum())} candles skipped — "
                   + (", ".join(f"{k} {v}" for k, v in why.items()) or "none"))
-        tr = run_candles(allc, bars3, args.lots, cb.CANDLE_BOOK_PCT, cb.SCALP_MAX_MIN, args.verbose,
+        tr = run_candles(allc, bars3, args.lots, cb.CANDLE_BOOK_PCT, args.verbose,
                          ride_mult=args.ride_mult)
         trades_by["candles (live)"] = tr
         engines["candles (live)"] = _engine_summary(tr, sym_days, args.cost)
         tr.to_csv(out / "replay_candles_trades.csv", index=False)
         if args.ride_mult:
-            tr2 = run_candles(allc, bars3, args.lots, cb.CANDLE_BOOK_PCT, cb.SCALP_MAX_MIN, False, ride_mult=0)
+            tr2 = run_candles(allc, bars3, args.lots, cb.CANDLE_BOOK_PCT, False, ride_mult=0)
             trades_by["candles, no ride"] = tr2
             engines["candles, no ride"] = _engine_summary(tr2, sym_days, args.cost)
     if sig3:

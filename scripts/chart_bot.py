@@ -13,7 +13,8 @@ Engine "candles" (default, CHART_ENGINE in .env) — screener/candles.py:
     target  +20% (CHART_BOOK_PCT) — the GTT books the position; the next strong candle re-enters
     ride    a strong bull / bear candle ≥ 2× the average range (CHART_RIDE_MULT, 0 = off)
             is not sold at +20%: the stop moves to entry +10% there, then trails 12% below the peak
-    early   opposite candle → exit and flip; not ≥ +2% after 6 min (CHART_SCALP_MAX_MIN) → exit
+    early   opposite candle → exit and flip (no time-based exit: a trade runs until target,
+            stop, opposite candle or square-off)
     15:15   square-off
     filters optional, off by default (screener/trend_filter.py): CHART_SUPERTREND=1 (CE only
             while Supertrend(10,3) on the 3m candles is up, PE only while down), CHART_CPR_BIAS=1
@@ -115,10 +116,9 @@ ENGINE   = (_env_setting("CHART_ENGINE") or "candles").lower()
 SETUP_TF = _env_setting("CHART_SETUP_TF") or "3m"
 # Engine "candles" (default): read the forming 3m candle; strong / engulfing /
 # hammer-type candle → buy that side; book the position at +CANDLE_BOOK_PCT;
-# exit early on an opposite candle or when it isn't working after SCALP_MAX_MIN.
+# exit early on an opposite candle. No time-based exit on this branch.
 CANDLE_TF       = _env_setting("CHART_CANDLE_TF") or "3m"
 CANDLE_BOOK_PCT = float(_env_setting("CHART_BOOK_PCT") or 0.20)
-SCALP_MAX_MIN   = int(_env_setting("CHART_SCALP_MAX_MIN") or 6)
 _candles.MIN_RANGE_MULT = float(_env_setting("CHART_CANDLE_MIN_MULT") or _candles.MIN_RANGE_MULT)
 # Optional Supertrend / CPR entry filters (screener/trend_filter.py) — off unless set to 1
 _tf.SUPERTREND   = _env_setting("CHART_SUPERTREND").strip() == "1"
@@ -193,7 +193,7 @@ def _auto_trade_enabled() -> bool:
 _AUTO_TRADE = _auto_trade_enabled()
 print(f"[chart_bot] AUTO_TRADE={'ON' if _AUTO_TRADE else 'OFF (set KITE_AUTO_TRADE=1 in .env to enable)'}"
       + (f" | engine candles on {CANDLE_TF} (≥ {_candles.MIN_RANGE_MULT:g}× avg range) | book at "
-         f"+{CANDLE_BOOK_PCT:.0%}, exit if not working in {SCALP_MAX_MIN} min | ride "
+         f"+{CANDLE_BOOK_PCT:.0%}, no time exit | ride "
          + (f"strong candles ≥ {RIDE_MULT:g}× avg" if RIDE_MULT else "off")
          + " | max lots " + ", ".join(f"{k} {v or 'no cap'}" for k, v in _ko.MAX_LOTS.items())
          + (f" | filters: {_tf.describe()}" if _tf.enabled() else "")
@@ -692,21 +692,9 @@ def _manage_trade(kite, symbol: str, state: dict, trade_key: str,
                           f"{ts}: GTT placement failed ({e}). Set a stop loss in Kite manually.",
                           ntfy_topic, priority="urgent")
             return
-    if state.get(k("mode")) == "ride" and not state.get(k("trailing")):
-        # Before +20% a ride trade is a normal scalp: cut it if it isn't working
-        held_min = _minutes_between(state.get(k("entry_t"), ""), now_ist)
-        if held_min >= SCALP_MAX_MIN and ltp < entry * 1.02:
-            _exit_bot_position(kite, symbol, state, trade_key,
-                               f"not working — {held_min:.0f} min, {(ltp / entry - 1) * 100:+.1f}%", ntfy_topic)
-            return
     if state.get(k("mode")) in ("book", "scalp"):
         print(f"  [MONITOR] {symbol}: LTP ₹{ltp:.2f} ({(ltp / entry - 1) * 100:+.1f}%)  entry ₹{entry:.2f}  "
               f"SL ₹{sl:.2f}  book ₹{far:.2f} (+{(far / entry - 1) * 100:.0f}%, GTT)")
-        if state.get(k("mode")) == "scalp":
-            held_min = _minutes_between(state.get(k("entry_t"), ""), now_ist)
-            if held_min >= SCALP_MAX_MIN and ltp < entry * 1.02:
-                _exit_bot_position(kite, symbol, state, trade_key,
-                                   f"not working — {held_min:.0f} min, {(ltp / entry - 1) * 100:+.1f}%", ntfy_topic)
         return  # the GTT books the whole position at the target
     trailing = bool(state.get(k("trailing")))
     stage = f"trailing, peak ₹{state.get(k('peak'))}" if trailing else f"T1 ₹{t1:.2f}"
@@ -994,7 +982,7 @@ def _scan_candles(symbols: list[str], state: dict, api_key: str, access_token: s
                        f"Entry : ₹{entry}\n"
                        f"Exit  : {plan}\n"
                        f"SL    : ₹{sl} (candle stop − {int(_SL_EXTRA.get(symbol, 15))} pts)\n"
-                       f"Exit early: opposite candle, or not working after {SCALP_MAX_MIN} min"),
+                       f"Exit early: opposite candle (no time exit)"),
                       ntfy_topic)
         if not _acct().get("primary", True):
             continue          # the Sharekhan copy follows account 1 only
@@ -1623,7 +1611,7 @@ def preflight(symbols: list[str], state_file: str, notify: bool = False) -> bool
     if ENGINE == "candles":
         add("PASS", "rules", f"candles engine on {CANDLE_TF} (forming candle, ≥ {_candles.MIN_RANGE_MULT:g}× avg "
                              f"range), book at +{CANDLE_BOOK_PCT:.0%}, "
-                             f"exit if not working after {SCALP_MAX_MIN} min, ride "
+                             f"no time exit, ride "
                              + (f"strong candles ≥ {RIDE_MULT:g}× avg" if RIDE_MULT else "off")
                              + ", max lots " + ", ".join(f"{k} {v or 'no cap'}" for k, v in _ko.MAX_LOTS.items())
                              + ", SL buffer NIFTY "
