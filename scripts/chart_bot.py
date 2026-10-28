@@ -656,27 +656,70 @@ def _square_off_cleanup(kite, state: dict, today: str, ntfy_topic: str) -> None:
 
 def _exit_bot_position(kite, symbol: str, state: dict, trade_key: str, reason: str,
                        ntfy_topic: str) -> bool:
-    """Sell the bot's whole position and only then remove its GTT.
+    """Sell the bot's position without ever selling more than is held.
 
-    The GTT is the only stop loss, so it is kept until the sell is confirmed;
-    a failed sell is retried on the next scan instead of leaving no protection.
+    Order of steps, so a SELL can never open a short:
+      1. Fresh position check — an API error means no sell this scan.
+      2. This trade's GTT: if it has already fired, Kite is selling — no bot sell.
+         Otherwise it is deleted first, so it cannot sell as well.
+      3. Position checked again after the delete (a GTT that fired just before).
+      4. Sell at most what is held. If the sell doesn't fill, the GTT is placed again.
     """
     k = lambda name: f"{trade_key}:{name}"
     ts, qty, gtt_id = state.get(k("ts")), int(state.get(k("qty")) or 0), state.get(k("gtt_id"))
-    # Sell the bot's quantity, less any part-fill of an earlier cancelled sell — never
-    # more than the bot bought (a manual position in the same contract stays untouched)
+    others = _others_on(state, trade_key, ts)
+
+    def _mine(held: int) -> int:   # this trade's units: never more than it bought or than is held
+        return max(0, min(qty, held - others))
+
     held = open_qty(kite, ts)
-    if held is not None:
-        qty = max(0, min(qty, held))
-        state[k("qty")] = qty
+    pending = _pending_sell(kite, ts)
+    if held is None or pending is None:
+        print(f"  [EXIT] {symbol}: {reason} — position / order check failed; no sell this scan")
+        return False
+    if pending:
+        print(f"  [EXIT] {symbol}: a SELL order on {ts} is already open — waiting for it, no second sell")
+        return False
+    if gtt_id:
+        try:
+            status = kite.get_gtt(gtt_id).get("status")
+        except Exception as e:
+            print(f"  [EXIT] {symbol}: {reason} — GTT check failed ({e}); no sell this scan")
+            return False
+        if status == "triggered" and held - others > 0:
+            # The GTT fired but its order is no longer open (no pending sell above):
+            # its sell didn't go through, so the bot sells what is still held
+            print(f"  [EXIT] {symbol}: GTT {gtt_id} fired but {held - others} still held — bot sells the rest")
+            state[k("gtt_id")] = ""
+            gtt_id = ""
+        elif status != "active":
+            print(f"  [EXIT] {symbol}: GTT {gtt_id} already {status} — no bot sell")
+            return False
+    if gtt_id:
+        try:
+            kite.delete_gtt(gtt_id)
+        except Exception as e:
+            print(f"  [EXIT] {symbol}: {reason} — GTT delete failed ({e}); no sell this scan")
+            return False
+        state[k("gtt_id")] = ""
+        time.sleep(1)
+        held = open_qty(kite, ts)
+        if held is None:   # can't see the position — put the stop back, try next scan
+            _restore_gtt(kite, symbol, state, trade_key, qty, ntfy_topic)
+            return False
+    qty = _mine(held)
+    state[k("qty")] = qty
     ok, info = (True, "already flat") if qty <= 0 else sell_and_confirm(kite, symbol, ts, qty, discount=0.02)
     if not ok:
         fails = int(state.get(k("exit_fails")) or 0) + 1
         state[k("exit_fails")] = fails
-        print(f"  [EXIT] {symbol}: {reason} — sell not filled ({info}); GTT kept, retrying next scan")
+        left = open_qty(kite, ts)
+        left = _mine(left) if left is not None else qty
+        _restore_gtt(kite, symbol, state, trade_key, left, ntfy_topic)
+        print(f"  [EXIT] {symbol}: {reason} — sell not filled ({info}); GTT restored, retrying next scan")
         if fails in (1, 3) and ntfy_topic:
             send_ntfy(f"⚠️ Chart Bot: {symbol} exit not filled yet",
-                      f"{reason}\n{ts}: {info}\nGTT stop loss kept; retrying every minute.",
+                      f"{reason}\n{ts}: {info}\nStop loss GTT restored; retrying every scan.",
                       ntfy_topic, priority="urgent")
         return False
     _clear_slot_gtts(kite, symbol, state, trade_key, ts, ntfy_topic)
@@ -686,6 +729,38 @@ def _exit_bot_position(kite, symbol: str, state: dict, trade_key: str, reason: s
     if ntfy_topic:
         send_ntfy(f"Chart Bot: {symbol} exited", f"{reason}\n{ts}: {info}", ntfy_topic, priority="default")
     return True
+
+
+def _pending_sell(kite, ts: str) -> bool | None:
+    """True if an unfilled SELL order on this contract is open (e.g. a GTT that just fired)."""
+    try:
+        return any(o.get("tradingsymbol") == ts and o.get("transaction_type") == "SELL"
+                   and o.get("status") in ("OPEN", "TRIGGER PENDING", "OPEN PENDING", "PUT ORDER REQ RECEIVED",
+                                           "VALIDATION PENDING", "MODIFY PENDING")
+                   for o in kite.orders())
+    except Exception:
+        return None
+
+
+def _restore_gtt(kite, symbol: str, state: dict, trade_key: str, qty: int, ntfy_topic: str) -> None:
+    """Put the stop / target GTT back on the units still held after a failed exit."""
+    k = lambda name: f"{trade_key}:{name}"
+    ts = state.get(k("ts"))
+    if qty <= 0 or state.get(k("gtt_id")):
+        return
+    entry = float(state.get(k("entry_price")) or 0)
+    sl = float(state.get(k("sl")) or 0) or _tick(entry * 0.80)
+    far = float(state.get(k("target_price")) or 0) or _tick(entry * 3)
+    ltp = _bot_ltp(kite, symbol, ts) or entry
+    try:
+        state[k("gtt_id")] = place_oco_gtt(kite, symbol, ts, qty, sl, far, ltp)
+        state[k("qty")] = qty
+    except Exception as e:
+        print(f"  [EXIT] {symbol}: GTT restore failed — {e}")
+        if ntfy_topic:
+            send_ntfy(f"⚠️ Chart Bot: {symbol} has NO stop loss",
+                      f"{ts}: exit didn't fill and the GTT could not be placed again ({e}). "
+                      f"Set a stop loss in Kite or sell manually.", ntfy_topic, priority="urgent")
 
 
 def _manage_trade(kite, symbol: str, state: dict, trade_key: str,
