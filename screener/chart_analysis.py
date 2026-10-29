@@ -949,15 +949,16 @@ def drop_open_candle(df: pd.DataFrame, interval_key: str,
     return df
 
 
-def front_future_token(symbol: str, api_key: str, access_token: str) -> int | None:
+def front_future(symbol: str, api_key: str, access_token: str) -> tuple[int | None, str | None]:
+    """(instrument_token, "EXCHANGE:TRADINGSYMBOL") of the nearest-expiry future, cached per day."""
     src = _FUT_SOURCE.get(symbol.upper())
     if not src:
-        return None
+        return None, None
     key = (symbol.upper(), datetime.date.today().isoformat())
     if key in _FUT_TOKEN_CACHE:
         return _FUT_TOKEN_CACHE[key]
     exchange, name = src
-    tok = None
+    hit = (None, None)
     try:
         r = requests.get(f"{_KITE_BASE}/instruments/{exchange}",
                          headers=_hdrs(api_key, access_token), timeout=30)
@@ -967,11 +968,15 @@ def front_future_token(symbol: str, api_key: str, access_token: str) -> int | No
             m["expiry"] = pd.to_datetime(m["expiry"]).dt.date
             m = m[m["expiry"] >= datetime.date.today()].sort_values("expiry")
             if not m.empty:
-                tok = int(m.iloc[0]["instrument_token"])
+                hit = (int(m.iloc[0]["instrument_token"]), f"{exchange}:{m.iloc[0]['tradingsymbol']}")
     except Exception:
-        tok = None
-    _FUT_TOKEN_CACHE[key] = tok
-    return tok
+        hit = (None, None)
+    _FUT_TOKEN_CACHE[key] = hit
+    return hit
+
+
+def front_future_token(symbol: str, api_key: str, access_token: str) -> int | None:
+    return front_future(symbol, api_key, access_token)[0]
 
 
 def analyze_df(df: pd.DataFrame, interval: str, gex: dict | None = None) -> dict:

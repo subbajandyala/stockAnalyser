@@ -523,13 +523,20 @@ def main() -> None:
             print(f"{sym}: only NIFTY / BANKNIFTY / SENSEX are supported")
             continue
         if want_setups or want_candles:
-            print(f"Fetching {sym} 3m history…")
-            df3 = _fetch(tok, "3minute", start, end, api_key, access_token)
+            # CHART_CANDLE_SOURCE=future: the current contract's own 3m history (it was the
+            # 2nd month before the last expiry), as the live bot reads it
+            fut = front_future_token(sym, api_key, access_token) if cb._candles.SOURCE == "future" else None
+            print(f"Fetching {sym}{' FUT (front month)' if fut else ''} 3m history…")
+            df3 = _fetch(fut or tok, "3minute", start, end, api_key, access_token)
             if df3.empty:
                 print(f"{sym}: no 3m data")
             else:
-                df3, cov = _with_future_volume(sym, df3, start, end, api_key, access_token, "3minute")
-                print(f"  futures volume on {cov:.0%} of 3m candles")
+                if fut:
+                    cov = float((df3["Volume"] > 0).mean())
+                    print(f"  futures chart from {df3.index[0]:%d %b}")
+                else:
+                    df3, cov = _with_future_volume(sym, df3, start, end, api_key, access_token, "3minute")
+                    print(f"  futures volume on {cov:.0%} of 3m candles")
                 days = _days(df3)
                 sym_days += [(sym, d) for d in days if sym in cb._TRADE_SYMBOLS]
                 bars3[sym] = df3

@@ -116,6 +116,8 @@ CANDLE_TF       = _env_setting("CHART_CANDLE_TF") or "3m"
 CANDLE_BOOK_PCT = float(_env_setting("CHART_BOOK_PCT") or 0.20)
 SCALP_MAX_MIN   = int(_env_setting("CHART_SCALP_MAX_MIN") or 6)
 _candles.MIN_RANGE_MULT = float(_env_setting("CHART_CANDLE_MIN_MULT") or _candles.MIN_RANGE_MULT)
+# Candle chart: the index (default) or the current-month future (CHART_CANDLE_SOURCE=future)
+_candles.SOURCE = (_env_setting("CHART_CANDLE_SOURCE") or "spot").lower()
 # Lot cap per order (0 = only the balance limits it)
 for _sym in list(_ko.MAX_LOTS):
     _v = _env_setting(f"CHART_MAX_LOTS_{_sym}")
@@ -226,7 +228,8 @@ def _auto_trade_enabled() -> bool:
 
 _AUTO_TRADE = _auto_trade_enabled()
 print(f"[chart_bot] AUTO_TRADE={'ON' if _AUTO_TRADE else 'OFF (set KITE_AUTO_TRADE=1 in .env to enable)'}"
-      + (f" | engine candles on {CANDLE_TF} (≥ {_candles.MIN_RANGE_MULT:g}× avg range) | book at "
+      + (f" | engine candles on {CANDLE_TF}{' future chart' if _candles.SOURCE == 'future' else ''} "
+         f"(≥ {_candles.MIN_RANGE_MULT:g}× avg range) | book at "
          f"+{CANDLE_BOOK_PCT:.0%}" + "".join(f" ({k} +{v:g} pts)" for k, v in CANDLE_BOOK_PTS.items())
          + (f", stop −{CANDLE_SL_PCT:.0%}" if CANDLE_SL_PCT else "")
          + f", exit if not working in {SCALP_MAX_MIN} min | entries until {SIGNAL_CLOSE:%H:%M}, "
@@ -1088,10 +1091,14 @@ def _scan_candles(symbols: list[str], state: dict, api_key: str, access_token: s
 
         ride = bool(RIDE_MULT and res.get("pattern") in ("strong_bull", "strong_bear")
                     and res.get("range_mult", 0) >= RIDE_MULT)
+        # Futures chart: the order needs spot prices (ATM strike) — candle price and stop − basis
+        basis = float(res.get("basis") or 0.0)
+        spot = res["spot"] - basis
         print(f"  [AUTO-TRADE] {res['label']} → {sig} on {symbol} @ {res['spot']:.0f} (candle stop {res['stop']})"
+              + (f" {res.get('source')}, basis {basis:+.1f} → spot {spot:.0f}" if basis else "")
               + (f" — RIDE ({res['range_mult']:.1f}× avg candle)" if ride else ""))
-        trade = _place_order(symbol, sig, res["spot"], api_key, access_token,
-                             chart_sl=res["stop"], book_pct=CANDLE_BOOK_PCT, ride=ride,
+        trade = _place_order(symbol, sig, spot, api_key, access_token,
+                             chart_sl=res["stop"] - basis, book_pct=CANDLE_BOOK_PCT, ride=ride,
                              book_pts=CANDLE_BOOK_PTS.get(symbol), sl_pct=CANDLE_SL_PCT)
         if "error" in trade:
             print(f"  [AUTO-TRADE] NOT PLACED — {trade['error']}")
@@ -1145,7 +1152,7 @@ def _scan_candles(symbols: list[str], state: dict, api_key: str, access_token: s
         if not _acct().get("primary", True):
             continue          # the Sharekhan copy follows account 1 only
         try:
-            sk = _place_sk_order(symbol, sig, res["spot"], option_ltp=entry, option_sl=sl, option_target=tgt)
+            sk = _place_sk_order(symbol, sig, spot, option_ltp=entry, option_sl=sl, option_target=tgt)
             print(f"  [SHAREKHAN] " + (f"SKIPPED — {sk['error']}" if "error" in sk else f"ORDER — {sk['order_id']}"))
         except Exception as _sk_err:
             print(f"  [SHAREKHAN] ERROR — {_sk_err}")
@@ -1823,7 +1830,9 @@ def preflight(symbols: list[str], state_file: str, notify: bool = False) -> bool
                                     f"now {v['verdict']} {v['score']:+d} R:R {v.get('rr')}")
         if ENGINE == "candles":
             cres = _candles.scan(sym, CANDLE_TF, api_key, access_token)
-            add("FAIL" if cres.get("error") else "PASS", f"{sym} candle", cres.get("error") or cres["text"])
+            add("FAIL" if cres.get("error") else "PASS", f"{sym} candle", cres.get("error") or
+                f"{cres.get('source')} chart" + (f" (basis {cres['basis']:+.1f})" if cres.get("basis") else "")
+                + f": {cres['text']}")
         if ENGINE == "setups":
             sres = _setups.scan(sym, SETUP_TF, api_key, access_token)
             if sres.get("error"):

@@ -17,13 +17,20 @@ feed when the ticker daemon runs) against the previous candles, and names it:
 
 Stop for the trade = the candle's low (CE) or high (PE); kite_order turns it
 into the option stop and subtracts the anti-hunt buffer.
+
+Chart source (chart_bot sets SOURCE from CHART_CANDLE_SOURCE): "spot" (default) reads
+the index; "future" reads the current-month NIFTY FUT / SENSEX FUT candles, with the
+future's last price from Kite for the forming candle. A futures reading also carries
+"basis" (future − index now) so the order can work in spot prices.
 """
 
 import datetime
 
 import pandas as pd
 
-from screener.chart_analysis import _IST, fetch_candles, resolve_token
+import requests
+
+from screener.chart_analysis import _IST, _KITE_BASE, _hdrs, fetch_candles, front_future, resolve_token
 
 MIN_AGE_SEC = 60          # a candle younger than this hasn't shown its shape yet
 OPENING_END = datetime.time(9, 30)   # opening candles are outsized — kept out of "normal size"
@@ -33,6 +40,8 @@ AVG_CANDLES = 20
 # 1.2 cut whipsaw / chop losses by about two-thirds in the stress test (23 Oct);
 # chart_bot sets it from CHART_CANDLE_MIN_MULT.
 MIN_RANGE_MULT = 1.2
+SOURCE = "spot"           # "spot" (the index) or "future" (current-month futures)
+_INDEX_QUOTE = {"NIFTY": "NSE:NIFTY 50", "BANKNIFTY": "NSE:NIFTY BANK", "SENSEX": "BSE:SENSEX"}
 _LABEL = {
     "strong_bull": "Strong bull candle", "strong_bear": "Strong bear candle",
     "bull_engulf": "Bullish engulfing",  "bear_engulf": "Bearish engulfing",
@@ -101,20 +110,47 @@ def read(df: pd.DataFrame) -> dict:
     return res
 
 
+def _quote_ltp(keys: list, api_key: str, access_token: str) -> dict:
+    """{"EXCH:SYMBOL": last price} from Kite's LTP quote; {} on any error."""
+    try:
+        r = requests.get(f"{_KITE_BASE}/quote/ltp", headers=_hdrs(api_key, access_token),
+                         params=[("i", k) for k in keys], timeout=10)
+        r.raise_for_status()
+        return {k: float(v["last_price"]) for k, v in r.json().get("data", {}).items()}
+    except Exception:
+        return {}
+
+
+def _live_ltp(token: int) -> float | None:
+    try:                                   # freshest price from the ticker daemon
+        from screener.live_ticks import get_live_ltp
+        return get_live_ltp(token)
+    except Exception:
+        return None
+
+
 def scan(symbol: str, interval: str, api_key: str, access_token: str,
          now: datetime.datetime | None = None) -> dict:
-    """Live: Kite candles + the last tick for the forming candle, then read()."""
+    """Live: Kite candles + the last price for the forming candle, then read()."""
+    basis, source = 0.0, "spot"
     try:
         token, _ = resolve_token(symbol, api_key, access_token)
-        df = fetch_candles(token, interval, api_key, access_token)
+        fut, fut_key = front_future(symbol, api_key, access_token) if SOURCE == "future" else (None, None)
+        df = fetch_candles(fut or token, interval, api_key, access_token)
     except Exception as e:
         return {"error": str(e)}
     now = now or datetime.datetime.now(_IST)
-    try:                                   # freshest price from the ticker daemon
-        from screener.live_ticks import get_live_ltp
-        ltp = get_live_ltp(token)
-    except Exception:
-        ltp = None
+    if fut:
+        source = "future"
+        idx_key = _INDEX_QUOTE.get(symbol.upper())
+        q = _quote_ltp([fut_key] + ([idx_key] if idx_key else []), api_key, access_token)
+        ltp = q.get(fut_key)
+        spot_now = _live_ltp(token) or q.get(idx_key)
+        if ltp and spot_now:
+            basis = ltp - spot_now
+    else:
+        source = "spot" if SOURCE == "spot" else "spot (no futures contract found)"
+        ltp = _live_ltp(token)
     if ltp and not df.empty:
         i = df.index[-1]
         df = df.copy()
@@ -123,6 +159,11 @@ def scan(symbol: str, interval: str, api_key: str, access_token: str,
         df.loc[i, "Low"] = min(df.loc[i, "Low"], ltp)
     res = read(df)
     res["error"] = None
+    res["source"], res["basis"] = source, round(basis, 2)
+    if fut and not basis and res["signal"]:
+        # without both live prices the strike would be picked off the futures price
+        res["text"] += " — no live futures / index price for the basis, no trade"
+        res["signal"] = None
     start = res.get("candle_time")
     age = (now - start).total_seconds() if start is not None else 0
     res["forming"] = age < {"1m": 60, "3m": 180, "5m": 300}.get(interval, 180)
