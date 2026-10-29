@@ -124,6 +124,13 @@ SETUP_TF = _env_setting("CHART_SETUP_TF") or "3m"
 SCREEN_GRADE   = (_env_setting("CHART_SCREEN_GRADE") or "STRONG").upper()
 SCREEN_SYMBOLS = [x.strip().upper() for x in (_env_setting("CHART_SCREEN_SYMBOLS") or "NIFTY,SENSEX").split(",")
                   if x.strip()]
+# Thresholds (defaults = the spec): room R, near-level %, open-room target R, 15m Neutral, grades
+_screen.apply({k: v for k, v in {
+    "room_rr": _env_setting("CHART_SCREEN_ROOM_RR"), "near_pct": _env_setting("CHART_SCREEN_NEAR_PCT"),
+    "open_target_r": _env_setting("CHART_SCREEN_OPEN_TARGET_R"),
+    "g5_neutral": _env_setting("CHART_SCREEN_15M_NEUTRAL") == "1" or None,
+    "strong": _env_setting("CHART_SCREEN_STRONG"), "moderate": _env_setting("CHART_SCREEN_MODERATE"),
+}.items() if v})
 # Engine "candles" (default): read the forming 3m candle; strong / engulfing /
 # hammer-type candle → buy that side; book the position at +CANDLE_BOOK_PCT;
 # exit early on an opposite candle or when it isn't working after SCALP_MAX_MIN.
@@ -254,7 +261,10 @@ print(f"[chart_bot] AUTO_TRADE={'ON' if _AUTO_TRADE else 'OFF (set KITE_AUTO_TRA
          if ENGINE == "candles" else
          f" | engine screen on 5m (15m confirm, 1h / daily context) | trades "
          + ("STRONG + MODERATE" if SCREEN_GRADE == "MODERATE" else "STRONG") + " signals on "
-         + ", ".join(SCREEN_SYMBOLS) + f" | exit on 5m CHoCH / stop close / target, square-off "
+         + ", ".join(SCREEN_SYMBOLS) + " ("
+         + ", ".join(f"{k} {v:g}" if not isinstance(v, bool) else f"{k} {'on' if v else 'off'}"
+                     for k, v in _screen.settings().items())
+         + f") | exit on 5m CHoCH / stop close / target, square-off "
          f"{SQUARE_OFF_TIME:%H:%M} | max lots " + ", ".join(f"{k} {v or 'no cap'}" for k, v in _ko.MAX_LOTS.items())
          if ENGINE == "screen" else
          f" | engine setups on {SETUP_TF} | book 100% at +{BOOK_PROFIT_PCT:.0%}" if ENGINE == "setups" else

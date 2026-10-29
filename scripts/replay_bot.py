@@ -48,6 +48,8 @@ Screen engine (chart_bot CHART_ENGINE=screen, screener/screen_logic.py):
   exits on the option GTT (stop 20–25% / plan target), a 5m CHoCH against the trade, a 5m
   close beyond the index stop, the index target, or 15:15. CHART_SCREEN_GRADE=MODERATE also
   trades MODERATE signals. Expiry day = Tuesday (NIFTY) / Thursday (SENSEX) in the replay.
+  --screen-grid also compares the threshold sets in SCREEN_GRID (room R, near-level %, open-room
+  target, 15m Neutral, grades) on the same candles; the CHART_SCREEN_* .env values apply live.
 
 Exit tests (replay only — the live bot does not have these):
   --mid-stop        exit when a 3m candle CLOSES back past the middle of the entry
@@ -462,22 +464,48 @@ def _screen_option_levels(spot: float, entry: float, stop: float, target: float,
     return sl, _tick(max(tgt, entry * (1 + _ko.T1_MIN_PCT)))
 
 
-_GATE_LOG: list = []      # one row per side per decided candle (no open trade), for the gate report
+# --screen-grid: threshold sets tried on the same snapshots (the spec first)
+SCREEN_GRID = [
+    ("spec", {}, ("STRONG",)),
+    ("A  +MODERATE", {}, ("STRONG", "MODERATE")),
+    ("B  room 1.2, near 0.05%, open 2R", {"room_rr": 1.2, "near_pct": 0.05, "open_target_r": 2}, ("STRONG",)),
+    ("A+B", {"room_rr": 1.2, "near_pct": 0.05, "open_target_r": 2}, ("STRONG", "MODERATE")),
+    ("A+B+C 15m Neutral ok", {"room_rr": 1.2, "near_pct": 0.05, "open_target_r": 2, "g5_neutral": True},
+     ("STRONG", "MODERATE")),
+    ("A+B' room 1.0, no near check", {"room_rr": 1.0, "near_pct": 0, "open_target_r": 2}, ("STRONG", "MODERATE")),
+    ("B, STRONG at 65", {"room_rr": 1.2, "near_pct": 0.05, "open_target_r": 2, "strong": 65}, ("STRONG",)),
+    ("A+B, room 1.5", {"room_rr": 1.5, "near_pct": 0.05, "open_target_r": 2}, ("STRONG", "MODERATE")),
+]
 
 
-def run_screen(symbol: str, frames: dict, days: list, lots: int, grades: tuple,
-               verbose: bool) -> pd.DataFrame:
-    """The 5m rules bar by bar: decide after each close, enter at the next open."""
-    lot = LOT_SIZE.get(symbol, 1)
+def screen_snapshots(symbol: str, frames: dict, days: list) -> dict:
+    """{day: [(t, bar, snapshot)]} — the snapshot after each 5m close (independent of the thresholds,
+    so a grid of settings reuses them)."""
     f5, f15, f60, fd = (_naive(frames[k]) for k in ("5m", "15m", "1H", "1D"))
     i15 = f15.index + pd.Timedelta(minutes=15)
     i60 = f60.index + pd.Timedelta(minutes=60)
-    cache, trades, n_sig = {}, [], 0
-    tradable = tuple(f"{g}_{s}" for g in grades for s in ("CE", "PE"))
+    cache, out = {}, {}
     for day in days:
-        bars = f5[f5.index.date == day]
         fd_day = fd[fd.index.date < day]
         expiry = day.weekday() == _EXPIRY_WEEKDAY.get(symbol, -1)
+        rows = []
+        for t, bar in f5[f5.index.date == day].iterrows():
+            now = t + pd.Timedelta(minutes=5, seconds=30)
+            fr = {"5m": f5[f5.index <= t].tail(_screen.HISTORY["5m"]),
+                  "15m": f15[i15 <= now].tail(_screen.HISTORY["15m"]),
+                  "1H": f60[i60 <= now].tail(_screen.HISTORY["1H"]), "1D": fd_day}
+            rows.append((t, bar, _screen.build_snapshot(fr, now.to_pydatetime(), expiry_day=expiry, cache=cache)))
+        out[day] = rows
+    return out
+
+
+def run_screen(symbol: str, snaps: dict, lots: int, grades: tuple, verbose: bool,
+               gate_log: list | None = None) -> pd.DataFrame:
+    """The 5m rules bar by bar on prebuilt snapshots: decide after each close, enter at the next open."""
+    lot = LOT_SIZE.get(symbol, 1)
+    trades, n_sig = [], 0
+    tradable = tuple(f"{g}_{s}" for g in grades for s in ("CE", "PE"))
+    for day, rows in snaps.items():
         pos, pending = None, None
 
         def _done(p_, px, t, why):
@@ -487,7 +515,7 @@ def run_screen(symbol: str, frames: dict, days: list, lots: int, grades: tuple,
             if verbose:
                 print(f"    {t:%H:%M} {symbol} EXIT {p_['d']} ({why}) → ₹{tr['pnl']:,.0f}")
 
-        for t, bar in bars.iterrows():
+        for t, bar, snap in rows:
             if pending is not None and pos is None and t.time() < _SQUARE_OFF:
                 a = pending
                 entry = _PREMIUM.get(symbol, 150.0)
@@ -516,11 +544,6 @@ def run_screen(symbol: str, frames: dict, days: list, lots: int, grades: tuple,
                 elif _premium(pos["entry"], pos["spot"], favour, d) >= pos["tgt"]:
                     p_, pos = pos, None
                     _done(p_, max(p_["tgt"], p_open), t, "option target (GTT)")
-            now = t + pd.Timedelta(minutes=5, seconds=30)
-            fr = {"5m": f5[f5.index <= t].tail(_screen.HISTORY["5m"]),
-                  "15m": f15[i15 <= now].tail(_screen.HISTORY["15m"]),
-                  "1H": f60[i60 <= now].tail(_screen.HISTORY["1H"]), "1D": fd_day}
-            snap = _screen.build_snapshot(fr, now.to_pydatetime(), expiry_day=expiry, cache=cache)
             if pos:
                 res = _screen.decide(snap, pos["active"])
                 if res["action"] == "EXIT":
@@ -530,12 +553,12 @@ def run_screen(symbol: str, frames: dict, days: list, lots: int, grades: tuple,
                     exit_bar = True
                 continue
             res = _screen.decide(snap)
-            if res["action"] in ("WAIT",) or res["action"].endswith(("_CE", "_PE")):
+            if gate_log is not None and (res["action"] == "WAIT" or res["action"].endswith(("_CE", "_PE"))):
                 for side, (g, plan, _) in _screen.evaluate_sides(snap).items():
                     row = {"symbol": symbol, "side": side, **g, "all": all(g.values())}
                     if row["all"]:
                         row["score"] = _screen._score(snap, side, plan)[0]
-                    _GATE_LOG.append(row)
+                    gate_log.append(row)
             if res["action"] in tradable and not exit_bar:
                 n_sig += 1
                 pending = {**res, "bar": t}
@@ -605,6 +628,8 @@ def main() -> None:
                     help="Candles test: stop to entry +1 once the premium is up these pts, e.g. 6,18")
     ap.add_argument("--compare-exits", action="store_true",
                     help="Candles: run live, mid-stop, BE-lock and both side by side (BE-lock 6,18 if not given)")
+    ap.add_argument("--screen-grid", action="store_true",
+                    help="Screen engine: also compare the threshold sets in SCREEN_GRID on the same candles")
     ap.add_argument("-v", "--verbose", action="store_true", help="Print every entry / exit")
     args = ap.parse_args()
     be = None
@@ -745,7 +770,7 @@ def main() -> None:
 def _replay_screen(args, start, end, _days, api_key, access_token) -> None:
     from screener.chart_analysis import fetch_candles
     grades = ("STRONG", "MODERATE") if cb.SCREEN_GRADE == "MODERATE" else ("STRONG",)
-    trades, sym_days = [], []
+    trades, sym_days, snaps_by, gate_log = [], [], {}, []
     for sym in [s.upper() for s in args.symbols]:
         tok = _INDEX_TOKENS.get(sym)
         if not tok:
@@ -765,12 +790,23 @@ def _replay_screen(args, start, end, _days, api_key, access_token) -> None:
         print(f"  futures volume on {cov:.0%} of 5m candles (VWAP); {len(dfd)} daily candles")
         days = [d for d in _days(df5) if d >= start]
         sym_days += [(sym, d) for d in days]
+        print(f"  building {len(days)} days of 5m snapshots…")
+        snaps_by[sym] = screen_snapshots(sym, {"5m": df5, "15m": df15, "1H": df60, "1D": dfd}, days)
         if args.verbose:
             print(f"\nScreen engine on {sym}, trade by trade:")
-        tr = run_screen(sym, {"5m": df5, "15m": df15, "1H": df60, "1D": dfd}, days, args.lots, grades,
-                        args.verbose)
-        trades.append(tr)
+        trades.append(run_screen(sym, snaps_by[sym], args.lots, grades, args.verbose, gate_log))
     tr = pd.concat(trades, ignore_index=True) if trades else pd.DataFrame()
+    if args.screen_grid:
+        base = _screen.settings()
+        rows = {}
+        for name, cfg, gr in SCREEN_GRID:
+            _screen.apply({**base, **cfg})
+            t_ = pd.concat([run_screen(s, sn, args.lots, gr, False) for s, sn in snaps_by.items()], ignore_index=True)
+            rows[name] = _engine_summary(t_, sym_days, args.cost)
+        _screen.apply(base)
+        print(f"\n{'=' * 78}\nScreen settings compared ({args.lots} lots/trade, ₹{args.cost:.0f} costs per trade)"
+              f"\n{'=' * 78}")
+        print(pd.DataFrame(rows).T.to_string())
     out = _ROOT / "data"
     out.mkdir(exist_ok=True)
     tr.to_csv(out / "replay_screen_trades.csv", index=False)
@@ -790,8 +826,8 @@ def _replay_screen(args, start, end, _days, api_key, access_token) -> None:
               .assign(win_pct=lambda x: (x.win_pct * 100).round(0)).to_string())
         print("Exits:", ", ".join(f"{k} {c}" for k, c in tr["exit_reason"].str.replace(r" \(.*", "", regex=True)
                                      .value_counts().items()))
-    if _GATE_LOG:
-        g = pd.DataFrame(_GATE_LOG)
+    if gate_log:
+        g = pd.DataFrame(gate_log)
         gates = [f"G{i}" for i in range(1, 7)]
         print(f"\nGate report — how often each gate passes ({len(g) // 2} candles decided, 09:30–15:00, no open trade):")
         rep = g.groupby("side")[gates + ["all"]].mean().mul(100).round(0).astype(int).astype(str) + "%"

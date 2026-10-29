@@ -58,13 +58,16 @@ SIGNAL_CLOSE = datetime.time(15, 0)
 EXPIRY_CUTOFF = datetime.time(14, 0)
 MAX_AGE_MIN = 6
 STRUCT_MAX_BARS = 6
-ROOM_RR = 1.5
-NEAR_RES_PCT = 0.001       # 0.1%
+# Tunable thresholds (chart_bot reads CHART_SCREEN_* from .env; defaults are the spec)
+ROOM_RR = 1.5              # G6 / plan: room to the nearest opposing level, in R   (CHART_SCREEN_ROOM_RR)
+NEAR_RES_PCT = 0.001       # G6: no trade within 0.1% of a level (0 = off)        (CHART_SCREEN_NEAR_PCT, in %)
+OPEN_TARGET_R = 0.0        # no level beyond the entry: target = entry ± this × R  (CHART_SCREEN_OPEN_TARGET_R, 0 = WAIT)
+G5_NEUTRAL = False         # G5: a Neutral 15m trend also confirms               (CHART_SCREEN_15M_NEUTRAL=1)
 ZONE_NEAR_PCT = 0.0005     # 0.05%
 STOP_BUFFER_PCT = 0.0002   # 0.02%
 LEVEL_MERGE_PCT = 0.0005   # 0.05%: levels this close together are one level
 LEVEL_TFS = ("tf_1h",)
-STRONG, MODERATE = 75, 60
+STRONG, MODERATE = 75, 60  # score grades                                         (CHART_SCREEN_STRONG / _MODERATE)
 HISTORY = {"5m": 300, "15m": 300, "1H": 300, "1D": 300}
 _BULL = ("Bullish", "Mildly Bullish")
 _BEAR = ("Bearish", "Mildly Bearish")
@@ -217,6 +220,22 @@ def _merge(levels: list) -> list:
     return out
 
 
+def settings() -> dict:
+    return {"room_rr": ROOM_RR, "near_pct": NEAR_RES_PCT * 100, "open_target_r": OPEN_TARGET_R,
+            "g5_neutral": G5_NEUTRAL, "strong": STRONG, "moderate": MODERATE}
+
+
+def apply(cfg: dict) -> None:
+    """Set the thresholds (keys as in settings(); missing keys keep their value)."""
+    global ROOM_RR, NEAR_RES_PCT, OPEN_TARGET_R, G5_NEUTRAL, STRONG, MODERATE
+    ROOM_RR = float(cfg.get("room_rr", ROOM_RR))
+    NEAR_RES_PCT = float(cfg.get("near_pct", NEAR_RES_PCT * 100)) / 100
+    OPEN_TARGET_R = float(cfg.get("open_target_r", OPEN_TARGET_R))
+    G5_NEUTRAL = bool(cfg.get("g5_neutral", G5_NEUTRAL))
+    STRONG = int(cfg.get("strong", STRONG))
+    MODERATE = int(cfg.get("moderate", MODERATE))
+
+
 def build_snapshot(frames: dict, now: datetime.datetime, expiry_day: bool = False,
                    cache: dict | None = None) -> dict:
     """frames: closed candles {"5m", "15m", "1H", "1D"} (IST-naive index). now: IST-naive."""
@@ -279,8 +298,8 @@ def _side_gates(snap: dict, side: str) -> tuple[dict, dict, list]:
     g["G3"] = t5["adx14"] >= 25 and t5["adx14"] >= t5["adx14_prev"] and di >= 5
     g["G4"] = (50 <= t5["rsi14"] <= 72) if ce else (28 <= t5["rsi14"] <= 50)
     r15 = t15.get("rsi14")
-    g["G5"] = bool(r15 is not None and ((t15.get("trend_label") in _BULL and r15 < 75) if ce else
-                                        (t15.get("trend_label") in _BEAR and r15 > 25)))
+    ok15 = (_BULL if ce else _BEAR) + (("Neutral",) if G5_NEUTRAL else ())
+    g["G5"] = bool(r15 is not None and t15.get("trend_label") in ok15 and (r15 < 75 if ce else r15 > 25))
     return g, {"di": di}, notes
 
 
@@ -320,8 +339,11 @@ def _plan(snap: dict, side: str) -> dict:
     opp = [x for x in opp if (x > entry if ce else x < entry)]
     target = (min(opp) if ce else max(opp)) if opp else None
     risk = (entry - stop if ce else stop - entry) if stop is not None else None
+    if target is None and OPEN_TARGET_R and risk and risk > 0:      # beyond every level: open room
+        target = entry + OPEN_TARGET_R * risk if ce else entry - OPEN_TARGET_R * risk
     rr = (abs(target - entry) / risk) if (target is not None and risk and risk > 0) else None
-    near_res = any(abs(x - close) <= close * NEAR_RES_PCT for x in (lv["resistance"] if ce else lv["support"]))
+    near_res = bool(NEAR_RES_PCT) and any(abs(x - close) <= close * NEAR_RES_PCT
+                                          for x in (lv["resistance"] if ce else lv["support"]))
     return {"entry_type": entry_type, "entry": round(entry, 2), "stop": round(stop, 2) if stop is not None else None,
             "target": round(target, 2) if target is not None else None, "rr": round(rr, 2) if rr else None,
             "invalidation": round(swing, 2) if swing is not None else None,
