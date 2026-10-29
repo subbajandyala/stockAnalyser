@@ -5,3 +5,6 @@ __pycache__/
 .streamlit/secrets.toml
 kite_creds.json
 .kite_creds.json
+
+# CE/PE signal engine logs
+logs/

@@ -18,7 +18,7 @@ bash start_droplet.sh
 bash stop_droplet.sh
 ```
 
-No tests or linters are configured.
+Tests: `python -m pytest tests -q` (CE/PE engine). No linters configured.
 
 ---
 
@@ -81,6 +81,7 @@ Cron entry:
 | `gamma_blast_bot.py` | cron | ntfy |
 | `red_flag_bot.py` | cron | ntfy |
 | `eod_report.py` | cron, 15:35 | ntfy |
+| `ce_pe_bot.py` | cron every 5 min (+10s), 9:20–15:35 | none — JSONL log only (`logs/ce_pe_signals.jsonl`); `--replay START END` backtests |
 
 All bots support `--once` flag (single scan, exit) and `--state-file` for dedup.
 
@@ -148,6 +149,8 @@ fetch_ohlcv_yf_compat(symbol, period="1y", interval="1d")  # drop-in for yf.down
 | `option_chain.py` | Live NSE option chain (blocked on cloud, works locally) |
 | `news.py` | RSS → NIFTY 500 company name match → analyze_stock |
 | `live_ticks.py` | Redis tick reader for WebSocket data |
+| `chart_analysis.py` | SMC chart engine; `analyze_df()` runs the pipeline on any frame |
+| `ce_pe_engine.py` | Rule-based 5m CE/PE engine: gates G1–G6, score, plan, active-signal mgmt (pure `evaluate()`) |
 
 ---
 

@@ -720,14 +720,22 @@ def analyze_chart(symbol: str, interval: str,
     except ValueError as e:
         return {"error": str(e)}
 
-    intraday = interval != "1D"
-
     try:
         df = fetch_candles(token, interval, api_key, access_token)
     except RuntimeError as e:
         return {"error": str(e)}
 
-    if df.empty or len(df) < 30:
+    return analyze_df(df, interval, symbol=display_name)
+
+
+def analyze_df(df: pd.DataFrame, interval: str, symbol: str = "") -> dict:
+    """Run the full indicator + SMC pipeline on an already-fetched OHLCV frame.
+
+    Used by analyze_chart() for live data and by the CE/PE signal engine for
+    historical replay (where the frame is a time-sliced copy of history).
+    """
+    intraday = interval != "1D"
+    if df is None or df.empty or len(df) < 30:
         return {"error": "Not enough data — try a longer timeframe or check the symbol"}
 
     df       = compute_indicators(df, intraday=intraday)
@@ -743,6 +751,6 @@ def analyze_chart(symbol: str, interval: str,
     return {
         "df": df, "events": evts, "obs": obs, "fvgs": fvgs,
         "summary": summary, "verdict": verdict, "cpr": cpr,
-        "symbol": display_name, "interval": interval,
+        "symbol": symbol, "interval": interval,
         "error": None,
     }
