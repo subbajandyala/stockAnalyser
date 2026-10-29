@@ -300,8 +300,8 @@ def _fill_price(kite: KiteConnect, order_id: str, exchange: str, ts: str) -> tup
     return 0.0, "not filled within 8s — cancelled"
 
 
-ENTRY_LIMIT_PCT     = 0.02   # buy limit: option LTP + 2%
-ENTRY_CHASE_MAX_PCT = 0.05   # if unfilled after 4 s, re-price to the new LTP + 2%, never above first LTP + 5%
+ENTRY_LIMIT_PCT     = 0.005  # buy limit: option LTP + 0.5%
+ENTRY_CHASE_MAX_PCT = 0.015  # if unfilled after 4 s, re-price to the new LTP + 0.5%, never above first LTP + 1.5%
 
 
 def _fill_chasing(kite: KiteConnect, order_id: str, exchange: str, ts: str, qty: int,
@@ -310,7 +310,7 @@ def _fill_chasing(kite: KiteConnect, order_id: str, exchange: str, ts: str, qty:
 
     On a fast candle the premium can run past the first limit (21 Oct live: a
     3.7× candle left a +1% limit unfilled). After 4 s the limit is moved up to
-    the fresh LTP + 2%, capped at `cap`. Still open at 8 s → cancelled; a part
+    the fresh LTP + ENTRY_LIMIT_PCT, capped at `cap`. Still open at 8 s → cancelled; a part
     fill is returned as filled so the caller protects what was bought.
     """
     def last():
@@ -631,7 +631,7 @@ def place_order_for_signal(
         if not ts:
             return {"error": f"Could not find tradingsymbol for {symbol} {strike} {opt_type}"}
 
-        # 3. Fetch option LTP and compute limit price (2% above; chased up to +5% if unfilled)
+        # 3. Fetch option LTP and compute limit price (ENTRY_LIMIT_PCT above; chased up to ENTRY_CHASE_MAX_PCT)
         try:
             ltp_data = kite.ltp([f"{exchange}:{ts}"])
             option_ltp = float(ltp_data[f"{exchange}:{ts}"]["last_price"])
