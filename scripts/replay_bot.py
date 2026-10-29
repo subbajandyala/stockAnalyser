@@ -42,6 +42,13 @@ Usage (on the droplet):
   /root/venv/bin/python scripts/replay_bot.py SENSEX --days 40
   /root/venv/bin/python scripts/replay_bot.py --day 2026-10-21 -v   # one day, every decision
 
+Screen engine (chart_bot CHART_ENGINE=screen, screener/screen_logic.py):
+  /root/venv/bin/python scripts/replay_bot.py --engine screen --days 20 [-v]
+  decides after every closed 5m candle (5m / 15m / 1h / daily), enters at the next 5m open,
+  exits on the option GTT (stop 20–25% / plan target), a 5m CHoCH against the trade, a 5m
+  close beyond the index stop, the index target, or 15:15. CHART_SCREEN_GRADE=MODERATE also
+  trades MODERATE signals. Expiry day = Tuesday (NIFTY) / Thursday (SENSEX) in the replay.
+
 Exit tests (replay only — the live bot does not have these):
   --mid-stop        exit when a 3m candle CLOSES back past the middle of the entry
                     candle (below it for CE, above it for PE)
@@ -67,8 +74,11 @@ from screener.kite_order import (BOOK_PROFIT_PCT, LOT_SIZE, SL_MAX_PCT, SL_MIN_P
 from scripts import backtest_chart as _bt
 from scripts.backtest_chart import _fetch
 from scripts import chart_bot as cb
+from screener import kite_order as _ko
+from screener import screen_logic as _screen
 
 _bt._MAX_DAYS_PER_CALL.setdefault("3minute", 90)
+_bt._MAX_DAYS_PER_CALL.setdefault("60minute", 365)
 
 _ROOT = pathlib.Path(__file__).parent.parent
 _IST  = datetime.timezone(datetime.timedelta(hours=5, minutes=30))
@@ -431,6 +441,100 @@ def run_candles(sig: pd.DataFrame, bars: dict, lots: int, book_pct: float, max_m
     return pd.DataFrame(trades)
 
 
+# ── Screen engine ────────────────────────────────────────────────────────────
+
+_EXPIRY_WEEKDAY = {"NIFTY": 1, "SENSEX": 3}     # Tuesday / Thursday (replay approximation)
+
+
+def _naive(df: pd.DataFrame) -> pd.DataFrame:
+    if df is not None and len(df) and df.index.tz is not None:
+        df = df.copy()
+        df.index = df.index.tz_convert(_IST).tz_localize(None)
+    return df
+
+
+def _screen_option_levels(spot: float, entry: float, stop: float, target: float, side: str) -> tuple:
+    """The live order's GTT: plan levels → premium (delta 0.5), stop kept 20–25% below entry,
+    target at least +15% (kite_order.place_order_for_signal)."""
+    lv = _ko._spot_to_option_levels(spot, entry, stop, target, side)
+    sl, tgt = lv if lv else (entry * (1 - _ko._FALLBACK_STOP_PCT), entry * (1 + _ko._FALLBACK_TARGET_PCT))
+    sl = _tick(min(max(sl, entry * (1 - _ko.SL_MAX_PCT)), entry * (1 - _ko.SL_MIN_PCT)))
+    return sl, _tick(max(tgt, entry * (1 + _ko.T1_MIN_PCT)))
+
+
+def run_screen(symbol: str, frames: dict, days: list, lots: int, grades: tuple,
+               verbose: bool) -> pd.DataFrame:
+    """The 5m rules bar by bar: decide after each close, enter at the next open."""
+    lot = LOT_SIZE.get(symbol, 1)
+    f5, f15, f60, fd = (_naive(frames[k]) for k in ("5m", "15m", "1H", "1D"))
+    i15 = f15.index + pd.Timedelta(minutes=15)
+    i60 = f60.index + pd.Timedelta(minutes=60)
+    cache, trades, n_sig = {}, [], 0
+    tradable = tuple(f"{g}_{s}" for g in grades for s in ("CE", "PE"))
+    for day in days:
+        bars = f5[f5.index.date == day]
+        fd_day = fd[fd.index.date < day]
+        expiry = day.weekday() == _EXPIRY_WEEKDAY.get(symbol, -1)
+        pos, pending = None, None
+
+        def _done(p_, px, t, why):
+            tr = _close(p_, px, t, why, symbol, day, lot)
+            tr["engine"] = "screen"
+            trades.append(tr)
+            if verbose:
+                print(f"    {t:%H:%M} {symbol} EXIT {p_['d']} ({why}) → ₹{tr['pnl']:,.0f}")
+
+        for t, bar in bars.iterrows():
+            if pending is not None and pos is None and t.time() < _SQUARE_OFF:
+                a = pending
+                entry = _PREMIUM.get(symbol, 150.0)
+                sl, tgt = _screen_option_levels(bar["Open"], entry, a["plan"]["stop"], a["plan"]["target"], a["side"])
+                pos = {"d": a["side"], "t": t, "spot": bar["Open"], "entry": entry, "sl": sl, "tgt": tgt,
+                       "qty": lots * lot, "setup": a["action"], "active": {
+                           "side": a["side"], "entry": a["plan"]["entry"], "stop": a["plan"]["stop"],
+                           "target": a["plan"]["target"], "opened_at": str(a["bar"])}}
+                if verbose:
+                    p = a["plan"]
+                    print(f"    {t:%H:%M} {symbol} ENTER {a['side']} ({a['action']} score {a['score']}) ₹{entry:.0f} "
+                          f"SL ₹{sl} target ₹{tgt} | index stop {p['stop']:.1f} target {p['target']:.1f}")
+            pending = None
+            exit_bar = False
+            if pos:
+                d = pos["d"]
+                p_open = _premium(pos["entry"], pos["spot"], bar["Open"], d)
+                if t.time() >= _SQUARE_OFF:
+                    p_, pos = pos, None
+                    _done(p_, p_open, t, "15:15 square-off")
+                    continue
+                adverse, favour = (bar["Low"], bar["High"]) if d == "CE" else (bar["High"], bar["Low"])
+                if _premium(pos["entry"], pos["spot"], adverse, d) <= pos["sl"]:
+                    p_, pos = pos, None
+                    _done(p_, min(p_["sl"], p_open), t, "option stop (GTT)")
+                elif _premium(pos["entry"], pos["spot"], favour, d) >= pos["tgt"]:
+                    p_, pos = pos, None
+                    _done(p_, max(p_["tgt"], p_open), t, "option target (GTT)")
+            now = t + pd.Timedelta(minutes=5, seconds=30)
+            fr = {"5m": f5[f5.index <= t].tail(_screen.HISTORY["5m"]),
+                  "15m": f15[i15 <= now].tail(_screen.HISTORY["15m"]),
+                  "1H": f60[i60 <= now].tail(_screen.HISTORY["1H"]), "1D": fd_day}
+            snap = _screen.build_snapshot(fr, now.to_pydatetime(), expiry_day=expiry, cache=cache)
+            if pos:
+                res = _screen.decide(snap, pos["active"])
+                if res["action"] == "EXIT":
+                    p_, pos = pos, None
+                    _done(p_, _premium(p_["entry"], p_["spot"], bar["Close"], p_["d"]), t + pd.Timedelta(minutes=5),
+                          f"screen exit ({res['failed_reason']})")
+                    exit_bar = True
+                continue
+            res = _screen.decide(snap)
+            if res["action"] in tradable and not exit_bar:
+                n_sig += 1
+                pending = {**res, "bar": t}
+    if verbose:
+        print(f"  {symbol}: {n_sig} signals taken")
+    return pd.DataFrame(trades)
+
+
 def _close(pos: dict, px: float, t, why: str, symbol: str, day, lot: int) -> dict:
     pnl = pos["qty"] * (px - pos["entry"])
     return {"engine": "setups", "symbol": symbol, "day": day, "dir": pos["d"], "setup": pos["setup"],
@@ -477,7 +581,7 @@ def main() -> None:
     ap.add_argument("symbols", nargs="*", default=["NIFTY", "SENSEX"])
     ap.add_argument("--days", type=int, default=20, help="Trading days to replay (default 20)")
     ap.add_argument("--day", help="Replay only this date (YYYY-MM-DD)")
-    ap.add_argument("--engine", choices=["all", "both", "candles", "setups", "score"], default="all",
+    ap.add_argument("--engine", choices=["all", "both", "candles", "setups", "score", "screen"], default="all",
                     help="all = candles + setups + score; both = setups + score")
     ap.add_argument("--lots", type=int, default=2, help="Lots per trade (default 2)")
     ap.add_argument("--cost", type=float, default=100.0,
@@ -515,6 +619,10 @@ def main() -> None:
         if args.day:
             return [end]
         return [d for d in all_d if d < today or now.time() > datetime.time(15, 30)][-args.days:]
+
+    if args.engine == "screen":
+        _replay_screen(args, start, end, _days, api_key, access_token)
+        return
 
     sig3, sigc, sig5, bars3, bars5, sym_days = [], [], [], {}, {}, []
     for sym in [s.upper() for s in args.symbols]:
@@ -623,6 +731,58 @@ def main() -> None:
     print(f"\nTrades → {out}/replay_candles_trades.csv, replay_setups_trades.csv, replay_score_trades.csv")
     print("P&L uses delta 0.5 on a typical ATM premium (NIFTY ₹150, SENSEX ₹350), no theta/IV — "
           "compare engines, don't read it as exact rupees.")
+
+
+def _replay_screen(args, start, end, _days, api_key, access_token) -> None:
+    from screener.chart_analysis import fetch_candles
+    grades = ("STRONG", "MODERATE") if cb.SCREEN_GRADE == "MODERATE" else ("STRONG",)
+    trades, sym_days = [], []
+    for sym in [s.upper() for s in args.symbols]:
+        tok = _INDEX_TOKENS.get(sym)
+        if not tok:
+            print(f"{sym}: only NIFTY / BANKNIFTY / SENSEX are supported")
+            continue
+        print(f"Fetching {sym} 5m / 15m / 1h / daily history…")
+        df5 = _fetch(tok, "5minute", start - datetime.timedelta(days=7), end, api_key, access_token)
+        if df5.empty:
+            print(f"{sym}: no 5m data")
+            continue
+        df5, cov = _with_future_volume(sym, df5, start - datetime.timedelta(days=7), end, api_key, access_token)
+        df15 = _fetch(tok, "15minute", start - datetime.timedelta(days=21), end, api_key, access_token)
+        df15, _ = _with_future_volume(sym, df15, start - datetime.timedelta(days=21), end, api_key, access_token,
+                                      "15minute")
+        df60 = _fetch(tok, "60minute", start - datetime.timedelta(days=75), end, api_key, access_token)
+        dfd = fetch_candles(tok, "1D", api_key, access_token)
+        print(f"  futures volume on {cov:.0%} of 5m candles (VWAP); {len(dfd)} daily candles")
+        days = [d for d in _days(df5) if d >= start]
+        sym_days += [(sym, d) for d in days]
+        if args.verbose:
+            print(f"\nScreen engine on {sym}, trade by trade:")
+        tr = run_screen(sym, {"5m": df5, "15m": df15, "1H": df60, "1D": dfd}, days, args.lots, grades,
+                        args.verbose)
+        trades.append(tr)
+    tr = pd.concat(trades, ignore_index=True) if trades else pd.DataFrame()
+    out = _ROOT / "data"
+    out.mkdir(exist_ok=True)
+    tr.to_csv(out / "replay_screen_trades.csv", index=False)
+    print(f"\n{'=' * 78}\nScreen engine ({'+'.join(grades)} signals, {args.lots} lots/trade, "
+          f"₹{args.cost:.0f} costs per trade)\n{'=' * 78}")
+    rows = []
+    for sym, day in sym_days:
+        t_ = tr[(tr["symbol"] == sym) & (tr["day"] == day)] if not tr.empty else tr
+        rows.append({"day": str(day), "symbol": sym, "trades": len(t_),
+                     "₹": int((t_["pnl"] - args.cost).sum()) if len(t_) else 0})
+    print(pd.DataFrame(rows).to_string(index=False))
+    print()
+    print(pd.DataFrame({"screen": _engine_summary(tr, sym_days, args.cost)}).T.to_string())
+    if not tr.empty:
+        print("\nBy signal:")
+        print(tr.groupby(["setup", "dir"]).agg(trades=("pnl", "size"), win_pct=("win", "mean"), pnl=("pnl", "sum"))
+              .assign(win_pct=lambda x: (x.win_pct * 100).round(0)).to_string())
+        print("Exits:", ", ".join(f"{k} {c}" for k, c in tr["exit_reason"].str.replace(r" \(.*", "", regex=True)
+                                     .value_counts().items()))
+    print(f"\nTrades → {out}/replay_screen_trades.csv")
+    print("P&L uses delta 0.5 on a typical ATM premium (NIFTY ₹150, SENSEX ₹350), no theta/IV.")
 
 
 if __name__ == "__main__":

@@ -24,6 +24,15 @@ GTTs, exits and state file (chart_bot_state_kite2.json). The Sharekhan copy foll
 
 Engine "setups": regime + setups on 3m, book at +20%.  Engine "score": old ±5 score.
 
+Engine "screen" (CHART_ENGINE=screen) — screener/screen_logic.py: after every 5-minute
+candle closes, the rule set (session gates, gates G1–G6 on 5m / 15m, score 0–100 with
+1h / daily context) decides STRONG / MODERATE CE / PE, WAIT, HOLD or EXIT. A STRONG signal
+(CHART_SCREEN_GRADE=MODERATE also takes MODERATE) buys the ATM option; the plan's index
+stop / target become the GTT (stop 20–25% below the premium entry, target from the
+plan). On every closed 5m candle an open trade is checked: a 5m CHoCH against it, a
+close beyond the index stop, or the index target → exit. 15:15 square-off.
+Indices: CHART_SCREEN_SYMBOLS (default NIFTY,SENSEX). No time-based exit.
+
 Set KITE_AUTO_TRADE=1 to enable auto order execution.
 
 Checks / tests:
@@ -54,6 +63,7 @@ from screener.chart_analysis import analyze_chart
 from screener import candles as _candles
 from screener import kite_order as _ko
 from screener import setups as _setups
+from screener import screen_logic as _screen
 from screener.kite_order import (
     BOOK_PROFIT_PCT,
     LOT_SIZE,
@@ -109,6 +119,11 @@ CONFIRM_TF = _env_setting("CHART_CONFIRM_TF") or "none"
 # with half-booking + trailing. Switch back with CHART_ENGINE=score in .env.
 ENGINE   = (_env_setting("CHART_ENGINE") or "candles").lower()
 SETUP_TF = _env_setting("CHART_SETUP_TF") or "3m"
+# Engine "screen": rule-based 5m engine (screener/screen_logic.py). Trades STRONG_CE /
+# STRONG_PE; CHART_SCREEN_GRADE=MODERATE also takes MODERATE_CE / MODERATE_PE.
+SCREEN_GRADE   = (_env_setting("CHART_SCREEN_GRADE") or "STRONG").upper()
+SCREEN_SYMBOLS = [x.strip().upper() for x in (_env_setting("CHART_SCREEN_SYMBOLS") or "NIFTY,SENSEX").split(",")
+                  if x.strip()]
 # Engine "candles" (default): read the forming 3m candle; strong / engulfing /
 # hammer-type candle → buy that side; book the position at +CANDLE_BOOK_PCT;
 # exit early on an opposite candle or when it isn't working after SCALP_MAX_MIN.
@@ -237,6 +252,11 @@ print(f"[chart_bot] AUTO_TRADE={'ON' if _AUTO_TRADE else 'OFF (set KITE_AUTO_TRA
          + (f"strong candles ≥ {RIDE_MULT:g}× avg (lock +{RIDE_LOCK_PCT:.0%})" if RIDE_MULT else "off")
          + " | max lots " + ", ".join(f"{k} {v or 'no cap'}" for k, v in _ko.MAX_LOTS.items())
          if ENGINE == "candles" else
+         f" | engine screen on 5m (15m confirm, 1h / daily context) | trades "
+         + ("STRONG + MODERATE" if SCREEN_GRADE == "MODERATE" else "STRONG") + " signals on "
+         + ", ".join(SCREEN_SYMBOLS) + f" | exit on 5m CHoCH / stop close / target, square-off "
+         f"{SQUARE_OFF_TIME:%H:%M} | max lots " + ", ".join(f"{k} {v or 'no cap'}" for k, v in _ko.MAX_LOTS.items())
+         if ENGINE == "screen" else
          f" | engine setups on {SETUP_TF} | book 100% at +{BOOK_PROFIT_PCT:.0%}" if ENGINE == "setups" else
          f" | engine score | signal chart {PRIMARY_TF} | confirm {CONFIRM_TF} | orders at score ±{MIN_TRADE_SCORE}"),
       flush=True)
@@ -812,7 +832,7 @@ def _manage_trade(kite, symbol: str, state: dict, trade_key: str,
             _exit_bot_position(kite, symbol, state, trade_key,
                                f"not working — {held_min:.0f} min, {(ltp / entry - 1) * 100:+.1f}%", ntfy_topic)
             return
-    if state.get(k("mode")) in ("book", "scalp"):
+    if state.get(k("mode")) in ("book", "scalp", "screen"):
         print(f"  [MONITOR] {symbol}: LTP ₹{ltp:.2f} ({(ltp / entry - 1) * 100:+.1f}%)  entry ₹{entry:.2f}  "
               f"SL ₹{sl:.2f}  book ₹{far:.2f} (+{(far / entry - 1) * 100:.0f}%, GTT)")
         if state.get(k("mode")) == "scalp":
@@ -996,6 +1016,9 @@ def _monitor_positions(
         recorded_direction = direction or recorded_direction
         if not recorded_direction:
             continue
+        if state.get(f"{trade_key}:mode") == "screen":
+            _manage_screen(kite, symbol, state, trade_key, api_key, access_token, ntfy_topic, now_ist)
+            continue
         if state.get(f"{trade_key}:mode") in ("scalp", "ride"):
             if not OPPOSITE_EXIT:
                 continue
@@ -1149,6 +1172,166 @@ def _scan_candles(symbols: list[str], state: dict, api_key: str, access_token: s
             print(f"  [SHAREKHAN] " + (f"SKIPPED — {sk['error']}" if "error" in sk else f"ORDER — {sk['order_id']}"))
         except Exception as _sk_err:
             print(f"  [SHAREKHAN] ERROR — {_sk_err}")
+
+
+# ── Screen engine (5m rules) ─────────────────────────────────────────────────
+
+_SCREEN_CACHE: dict = {}          # symbol → (5m bar, snapshot): built once per closed 5m candle
+_EXPIRY_CACHE: dict = {}          # (symbol, date) → is today that index's expiry day
+
+
+def _last_closed_5m(now_ist: datetime.datetime) -> datetime.datetime:
+    """Start time (IST-naive) of the last 5m candle that has closed."""
+    t = now_ist.astimezone(_IST).replace(tzinfo=None, second=0, microsecond=0)
+    return t - datetime.timedelta(minutes=t.minute % 5 + 5)
+
+
+def _is_expiry_day(symbol: str, api_key: str, access_token: str, today: datetime.date) -> bool:
+    if (symbol, today) not in _EXPIRY_CACHE:
+        try:
+            df = _ko._option_instruments(_kite(api_key, access_token), _ko._EXCHANGE[symbol])
+            exp = df[(df["name"] == symbol) & (df["expiry"] >= today)]["expiry"].min()
+            _EXPIRY_CACHE[(symbol, today)] = bool(exp == today)
+        except Exception as e:
+            print(f"  [{symbol}] expiry check failed ({e}) — treated as not expiry day")
+            return False
+    return _EXPIRY_CACHE[(symbol, today)]
+
+
+def _screen_snapshot(symbol: str, api_key: str, access_token: str,
+                     now_ist: datetime.datetime) -> dict | None:
+    """The snapshot at the last closed 5m candle — fetched once per candle, shared by all accounts."""
+    bar = _last_closed_5m(now_ist)
+    hit = _SCREEN_CACHE.get(symbol)
+    if hit and hit[0] == bar:
+        return hit[1]
+    now = now_ist.astimezone(_IST).replace(tzinfo=None)
+    try:
+        frames = _screen.fetch_frames(symbol, api_key, access_token, now)
+    except Exception as e:
+        print(f"  {symbol} 5m: ERROR — {e}")
+        return None
+    snap = _screen.build_snapshot(frames, now, expiry_day=symbol in _ko.LOT_SIZE
+                                  and _is_expiry_day(symbol, api_key, access_token, now.date()))
+    t5 = snap.get("tf_5m") or {}
+    if t5.get("time") is not None and t5["time"] >= bar:
+        _SCREEN_CACHE[symbol] = (bar, snap)      # Kite has the candle — don't fetch again until the next one
+    return snap
+
+
+def _screen_view(symbol: str, res: dict) -> dict:
+    p = res.get("plan") or {}
+    return {"signal": res.get("side"), "label": res["action"].replace("_", " "), "spot": res.get("close"),
+            "stop": p.get("stop"), "regime": "5m screen"}
+
+
+def _manage_screen(kite, symbol: str, state: dict, trade_key: str, api_key: str, access_token: str,
+                   ntfy_topic: str, now_ist: datetime.datetime) -> None:
+    """STEP 1 on every closed 5m candle: EXIT on a 5m CHoCH against the trade, a close beyond
+    the index stop, or the index target; else HOLD (the GTT stays as the hard stop)."""
+    k = lambda name: f"{trade_key}:{name}"
+    snap = _screen_snapshot(symbol, api_key, access_token, now_ist)
+    if not snap or not snap.get("tf_5m"):
+        return
+    bar = snap["tf_5m"]["time"]
+    if str(bar) == state.get(k("screen_bar")):
+        return                       # this candle was already checked
+    active = {"side": state.get(k("direction")), "entry": state.get(k("screen_entry")),
+              "stop": state.get(k("screen_stop")), "target": state.get(k("screen_target")),
+              "opened_at": state.get(k("screen_opened"))}
+    res = _screen.decide(snap, active)
+    state[k("screen_bar")] = str(bar)
+    print(f"  [SCREEN] {symbol} {bar:%H:%M} {active['side']} trade: {_screen.summary(res)}")
+    if res["action"] == "EXIT":
+        today = now_ist.strftime("%Y-%m-%d")
+        state[f"{today}:{symbol}:screen_exit_bar"] = str(bar)   # no new signal on the exit candle
+        _exit_bot_position(kite, symbol, state, trade_key, f"screen exit — {res['failed_reason']}", ntfy_topic)
+
+
+def _scan_screen(symbols: list[str], state: dict, api_key: str, access_token: str,
+                 ntfy_topic: str, now_ist: datetime.datetime) -> None:
+    """New signals from the 5m rules: one decision per closed 5m candle per index."""
+    today = now_ist.strftime("%Y-%m-%d")
+    grades = ("STRONG", "MODERATE") if SCREEN_GRADE == "MODERATE" else ("STRONG",)
+    for symbol in [s for s in symbols if s in SCREEN_SYMBOLS]:
+        if _open_slots(state, today, symbol):
+            continue                 # managed in _monitor_positions; one trade per index
+        snap = _screen_snapshot(symbol, api_key, access_token, now_ist)
+        if not snap or not snap.get("tf_5m"):
+            continue
+        bar = snap["tf_5m"]["time"]
+        done_key = f"{today}:{symbol}:screen_done_bar"
+        if state.get(done_key) == str(bar):
+            continue                 # already decided on this candle
+        state[done_key] = str(bar)
+        res = _screen.decide(snap)
+        res["close"] = snap["tf_5m"].get("close")
+        sig = res.get("side")
+        print(f"  {'🚀' if res['action'].endswith(('_CE', '_PE')) else '  '} {symbol:10s} | 5m {bar:%H:%M} | "
+              f"{_screen.summary(res)}")
+        view = _screen_view(symbol, res)
+        tradable = res["action"] in tuple(f"{g}_{s}" for g in grades for s in ("CE", "PE"))
+        if not tradable:
+            _append_chart_log(today, _setup_log_entry(now_ist, symbol, view, "no signal"))
+            continue
+        if state.get(f"{today}:{symbol}:screen_exit_bar") == str(bar):
+            print(f"         [{symbol}] exited on this candle — no new signal until the next one")
+            continue
+        candle = f"{sig}@{bar:%H:%M}"
+        plan = res["plan"]
+        auto = _acct().get("auto_trade", _AUTO_TRADE)
+        text = (f"{res['action'].replace('_', ' ')} score {res['score']} — {plan['entry_type']} "
+                f"entry {plan['entry']:.1f}, stop {plan['stop']:.1f}, target {plan['target']:.1f}, "
+                f"R:R {plan['rr']}\n" + "\n".join(res.get("reasoning") or []))
+        if not (auto and symbol in _TRADE_SYMBOLS):
+            if ntfy_topic:
+                send_ntfy(f"Chart Bot: {symbol} {res['action'].replace('_', ' ')} → BUY {sig}", text, ntfy_topic)
+            _append_chart_log(today, _setup_log_entry(now_ist, symbol, view, "signal only"))
+            continue
+        trade_key = _slot_keys(today, symbol)[0]
+        print(f"  [AUTO-TRADE] {res['action']} → {sig} on {symbol} @ {res['close']:.0f} "
+              f"(index stop {plan['stop']}, target {plan['target']})")
+        trade = _place_order(symbol, sig, res["close"], api_key, access_token,
+                             chart_sl=plan["stop"], chart_target=plan["target"])
+        if "error" in trade:
+            print(f"  [AUTO-TRADE] NOT PLACED — {trade['error']}")
+            if ntfy_topic:
+                send_ntfy(f"Chart Auto-Trade NOT PLACED: {symbol}",
+                          f"{res['action']} {sig}\nReason: {trade['error']}", ntfy_topic, priority="default")
+            _append_chart_log(today, _setup_log_entry(now_ist, symbol, view, f"skipped: {trade['error']}", trade))
+            continue
+        state.update({
+            trade_key: trade["order_id"],
+            f"{trade_key}:ts": trade["tradingsymbol"],
+            f"{trade_key}:gtt_id": trade.get("gtt_id") or "",
+            f"{trade_key}:entry_price": trade.get("entry_price", 0),
+            f"{trade_key}:target_price": trade.get("target", 0),
+            f"{trade_key}:qty": trade.get("qty", 0),
+            f"{trade_key}:sl": trade.get("sl", 0),
+            f"{trade_key}:t1": trade.get("t1", 0),
+            f"{trade_key}:trailing": False,
+            f"{trade_key}:direction": sig,
+            f"{trade_key}:mode": "screen",
+            f"{trade_key}:candle": candle,
+            f"{trade_key}:entry_t": now_ist.strftime("%H:%M"),
+            f"{trade_key}:screen_entry": plan["entry"],
+            f"{trade_key}:screen_stop": plan["stop"],
+            f"{trade_key}:screen_target": plan["target"],
+            f"{trade_key}:screen_opened": str(bar),
+            f"{trade_key}:screen_bar": str(bar),
+        })
+        state[symbol] = f"{today}:{symbol}:{sig}:{res['action']}"
+        entry, sl, tgt = trade["entry_price"], trade["sl"], trade["target"]
+        print(f"  [AUTO-TRADE] ORDER — {trade['tradingsymbol']} | qty {trade['qty']} | entry ₹{entry} "
+              f"| SL ₹{sl} | target ₹{tgt}")
+        log = _setup_log_entry(now_ist, symbol, view, "placed", trade)
+        log.update(targets=plan["target"], rr=plan["rr"], score=res["score"])
+        _append_chart_log(today, log)
+        if ntfy_topic:
+            send_ntfy(f"Chart ORDER PLACED: {trade['tradingsymbol']}",
+                      f"{text}\n\nQty   : {trade['qty']}\nEntry : ₹{entry}\nSL    : ₹{sl} (GTT)\n"
+                      f"Target: ₹{tgt} (GTT)\nExit early: 5m CHoCH against, 5m close beyond "
+                      f"{plan['stop']:.1f}, or index target {plan['target']:.1f}", ntfy_topic)
 
 
 # ── Setups engine scan ───────────────────────────────────────────────────────
@@ -1331,7 +1514,10 @@ def _account_pass(acct: dict, symbols: list[str], state_file: str, now_ist: date
     if not force and not (SIGNAL_OPEN <= now_ist.time() <= SIGNAL_CLOSE):
         print(f"Outside clean signal window ({SIGNAL_OPEN}–{SIGNAL_CLOSE} IST) — skipping new signals.")
         return
-    _scan_candles(symbols, state, key, tok, topic, now_ist)
+    if ENGINE == "screen":
+        _scan_screen(symbols, state, key, tok, topic, now_ist)
+    else:
+        _scan_candles(symbols, state, key, tok, topic, now_ist)
     _save_state(path, state)
 
 
@@ -1382,7 +1568,7 @@ def scan_once(symbols: list[str], state_file: str, force: bool = False) -> None:
         print("Market closed — skipping.")
         return
 
-    if ENGINE == "candles":
+    if ENGINE in ("candles", "screen"):
         ready = [a for a in accounts if a["api_key"] and a["access_token"]]
         for a in accounts:
             if a not in ready and now_ist.minute % 5 == 0 and now_ist.second < 30:
@@ -1390,7 +1576,10 @@ def scan_once(symbols: list[str], state_file: str, force: bool = False) -> None:
         # Read each candle once with account 1's market data; every account trades the same reading
         _CANDLE_CACHE.clear()
         for sym in symbols:
-            _read_candle(sym, api_key, access_token, now_ist)
+            if ENGINE == "candles":
+                _read_candle(sym, api_key, access_token, now_ist)
+            elif sym in SCREEN_SYMBOLS:
+                _screen_snapshot(sym, api_key, access_token, now_ist)
         _run_accounts(ready, symbols, state_file, now_ist, force)
         print("Done.")
         return
@@ -1777,6 +1966,12 @@ def preflight(symbols: list[str], state_file: str, notify: bool = False) -> bool
                              + ", max lots " + ", ".join(f"{k} {v or 'no cap'}" for k, v in _ko.MAX_LOTS.items())
                              + ", SL buffer NIFTY "
                              f"{_SL_EXTRA['NIFTY']:.0f} / SENSEX {_SL_EXTRA['SENSEX']:.0f} pts")
+    elif ENGINE == "screen":
+        add("PASS", "rules", f"screen engine: 5m rules (gates G1–G6, score ≥ {_screen.STRONG} STRONG"
+                             + (f", ≥ {_screen.MODERATE} MODERATE" if SCREEN_GRADE == "MODERATE" else "")
+                             + f") on {', '.join(SCREEN_SYMBOLS)}, window {_screen.SIGNAL_OPEN:%H:%M}–"
+                             f"{_screen.SIGNAL_CLOSE:%H:%M}, max lots "
+                             + ", ".join(f"{k} {v or 'no cap'}" for k, v in _ko.MAX_LOTS.items()))
     elif ENGINE == "setups":
         add("PASS", "rules", f"setups engine on {SETUP_TF}, book 100% at +{BOOK_PROFIT_PCT:.0%}, SL buffer "
                              f"NIFTY {_SL_EXTRA['NIFTY']:.0f} / SENSEX {_SL_EXTRA['SENSEX']:.0f} pts, "
@@ -1824,6 +2019,10 @@ def preflight(symbols: list[str], state_file: str, notify: bool = False) -> bool
         if ENGINE == "candles":
             cres = _candles.scan(sym, CANDLE_TF, api_key, access_token)
             add("FAIL" if cres.get("error") else "PASS", f"{sym} candle", cres.get("error") or cres["text"])
+        if ENGINE == "screen" and sym in SCREEN_SYMBOLS:
+            scr = _screen.scan(sym, api_key, access_token)
+            add("FAIL" if scr.get("error") else "PASS", f"{sym} screen",
+                scr.get("error") or f"last 5m {scr['bar']:%d-%b %H:%M}: {_screen.summary(scr)}")
         if ENGINE == "setups":
             sres = _setups.scan(sym, SETUP_TF, api_key, access_token)
             if sres.get("error"):
