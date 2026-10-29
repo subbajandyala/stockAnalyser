@@ -5,9 +5,10 @@ After every 5-minute candle closes, a snapshot of indicators is built from the
 closed 5m / 15m / 1h / daily candles and the rules below decide one action.
 Only the data in the snapshot is used. Chart source (CHART_SCREEN_SOURCE):
   future (default)  the front-month NIFTY FUT / SENSEX FUT candles for 5m / 15m / 1h, with
-                    their own volume for VWAP; daily = continuous futures (spot daily if Kite
-                    refuses). Levels are in futures prices; the order converts them to spot
-                    with the basis (future − spot at the decision candle).
+                    their own volume for VWAP; daily = continuous futures, or if Kite refuses it
+                    the contract's own daily candles with older days from the index shifted by
+                    the basis (only for the long EMAs). Levels are in futures prices; the order
+                    converts them to spot with the basis (future − spot at the decision candle).
   spot              the index itself; VWAP weighted by the future's volume.
 
 STEP 0  data / session gates
@@ -526,6 +527,21 @@ def daily_continuous(fut_token: int, api_key: str, access_token: str, days: int 
     return df.set_index("datetime").sort_index()
 
 
+def _daily_stitched(fut: int, spot: int, api_key: str, access_token: str) -> pd.DataFrame:
+    """The contract's own daily candles (true futures prices for the previous day's H / L / C,
+    CPR and pivots); days before it was listed come from the index plus the median basis of
+    the overlapping days, so the 200-day EMA still has its history."""
+    fd = fetch_candles(fut, "1D", api_key, access_token)
+    sd = fetch_candles(spot, "1D", api_key, access_token)
+    common = fd.index.intersection(sd.index)
+    if fd.empty or not len(common):
+        return fd if not fd.empty else sd
+    shift = float((fd.loc[common, "Close"] - sd.loc[common, "Close"]).tail(5).median())
+    older = sd[sd.index < fd.index[0]].copy()
+    older[["Open", "High", "Low", "Close"]] += shift
+    return pd.concat([older, fd]).sort_index()
+
+
 def fetch_frames(symbol: str, api_key: str, access_token: str, now: datetime.datetime,
                  source: str | None = None) -> dict:
     """Closed 5m / 15m / 1h / daily candles of the futures (default) or the index.
@@ -543,8 +559,8 @@ def fetch_frames(symbol: str, api_key: str, access_token: str, now: datetime.dat
         try:
             frames["1D"] = _closed(daily_continuous(fut, api_key, access_token), None, now)
         except Exception:
-            frames["1D"] = _closed(fetch_candles(token, "1D", api_key, access_token), None, now)
-            frames["_source"] = "future (daily: spot)"
+            frames["1D"] = _closed(_daily_stitched(fut, token, api_key, access_token), None, now)
+            frames["_source"] = "future (daily: contract + shifted index history)"
         frames["_spot5m"] = _closed(fetch_candles(token, "5m", api_key, access_token), 5, now)
         return frames
     frames["_source"] = "spot" if source == "spot" else "spot (no futures contract found)"

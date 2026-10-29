@@ -792,7 +792,7 @@ def _replay_screen(args, start, end, _days, api_key, access_token) -> None:
             try:
                 dfd = _screen.daily_continuous(fut, api_key, access_token)
             except Exception:
-                dfd = fetch_candles(tok, "1D", api_key, access_token)
+                dfd = _screen._daily_stitched(fut, tok, api_key, access_token)
             cov = float((df5["Volume"] > 0).mean()) if len(df5) else 0.0
         else:
             df5 = _fetch(tok, "5minute", start - datetime.timedelta(days=7), end, api_key, access_token)
