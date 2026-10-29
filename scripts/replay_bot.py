@@ -781,18 +781,33 @@ def _replay_screen(args, start, end, _days, api_key, access_token) -> None:
         if not tok:
             print(f"{sym}: only NIFTY / BANKNIFTY / SENSEX are supported")
             continue
-        print(f"Fetching {sym} 5m / 15m / 1h / daily history…")
-        df5 = _fetch(tok, "5minute", start - datetime.timedelta(days=7), end, api_key, access_token)
+        fut = front_future_token(sym, api_key, access_token) if _screen.SOURCE == "future" else None
+        src = f"{sym} FUT (front month)" if fut else sym
+        print(f"Fetching {src} 5m / 15m / 1h / daily history…")
+        if fut:
+            # The current contract's own history (it was the 2nd month before the last expiry)
+            df5 = _fetch(fut, "5minute", start - datetime.timedelta(days=7), end, api_key, access_token)
+            df15 = _fetch(fut, "15minute", start - datetime.timedelta(days=21), end, api_key, access_token)
+            df60 = _fetch(fut, "60minute", start - datetime.timedelta(days=75), end, api_key, access_token)
+            try:
+                dfd = _screen.daily_continuous(fut, api_key, access_token)
+            except Exception:
+                dfd = fetch_candles(tok, "1D", api_key, access_token)
+            cov = float((df5["Volume"] > 0).mean()) if len(df5) else 0.0
+        else:
+            df5 = _fetch(tok, "5minute", start - datetime.timedelta(days=7), end, api_key, access_token)
+            df15 = _fetch(tok, "15minute", start - datetime.timedelta(days=21), end, api_key, access_token)
+            df60 = _fetch(tok, "60minute", start - datetime.timedelta(days=75), end, api_key, access_token)
+            dfd = fetch_candles(tok, "1D", api_key, access_token)
         if df5.empty:
             print(f"{sym}: no 5m data")
             continue
-        df5, cov = _with_future_volume(sym, df5, start - datetime.timedelta(days=7), end, api_key, access_token)
-        df15 = _fetch(tok, "15minute", start - datetime.timedelta(days=21), end, api_key, access_token)
-        df15, _ = _with_future_volume(sym, df15, start - datetime.timedelta(days=21), end, api_key, access_token,
-                                      "15minute")
-        df60 = _fetch(tok, "60minute", start - datetime.timedelta(days=75), end, api_key, access_token)
-        dfd = fetch_candles(tok, "1D", api_key, access_token)
-        print(f"  futures volume on {cov:.0%} of 5m candles (VWAP); {len(dfd)} daily candles")
+        if not fut:
+            df5, cov = _with_future_volume(sym, df5, start - datetime.timedelta(days=7), end, api_key, access_token)
+            df15, _ = _with_future_volume(sym, df15, start - datetime.timedelta(days=21), end, api_key,
+                                          access_token, "15minute")
+        print(f"  volume on {cov:.0%} of 5m candles (VWAP); {len(dfd)} daily candles; "
+              f"5m history from {df5.index[0]:%d %b}")
         days = [d for d in _days(df5) if d >= start]
         sym_days += [(sym, d) for d in days]
         print(f"  building {len(days)} days of 5m snapshots…")

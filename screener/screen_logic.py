@@ -3,8 +3,12 @@ Screen logic — rule-based 5-minute index signal engine (chart_bot engine "scre
 
 After every 5-minute candle closes, a snapshot of indicators is built from the
 closed 5m / 15m / 1h / daily candles and the rules below decide one action.
-Only the data in the snapshot is used; index volume is ignored (VWAP is weighted
-by the front-month future's volume when available, else a price average).
+Only the data in the snapshot is used. Chart source (CHART_SCREEN_SOURCE):
+  future (default)  the front-month NIFTY FUT / SENSEX FUT candles for 5m / 15m / 1h, with
+                    their own volume for VWAP; daily = continuous futures (spot daily if Kite
+                    refuses). Levels are in futures prices; the order converts them to spot
+                    with the basis (future − spot at the decision candle).
+  spot              the index itself; VWAP weighted by the future's volume.
 
 STEP 0  data / session gates
         last closed 5m candle older than 6 min, or a 5m / 15m value missing → NO_DATA
@@ -49,7 +53,8 @@ import datetime
 import numpy as np
 import pandas as pd
 
-from screener.chart_analysis import _with_futures_volume, compute_indicators, fetch_candles, resolve_token
+from screener.chart_analysis import (_KITE_BASE, _hdrs, _with_futures_volume, compute_indicators, fetch_candles,
+                                     front_future_token, resolve_token)
 
 _IST = datetime.timezone(datetime.timedelta(hours=5, minutes=30))
 
@@ -69,6 +74,7 @@ LEVEL_MERGE_PCT = 0.0005   # 0.05%: levels this close together are one level
 LEVEL_TFS = ("tf_1h",)
 STRONG, MODERATE = 75, 60  # score grades                                         (CHART_SCREEN_STRONG / _MODERATE)
 HISTORY = {"5m": 300, "15m": 300, "1H": 300, "1D": 300}
+SOURCE = "future"          # chart: "future" (front-month FUT) or "spot" (the index)  (CHART_SCREEN_SOURCE)
 _BULL = ("Bullish", "Mildly Bullish")
 _BEAR = ("Bearish", "Mildly Bearish")
 
@@ -270,6 +276,13 @@ def build_snapshot(frames: dict, now: datetime.datetime, expiry_day: bool = Fals
         levels["resistance"] = _merge(sorted(x for x in levels["resistance"] if x > close))
         levels["support"] = _merge(sorted((x for x in levels["support"] if x < close), reverse=True))
     snap["levels"] = levels
+    snap["source"] = frames.get("_source", "spot")
+    snap["basis"] = 0.0
+    sp = frames.get("_spot5m")
+    if t5 and sp is not None and len(sp):
+        upto = sp[sp.index <= t5["time"]]
+        if len(upto):
+            snap["basis"] = round(t5["close"] - float(upto["Close"].iloc[-1]), 2)
     snap["session"] = {"time_ist": now.strftime("%H:%M"),
                        "bars_since_open": int(((t5["time"] - t5["time"].normalize()).total_seconds() / 60
                                                - 555) // 5 + 1) if t5 else None}
@@ -496,10 +509,45 @@ def _closed(df: pd.DataFrame, minutes: int | None, now: datetime.datetime) -> pd
     return df
 
 
-def fetch_frames(symbol: str, api_key: str, access_token: str, now: datetime.datetime) -> dict:
-    """Closed 5m / 15m / 1h / daily candles; 5m and 15m weighted by futures volume for VWAP."""
+def daily_continuous(fut_token: int, api_key: str, access_token: str, days: int = 500) -> pd.DataFrame:
+    """Daily candles of the futures as one continuous series (Kite stitches the expired months)."""
+    to = datetime.date.today()
+    r = requests.get(f"{_KITE_BASE}/instruments/historical/{fut_token}/day", headers=_hdrs(api_key, access_token),
+                     params={"from": f"{to - datetime.timedelta(days=days)} 00:00:00", "to": f"{to} 23:59:59",
+                             "continuous": 1, "oi": 0}, timeout=30)
+    r.raise_for_status()
+    c = r.json().get("data", {}).get("candles", [])
+    if not c:
+        raise RuntimeError("no continuous daily candles")
+    df = pd.DataFrame(c, columns=["datetime", "Open", "High", "Low", "Close", "Volume"])
+    df["datetime"] = pd.to_datetime(df["datetime"])
+    df["datetime"] = (df["datetime"].dt.tz_localize("Asia/Kolkata") if df["datetime"].dt.tz is None
+                      else df["datetime"].dt.tz_convert("Asia/Kolkata"))
+    return df.set_index("datetime").sort_index()
+
+
+def fetch_frames(symbol: str, api_key: str, access_token: str, now: datetime.datetime,
+                 source: str | None = None) -> dict:
+    """Closed 5m / 15m / 1h / daily candles of the futures (default) or the index.
+
+    Futures: also the index's 5m candles ("_spot5m") for the basis. Without a futures
+    contract the index is used and "_source" says so."""
+    source = (source or SOURCE).lower()
     token, _ = resolve_token(symbol, api_key, access_token)
+    fut = front_future_token(symbol, api_key, access_token) if source == "future" else None
     frames = {}
+    if fut:
+        frames["_source"] = "future"
+        for key in ("5m", "15m", "1H"):
+            frames[key] = _closed(fetch_candles(fut, key, api_key, access_token), _TF_DROP.get(key), now)
+        try:
+            frames["1D"] = _closed(daily_continuous(fut, api_key, access_token), None, now)
+        except Exception:
+            frames["1D"] = _closed(fetch_candles(token, "1D", api_key, access_token), None, now)
+            frames["_source"] = "future (daily: spot)"
+        frames["_spot5m"] = _closed(fetch_candles(token, "5m", api_key, access_token), 5, now)
+        return frames
+    frames["_source"] = "spot" if source == "spot" else "spot (no futures contract found)"
     for key in ("5m", "15m", "1H", "1D"):
         df = fetch_candles(token, key, api_key, access_token)
         if key in ("5m", "15m"):
@@ -521,6 +569,7 @@ def scan(symbol: str, api_key: str, access_token: str, now: datetime.datetime | 
     res = decide(snap, active)
     res["bar"] = snap["tf_5m"].get("time") if snap["tf_5m"] else None
     res["close"] = snap["tf_5m"].get("close") if snap["tf_5m"] else None
+    res["source"], res["basis"] = snap.get("source"), snap.get("basis", 0.0)
     res["error"] = None
     return res
 

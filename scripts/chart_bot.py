@@ -124,6 +124,8 @@ SETUP_TF = _env_setting("CHART_SETUP_TF") or "3m"
 SCREEN_GRADE   = (_env_setting("CHART_SCREEN_GRADE") or "STRONG").upper()
 SCREEN_SYMBOLS = [x.strip().upper() for x in (_env_setting("CHART_SCREEN_SYMBOLS") or "NIFTY,SENSEX").split(",")
                   if x.strip()]
+# Chart: front-month futures (default) or the index — CHART_SCREEN_SOURCE=future / spot
+_screen.SOURCE = (_env_setting("CHART_SCREEN_SOURCE") or "future").lower()
 # Thresholds (defaults = the spec): room R, near-level %, open-room target R, 15m Neutral, grades
 _screen.apply({k: v for k, v in {
     "room_rr": _env_setting("CHART_SCREEN_ROOM_RR"), "near_pct": _env_setting("CHART_SCREEN_NEAR_PCT"),
@@ -259,7 +261,7 @@ print(f"[chart_bot] AUTO_TRADE={'ON' if _AUTO_TRADE else 'OFF (set KITE_AUTO_TRA
          + (f"strong candles ≥ {RIDE_MULT:g}× avg (lock +{RIDE_LOCK_PCT:.0%})" if RIDE_MULT else "off")
          + " | max lots " + ", ".join(f"{k} {v or 'no cap'}" for k, v in _ko.MAX_LOTS.items())
          if ENGINE == "candles" else
-         f" | engine screen on 5m (15m confirm, 1h / daily context) | trades "
+         f" | engine screen on 5m {_screen.SOURCE} chart (15m confirm, 1h / daily context) | trades "
          + ("STRONG + MODERATE" if SCREEN_GRADE == "MODERATE" else "STRONG") + " signals on "
          + ", ".join(SCREEN_SYMBOLS) + " ("
          + ", ".join(f"{k} {v:g}" if not isinstance(v, bool) else f"{k} {'on' if v else 'off'}"
@@ -1276,6 +1278,7 @@ def _scan_screen(symbols: list[str], state: dict, api_key: str, access_token: st
         state[done_key] = str(bar)
         res = _screen.decide(snap)
         res["close"] = snap["tf_5m"].get("close")
+        basis = float(snap.get("basis") or 0.0)      # futures chart: future − spot at this candle
         sig = res.get("side")
         print(f"  {'🚀' if res['action'].endswith(('_CE', '_PE')) else '  '} {symbol:10s} | 5m {bar:%H:%M} | "
               f"{_screen.summary(res)}")
@@ -1299,10 +1302,12 @@ def _scan_screen(symbols: list[str], state: dict, api_key: str, access_token: st
             _append_chart_log(today, _setup_log_entry(now_ist, symbol, view, "signal only"))
             continue
         trade_key = _slot_keys(today, symbol)[0]
-        print(f"  [AUTO-TRADE] {res['action']} → {sig} on {symbol} @ {res['close']:.0f} "
-              f"(index stop {plan['stop']}, target {plan['target']})")
-        trade = _place_order(symbol, sig, res["close"], api_key, access_token,
-                             chart_sl=plan["stop"], chart_target=plan["target"])
+        # The order needs spot prices (ATM strike, option levels): chart levels − basis
+        spot = res["close"] - basis
+        print(f"  [AUTO-TRADE] {res['action']} → {sig} on {symbol} @ {res['close']:.0f} {snap.get('source', '')} "
+              f"(stop {plan['stop']}, target {plan['target']}; basis {basis:+.1f} → spot {spot:.0f})")
+        trade = _place_order(symbol, sig, spot, api_key, access_token,
+                             chart_sl=plan["stop"] - basis, chart_target=plan["target"] - basis)
         if "error" in trade:
             print(f"  [AUTO-TRADE] NOT PLACED — {trade['error']}")
             if ntfy_topic:
@@ -2032,7 +2037,8 @@ def preflight(symbols: list[str], state_file: str, notify: bool = False) -> bool
         if ENGINE == "screen" and sym in SCREEN_SYMBOLS:
             scr = _screen.scan(sym, api_key, access_token)
             add("FAIL" if scr.get("error") else "PASS", f"{sym} screen",
-                scr.get("error") or f"last 5m {scr['bar']:%d-%b %H:%M}: {_screen.summary(scr)}")
+                scr.get("error") or f"{scr.get('source')} chart (basis {scr.get('basis', 0):+.1f}), "
+                                    f"last 5m {scr['bar']:%d-%b %H:%M}: {_screen.summary(scr)}")
         if ENGINE == "setups":
             sres = _setups.scan(sym, SETUP_TF, api_key, access_token)
             if sres.get("error"):
