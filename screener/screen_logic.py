@@ -37,8 +37,10 @@ Definitions used here (the input spec leaves them open):
                 yet: CHoCH if it is against the current structure, BOS if with it
   OB mitigated  a later candle CLOSED through the far side of the block (it failed)
   FVG filled    a later candle traded through the whole gap
-  CPR           previous trading day's H / L / C;  resistance / support = 5m, 15m and
-                1h swing highs / lows, previous day high / low, R1 / S1
+  CPR           previous trading day's H / L / C;  resistance / support = 1h swing highs /
+                lows, previous day high / low, pivots R1–R3 / S1–S3 (not the 5m / 15m swings:
+                those are the structure itself, and a minor one sits within 0.1% of price
+                almost all the time, so G6 never passed); levels within 0.05% count once
   stop buffer   0.02% beyond the zone / swing (the stop sits BELOW the level)
 """
 
@@ -60,6 +62,8 @@ ROOM_RR = 1.5
 NEAR_RES_PCT = 0.001       # 0.1%
 ZONE_NEAR_PCT = 0.0005     # 0.05%
 STOP_BUFFER_PCT = 0.0002   # 0.02%
+LEVEL_MERGE_PCT = 0.0005   # 0.05%: levels this close together are one level
+LEVEL_TFS = ("tf_1h",)
 STRONG, MODERATE = 75, 60
 HISTORY = {"5m": 300, "15m": 300, "1H": 300, "1D": 300}
 _BULL = ("Bullish", "Mildly Bullish")
@@ -204,6 +208,15 @@ def _cached_view(cache: dict | None, key: str, df: pd.DataFrame, **kw) -> dict:
     return cache[k]
 
 
+def _merge(levels: list) -> list:
+    """Levels sorted outward from price; one within 0.05% of the previous kept one is dropped."""
+    out = []
+    for x in levels:
+        if not out or abs(x - out[-1]) > out[-1] * LEVEL_MERGE_PCT:
+            out.append(round(x, 2))
+    return out
+
+
 def build_snapshot(frames: dict, now: datetime.datetime, expiry_day: bool = False,
                    cache: dict | None = None) -> dict:
     """frames: closed candles {"5m", "15m", "1H", "1D"} (IST-naive index). now: IST-naive."""
@@ -227,16 +240,16 @@ def build_snapshot(frames: dict, now: datetime.datetime, expiry_day: bool = Fals
         p = (h + l + c) / 3
         bc, tc = sorted(((h + l) / 2, 2 * p - (h + l) / 2))
         levels.update(cpr_tc=tc, cpr_p=p, cpr_bc=bc)
-        levels["resistance"] += [h, 2 * p - l]          # previous day high, R1
-        levels["support"] += [l, 2 * p - h]             # previous day low, S1
-    for tf in ("tf_5m", "tf_15m", "tf_1h"):
+        levels["resistance"] += [h, 2 * p - l, p + (h - l), h + 2 * (p - l)]   # PDH, R1, R2, R3
+        levels["support"] += [l, 2 * p - h, p - (h - l), l - 2 * (h - p)]      # PDL, S1, S2, S3
+    for tf in LEVEL_TFS:
         v = snap[tf]
         levels["resistance"] += [x for _, x in v.get("swing_highs", [])]
         levels["support"] += [x for _, x in v.get("swing_lows", [])]
     close = t5.get("close") if t5 else None
     if close:
-        levels["resistance"] = sorted({round(x, 2) for x in levels["resistance"] if x > close})
-        levels["support"] = sorted({round(x, 2) for x in levels["support"] if x < close}, reverse=True)
+        levels["resistance"] = _merge(sorted(x for x in levels["resistance"] if x > close))
+        levels["support"] = _merge(sorted((x for x in levels["support"] if x < close), reverse=True))
     snap["levels"] = levels
     snap["session"] = {"time_ist": now.strftime("%H:%M"),
                        "bars_since_open": int(((t5["time"] - t5["time"].normalize()).total_seconds() / 60
@@ -374,6 +387,19 @@ def _manage(snap: dict, active: dict) -> dict:
             "reasoning": [why] if why else [f"{active['side']} open: close {close:.1f}, stop {stop}, target {target}"]}
 
 
+def evaluate_sides(snap: dict) -> dict:
+    """{side: (gates G1–G6, plan, notes)} for CE and PE (also used by the replay's gate report)."""
+    sides = {}
+    for side in ("CE", "PE"):
+        gates, _, notes = _side_gates(snap, side)
+        plan = _plan(snap, side)
+        risk = plan["_risk"]
+        gates["G6"] = bool(plan["stop"] is not None and plan["target"] is not None and risk and risk > 0
+                           and abs(plan["target"] - plan["entry"]) >= ROOM_RR * risk and not plan["_near_level"])
+        sides[side] = (gates, plan, notes)
+    return sides
+
+
 def decide(snap: dict, active: dict | None = None) -> dict:
     """The rules → {action, score, gates, failed_reason, plan, reasoning, side}."""
     t5, t15 = snap.get("tf_5m") or {}, snap.get("tf_15m") or {}
@@ -396,14 +422,7 @@ def decide(snap: dict, active: dict | None = None) -> dict:
         out.update(action="NO_TRADE", failed_reason="expiry day after 14:00")
         return out
 
-    sides = {}
-    for side in ("CE", "PE"):
-        gates, _, notes = _side_gates(snap, side)
-        plan = _plan(snap, side)
-        risk = plan["_risk"]
-        gates["G6"] = bool(plan["stop"] is not None and plan["target"] is not None and risk and risk > 0
-                           and abs(plan["target"] - plan["entry"]) >= ROOM_RR * risk and not plan["_near_level"])
-        sides[side] = (gates, plan, notes)
+    sides = evaluate_sides(snap)
     passed = [s for s, (g, _, _) in sides.items() if all(g.values())]
     if len(passed) == 2:
         out.update(action="WAIT", failed_reason="both sides qualify", gates=sides["CE"][0])

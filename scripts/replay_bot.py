@@ -462,6 +462,9 @@ def _screen_option_levels(spot: float, entry: float, stop: float, target: float,
     return sl, _tick(max(tgt, entry * (1 + _ko.T1_MIN_PCT)))
 
 
+_GATE_LOG: list = []      # one row per side per decided candle (no open trade), for the gate report
+
+
 def run_screen(symbol: str, frames: dict, days: list, lots: int, grades: tuple,
                verbose: bool) -> pd.DataFrame:
     """The 5m rules bar by bar: decide after each close, enter at the next open."""
@@ -527,6 +530,12 @@ def run_screen(symbol: str, frames: dict, days: list, lots: int, grades: tuple,
                     exit_bar = True
                 continue
             res = _screen.decide(snap)
+            if res["action"] in ("WAIT",) or res["action"].endswith(("_CE", "_PE")):
+                for side, (g, plan, _) in _screen.evaluate_sides(snap).items():
+                    row = {"symbol": symbol, "side": side, **g, "all": all(g.values())}
+                    if row["all"]:
+                        row["score"] = _screen._score(snap, side, plan)[0]
+                    _GATE_LOG.append(row)
             if res["action"] in tradable and not exit_bar:
                 n_sig += 1
                 pending = {**res, "bar": t}
@@ -781,6 +790,19 @@ def _replay_screen(args, start, end, _days, api_key, access_token) -> None:
               .assign(win_pct=lambda x: (x.win_pct * 100).round(0)).to_string())
         print("Exits:", ", ".join(f"{k} {c}" for k, c in tr["exit_reason"].str.replace(r" \(.*", "", regex=True)
                                      .value_counts().items()))
+    if _GATE_LOG:
+        g = pd.DataFrame(_GATE_LOG)
+        gates = [f"G{i}" for i in range(1, 7)]
+        print(f"\nGate report — how often each gate passes ({len(g) // 2} candles decided, 09:30–15:00, no open trade):")
+        rep = g.groupby("side")[gates + ["all"]].mean().mul(100).round(0).astype(int).astype(str) + "%"
+        print(rep.to_string())
+        for side, gs in g.groupby("side"):
+            first5 = gs[gates[:5]].all(axis=1)
+            fails = {k: int((~gs[k] & gs[[x for x in gates if x != k]].all(axis=1)).sum()) for k in gates}
+            sc = gs.loc[gs["all"], "score"] if "score" in gs else pd.Series(dtype=float)
+            print(f"  {side}: G1–G5 all pass on {int(first5.sum())} candles, G1–G6 on {int(gs['all'].sum())}"
+                  + (f" (scores {sorted(sc.astype(int).tolist())})" if len(sc) else "")
+                  + " | blocked by ONE gate only: " + ", ".join(f"{k} {v}" for k, v in fails.items() if v))
     print(f"\nTrades → {out}/replay_screen_trades.csv")
     print("P&L uses delta 0.5 on a typical ATM premium (NIFTY ₹150, SENSEX ₹350), no theta/IV.")
 
