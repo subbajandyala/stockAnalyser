@@ -475,6 +475,11 @@ SCREEN_GRID = [
     ("A+B' room 1.0, no near check", {"room_rr": 1.0, "near_pct": 0, "open_target_r": 2}, ("STRONG", "MODERATE")),
     ("B, STRONG at 65", {"room_rr": 1.2, "near_pct": 0.05, "open_target_r": 2, "strong": 65}, ("STRONG",)),
     ("A+B, room 1.5", {"room_rr": 1.5, "near_pct": 0.05, "open_target_r": 2}, ("STRONG", "MODERATE")),
+    # neighbours of the 20-day best (B, STRONG at 65)
+    ("B, STRONG at 70", {"room_rr": 1.2, "near_pct": 0.05, "open_target_r": 2, "strong": 70}, ("STRONG",)),
+    ("B room 1.5, STRONG 65", {"room_rr": 1.5, "near_pct": 0.05, "open_target_r": 2, "strong": 65}, ("STRONG",)),
+    ("B near 0.1%, STRONG 65", {"room_rr": 1.2, "near_pct": 0.1, "open_target_r": 2, "strong": 65}, ("STRONG",)),
+    ("B no open target, STRONG 65", {"room_rr": 1.2, "near_pct": 0.05, "open_target_r": 0, "strong": 65}, ("STRONG",)),
 ]
 
 
