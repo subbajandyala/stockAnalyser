@@ -112,6 +112,7 @@ def merge_with_live(hist_df: pd.DataFrame, token: int,
     _resample_map = {
         "1m":  "1min",
         "2m":  "2min",
+        "3m":  "3min",
         "5m":  "5min",
         "10m": "10min",
         "15m": "15min",

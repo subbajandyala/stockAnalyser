@@ -11,6 +11,7 @@ Computes for any Kite symbol / timeframe:
 """
 
 import datetime
+import time
 from io import StringIO
 
 import numpy as np
@@ -18,6 +19,116 @@ import pandas as pd
 import requests
 
 _IST       = datetime.timezone(datetime.timedelta(hours=5, minutes=30))
+
+# ── GEX helpers ───────────────────────────────────────────────────────────────
+
+_GEX_SYMBOLS = {"NIFTY", "BANKNIFTY", "SENSEX"}   # only indices have liquid option chains
+
+
+def _gex_norm_pdf(x: float) -> float:
+    return float(np.exp(-0.5 * x * x) / np.sqrt(2.0 * np.pi))
+
+
+def _gex_bs_gamma(S: float, K: float, T: float, sigma: float) -> float:
+    if T <= 0 or sigma <= 0 or S <= 0 or K <= 0:
+        return 0.0
+    r = 0.065
+    try:
+        d1 = (np.log(S / K) + (r + 0.5 * sigma ** 2) * T) / (sigma * np.sqrt(T))
+        return _gex_norm_pdf(float(d1)) / (S * sigma * np.sqrt(T))
+    except Exception:
+        return 0.0
+
+
+_GEX_CACHE: dict[str, tuple[float, dict]] = {}
+_GEX_CACHE_TTL = 300  # seconds
+
+
+def _fetch_index_gex(symbol: str, spot: float,
+                     api_key: str, access_token: str) -> dict:
+    """GEX with a 5-minute cache per symbol.
+
+    Each fresh fetch downloads the whole instruments master plus option quotes;
+    doing that on every 1-minute scan (15m + 5m + monitor) exhausts the droplet's
+    memory. Only wall_pct depends on spot, so it is recomputed from the cache.
+    """
+    hit = _GEX_CACHE.get(symbol)
+    if hit and time.time() - hit[0] < _GEX_CACHE_TTL:
+        gex = dict(hit[1])
+        if gex.get("gamma_wall") and spot:
+            gex["wall_pct"] = (gex["gamma_wall"] - spot) / spot * 100
+        return gex
+    gex = _fetch_index_gex_uncached(symbol, spot, api_key, access_token)
+    _GEX_CACHE[symbol] = (time.time(), gex)
+    return gex
+
+
+def _fetch_index_gex_uncached(symbol: str, spot: float,
+                              api_key: str, access_token: str) -> dict:
+    """
+    Fetch option chain + compute GEX for index symbols (NIFTY/BANKNIFTY/SENSEX).
+    Returns {} silently on any failure so chart analysis still works.
+    """
+    if symbol not in _GEX_SYMBOLS or not (api_key and access_token):
+        return {}
+    try:
+        from screener.option_chain import fetch_option_chain, get_expiries, parse_chain
+        raw      = fetch_option_chain(symbol, api_key=api_key, access_token=access_token)
+        expiries = get_expiries(raw)
+        if not expiries:
+            return {}
+        expiry       = expiries[0]
+        df_chain, _ = parse_chain(raw, expiry)
+        if df_chain.empty:
+            return {}
+
+        # VIX as flat IV proxy
+        try:
+            from screener.kite_data import fetch_ohlcv as _ko
+            vix_df = _ko("INDIAVIX", interval="day", days=3)
+            vix    = float(vix_df["Close"].dropna().iloc[-1]) if not vix_df.empty else 14.5
+        except Exception:
+            vix = 14.5
+
+        try:
+            exp_dt = datetime.datetime.strptime(expiry, "%d-%b-%Y").date()
+            dte    = max((exp_dt - datetime.date.today()).days, 0)
+        except Exception:
+            dte = 7
+        T       = max(dte / 365.0, 1.0 / 365.0)
+        base_iv = max(vix / 100.0, 0.08)
+
+        rows = []
+        for _, row in df_chain.iterrows():
+            K         = float(row["Strike"])
+            ce_oi     = int(row.get("CE OI", 0))
+            pe_oi     = int(row.get("PE OI", 0))
+            moneyness = abs(K / spot - 1.0)
+            iv        = max(float(row.get("CE IV", 0)) / 100.0,
+                            float(row.get("PE IV", 0)) / 100.0,
+                            base_iv + moneyness * 1.5)
+            gamma     = _gex_bs_gamma(spot, K, T, iv)
+            rows.append({"strike": K,
+                         "net_gex": gamma * ce_oi * spot - gamma * pe_oi * spot})
+
+        if not rows:
+            return {}
+        df_gex     = pd.DataFrame(rows)
+        net_gex    = float(df_gex["net_gex"].sum())
+        wall_idx   = df_gex["net_gex"].abs().idxmax()
+        gamma_wall = float(df_gex.loc[wall_idx, "strike"])
+        regime     = "Positive" if net_gex >= 0 else "Negative"
+        wall_pct   = (gamma_wall - spot) / spot * 100
+
+        return {
+            "regime":     regime,
+            "net_gex":    round(net_gex, 2),
+            "gamma_wall": gamma_wall,
+            "wall_pct":   wall_pct,
+            "expiry":     expiry,
+        }
+    except Exception:
+        return {}
 _KITE_BASE = "https://api.kite.trade"
 
 # Hardcoded spot index tokens (no instruments lookup needed)
@@ -30,6 +141,7 @@ _INDEX_TOKENS: dict[str, int] = {
 INTERVAL_CFG: dict[str, dict] = {
     "1m":  {"kite": "minute",   "days": 2,   "label": "1 Min"},
     "2m":  {"kite": "2minute",  "days": 3,   "label": "2 Min"},
+    "3m":  {"kite": "3minute",  "days": 4,   "label": "3 Min"},
     "5m":  {"kite": "5minute",  "days": 5,   "label": "5 Min"},
     "10m": {"kite": "10minute", "days": 7,   "label": "10 Min"},
     "15m": {"kite": "15minute", "days": 15,  "label": "15 Min"},
@@ -205,6 +317,10 @@ def compute_indicators(df: pd.DataFrame, intraday: bool = True) -> pd.DataFrame:
     df["DI_neg"] = di_n
     vol_avg      = df["Volume"].rolling(20).mean()
     df["VolAvg"] = vol_avg
+    pc           = df["Close"].shift(1)
+    tr           = pd.concat([df["High"] - df["Low"], (df["High"] - pc).abs(),
+                              (df["Low"] - pc).abs()], axis=1).max(axis=1)
+    df["ATR"]    = tr.ewm(span=14, adjust=False).mean()
     return df
 
 
@@ -319,41 +435,28 @@ def detect_order_blocks(df: pd.DataFrame, events: list, max_obs: int = 6) -> lis
 
 
 def detect_fvg(df: pd.DataFrame, max_fvgs: int = 8) -> list:
+    # numpy arrays, not df.iloc per row — same result, ~50× faster (1-min bot scans)
+    hi = df["High"].to_numpy(dtype=float)
+    lo = df["Low"].to_numpy(dtype=float)
+    n = len(df)
     fvgs: list[dict] = []
-    for i in range(1, len(df) - 1):
-        prev  = df.iloc[i - 1]
-        after = df.iloc[i + 1]
-        idx   = df.index[i]
+    for i in range(1, n - 1):
         # Bullish FVG: gap between prev high and next low
-        if float(after["Low"]) > float(prev["High"]):
-            fvgs.append({
-                "type":   "bullish",
-                "top":    float(after["Low"]),
-                "bottom": float(prev["High"]),
-                "index":  idx,
-                "filled": False,
-            })
+        if lo[i + 1] > hi[i - 1]:
+            fvgs.append({"type": "bullish", "top": float(lo[i + 1]), "bottom": float(hi[i - 1]),
+                         "index": df.index[i], "filled": False, "_pos": i})
         # Bearish FVG: gap between prev low and next high
-        elif float(after["High"]) < float(prev["Low"]):
-            fvgs.append({
-                "type":   "bearish",
-                "top":    float(prev["Low"]),
-                "bottom": float(after["High"]),
-                "index":  idx,
-                "filled": False,
-            })
+        elif hi[i + 1] < lo[i - 1]:
+            fvgs.append({"type": "bearish", "top": float(lo[i - 1]), "bottom": float(hi[i + 1]),
+                         "index": df.index[i], "filled": False, "_pos": i})
 
     # Mark filled (price returned to zone)
     for fvg in fvgs:
-        pos = df.index.get_loc(fvg["index"])
-        for j in range(pos + 2, len(df)):
-            lo, hi = float(df["Low"].iloc[j]), float(df["High"].iloc[j])
-            if fvg["type"] == "bullish" and lo <= fvg["top"]:
-                fvg["filled"] = True
-                break
-            elif fvg["type"] == "bearish" and hi >= fvg["bottom"]:
-                fvg["filled"] = True
-                break
+        j0 = fvg.pop("_pos") + 2
+        if fvg["type"] == "bullish":
+            fvg["filled"] = bool((lo[j0:] <= fvg["top"]).any())
+        else:
+            fvg["filled"] = bool((hi[j0:] >= fvg["bottom"]).any())
 
     return [f for f in fvgs if not f["filled"]][-max_fvgs:]
 
@@ -455,7 +558,8 @@ def build_summary(df: pd.DataFrame, events: list) -> dict:
 # ── Trade Verdict ─────────────────────────────────────────────────────────────
 
 def generate_verdict(df: pd.DataFrame, events: list, obs: list,
-                     fvgs: list, summary: dict, cpr: dict | None = None) -> dict:
+                     fvgs: list, summary: dict, cpr: dict | None = None,
+                     gex: dict | None = None) -> dict:
     last   = df.iloc[-1]
     close  = float(last["Close"])
     ema20  = float(last.get("EMA20",  0) or 0)
@@ -470,6 +574,7 @@ def generate_verdict(df: pd.DataFrame, events: list, obs: list,
 
     score   = 0
     reasons = []
+    weak_adx = inside_cpr = False
 
     # Recent structure (last 3 events carry the most weight)
     recent_types = [e["type"] for e in events[-8:]] if events else []
@@ -516,15 +621,16 @@ def generate_verdict(df: pd.DataFrame, events: list, obs: list,
 
     # RSI
     if np.isnan(rsi): rsi = 50
-    if rsi > 70:
+    if 55 <= rsi <= 70:
+        score += 1
+        reasons.append({"text": f"RSI {rsi:.0f} — bullish momentum", "ok": True})
+    elif 30 <= rsi <= 45:
         score -= 1
-        reasons.append({"text": f"RSI {rsi:.0f} — overbought, potential fall", "ok": False})
+        reasons.append({"text": f"RSI {rsi:.0f} — bearish momentum", "ok": False})
+    elif rsi > 70:
+        reasons.append({"text": f"RSI {rsi:.0f} — overbought, stretched", "ok": None})
     elif rsi < 30:
-        score += 1
-        reasons.append({"text": f"RSI {rsi:.0f} — oversold, watch for bounce", "ok": None})
-    elif 35 <= rsi <= 60:
-        score += 1
-        reasons.append({"text": f"RSI {rsi:.0f} — healthy zone, room to move", "ok": True})
+        reasons.append({"text": f"RSI {rsi:.0f} — oversold, stretched", "ok": None})
     else:
         reasons.append({"text": f"RSI {rsi:.0f} — neutral", "ok": None})
 
@@ -537,10 +643,22 @@ def generate_verdict(df: pd.DataFrame, events: list, obs: list,
         else:
             score -= 1
             reasons.append({"text": f"ADX {adx:.0f} — strong downtrend (DI− dominant)", "ok": False})
+    elif adx < 15:
+        weak_adx = True
+        reasons.append({"text": f"ADX {adx:.0f} — very weak/no trend, conviction reduced", "ok": None})
     elif adx < 20:
-        reasons.append({"text": f"ADX {adx:.0f} — choppy / no trend", "ok": None})
+        reasons.append({"text": f"ADX {adx:.0f} — below 20, mild chop (no penalty)", "ok": None})
     else:
         reasons.append({"text": f"ADX {adx:.0f} — trend forming", "ok": None})
+
+    # RSI directional alignment — only penalise when momentum is clearly misaligned
+    trend_bias = summary.get("bias", "NEUTRAL")
+    if trend_bias == "BUY" and rsi < 40:
+        score -= 1
+        reasons.append({"text": f"RSI {rsi:.0f} < 40 on bullish signal — momentum clearly not confirming", "ok": False})
+    elif trend_bias == "SELL" and rsi > 60:
+        score += 1   # weakens the negative score → reduces sell signal strength
+        reasons.append({"text": f"RSI {rsi:.0f} > 60 on bearish signal — momentum clearly not confirming", "ok": None})
 
     # Order Block proximity
     b_obs = [o for o in obs if o["type"] == "bullish"]
@@ -566,7 +684,42 @@ def generate_verdict(df: pd.DataFrame, events: list, obs: list,
             score -= 1
             reasons.append({"text": f"Below CPR ({_bc:,.0f}–{_tc:,.0f}) — bearish day bias", "ok": False})
         else:
-            reasons.append({"text": f"Inside CPR ({_bc:,.0f}–{_tc:,.0f}) — choppy/indecision", "ok": None})
+            inside_cpr = True
+            reasons.append({"text": f"Inside CPR ({_bc:,.0f}–{_tc:,.0f}) — choppy/indecision zone", "ok": None})
+
+    # GEX regime + gamma wall
+    if gex and gex.get("regime"):
+        regime     = gex["regime"]
+        gamma_wall = gex.get("gamma_wall", 0)
+        wall_pct   = gex.get("wall_pct", 0)
+        if regime == "Negative":
+            # Amplifying environment: dealers chase moves → boost leading direction
+            if score > 0:
+                score += 1
+                reasons.append({"text": "Negative GEX — trending environment amplifies the upside", "ok": True})
+            elif score < 0:
+                score -= 1
+                reasons.append({"text": "Negative GEX — trending environment amplifies the downside", "ok": False})
+            else:
+                reasons.append({"text": "Negative GEX — volatile/trending, wait for direction", "ok": None})
+        else:
+            reasons.append({"text": "Positive GEX — dealers pin price, expect mean-reversion/range", "ok": None})
+
+        if gamma_wall > 0:
+            if wall_pct > 0.5:
+                score -= 1
+                reasons.append({"text": f"Gamma Wall {int(gamma_wall):,} above price — dealer resistance", "ok": False})
+            elif wall_pct < -0.5:
+                score += 1
+                reasons.append({"text": f"Gamma Wall {int(gamma_wall):,} below price — dealer support", "ok": True})
+            else:
+                reasons.append({"text": f"Gamma Wall {int(gamma_wall):,} — ATM pin zone", "ok": None})
+
+    # Weak trend / CPR chop reduce conviction in either direction; keep within ±7
+    for _shrink in (weak_adx, inside_cpr):
+        if _shrink and score != 0:
+            score -= int(np.sign(score))
+    score = int(np.clip(score, -7, 7))
 
     # Verdict
     if score >= 5:
@@ -582,9 +735,12 @@ def generate_verdict(df: pd.DataFrame, events: list, obs: list,
 
     confidence = min(100, max(0, int((abs(score) / 7) * 100)))
 
-    # Entry / SL / Targets
+    # Entry / SL / Targets. The stop sits half an ATR beyond the order block / swing,
+    # out of the cluster of stops placed right at the obvious level.
     sl_vals = df["Low"][df["swing_low"]].values
     sh_vals = df["High"][df["swing_high"]].values
+    _atr    = float(last.get("ATR", 0) or 0)
+    sl_buf  = 0.5 * _atr if _atr == _atr else 0.0
     entry_zone = stop_loss = rr = None
     targets: list[float] = []
 
@@ -592,39 +748,53 @@ def generate_verdict(df: pd.DataFrame, events: list, obs: list,
         if b_obs:
             ob = b_obs[-1]
             entry_zone = (round(ob["bottom"], 1), round(ob["top"], 1))
-            stop_loss  = round(ob["bottom"] * 0.998, 1)
+            stop_loss  = round(ob["bottom"] - sl_buf, 1)
         elif len(sl_vals):
-            stop_loss  = round(float(sl_vals[-1]), 1)
+            stop_loss  = round(float(sl_vals[-1]) - sl_buf, 1)
             entry_zone = (round(close * 0.9995, 1), round(close * 1.0005, 1))
         else:
             stop_loss  = round(close * 0.995, 1)
             entry_zone = (round(close, 1), round(close, 1))
-        t1 = round(float(sh_vals[-1]), 1) if len(sh_vals) else round(close * 1.005, 1)
-        t2 = round(float(max(sh_vals[-2:]) if len(sh_vals) >= 2 else t1 * 1.005), 1)
-        targets = [t1, t2]
-        if stop_loss and entry_zone:
+        t1_raw = round(float(sh_vals[-1]), 1) if len(sh_vals) else None
+        if t1_raw is not None and t1_raw > close:
+            t1 = t1_raw
+            t2 = round(float(max(sh_vals[-2:]) if len(sh_vals) >= 2 else t1 * 1.005), 1)
+            targets = [t1, t2]
+        else:
+            # Market is at new highs — no valid swing target above price.
+            # Return empty targets so kite_order falls back to the 20% SL / 25% target.
+            targets = []
+            t1 = None
+        if stop_loss and entry_zone and t1:
             risk   = entry_zone[1] - stop_loss
             reward = t1 - entry_zone[1]
-            rr = round(reward / risk, 1) if risk > 0 else None
+            rr = round(reward / risk, 1) if (risk > 0 and reward > 0) else None
 
     elif verdict in ("SELL", "STRONG SELL"):
         if s_obs:
             ob = s_obs[-1]
             entry_zone = (round(ob["bottom"], 1), round(ob["top"], 1))
-            stop_loss  = round(ob["top"] * 1.002, 1)
+            stop_loss  = round(ob["top"] + sl_buf, 1)
         elif len(sh_vals):
-            stop_loss  = round(float(sh_vals[-1]), 1)
+            stop_loss  = round(float(sh_vals[-1]) + sl_buf, 1)
             entry_zone = (round(close * 0.9995, 1), round(close * 1.0005, 1))
         else:
             stop_loss  = round(close * 1.005, 1)
             entry_zone = (round(close, 1), round(close, 1))
-        t1 = round(float(sl_vals[-1]), 1) if len(sl_vals) else round(close * 0.995, 1)
-        t2 = round(float(min(sl_vals[-2:]) if len(sl_vals) >= 2 else t1 * 0.995), 1)
-        targets = [t1, t2]
-        if stop_loss and entry_zone:
+        t1_raw = round(float(sl_vals[-1]), 1) if len(sl_vals) else None
+        if t1_raw is not None and t1_raw < close:
+            t1 = t1_raw
+            t2 = round(float(min(sl_vals[-2:]) if len(sl_vals) >= 2 else t1 * 0.995), 1)
+            targets = [t1, t2]
+        else:
+            # Market is at new lows — no valid swing target below price.
+            # Return empty targets so kite_order falls back to the 20% SL / 25% target.
+            targets = []
+            t1 = None
+        if stop_loss and entry_zone and t1:
             risk   = stop_loss - entry_zone[0]
             reward = entry_zone[0] - t1
-            rr = round(reward / risk, 1) if risk > 0 else None
+            rr = round(reward / risk, 1) if (risk > 0 and reward > 0) else None
 
     return {
         "verdict": verdict, "color": v_col, "score": score,
@@ -714,7 +884,9 @@ def compute_cpr(df: pd.DataFrame, interval_key: str) -> dict:
 # ── Main entry point ──────────────────────────────────────────────────────────
 
 def analyze_chart(symbol: str, interval: str,
-                  api_key: str, access_token: str) -> dict:
+                  api_key: str, access_token: str,
+                  closed_only: bool = False) -> dict:
+    """closed_only=True scores only completed candles (bots); charts keep the live bar."""
     try:
         token, display_name = resolve_token(symbol, api_key, access_token)
     except ValueError as e:
@@ -727,6 +899,11 @@ def analyze_chart(symbol: str, interval: str,
     except RuntimeError as e:
         return {"error": str(e)}
 
+    if intraday:
+        df = _with_futures_volume(df, display_name, interval, api_key, access_token)
+    if closed_only:
+        df = drop_open_candle(df, interval)
+
     if df.empty or len(df) < 30:
         return {"error": "Not enough data — try a longer timeframe or check the symbol"}
 
@@ -738,11 +915,101 @@ def analyze_chart(symbol: str, interval: str,
     df       = generate_signals(df, obs, evts)
     summary  = build_summary(df, evts)
     cpr      = compute_cpr(df, interval)
-    verdict  = generate_verdict(df, evts, obs, fvgs, summary, cpr=cpr)
+
+    spot = float(df["Close"].iloc[-1])
+    gex  = _fetch_index_gex(display_name, spot, api_key, access_token)
+
+    verdict  = generate_verdict(df, evts, obs, fvgs, summary, cpr=cpr, gex=gex)
 
     return {
         "df": df, "events": evts, "obs": obs, "fvgs": fvgs,
         "summary": summary, "verdict": verdict, "cpr": cpr,
-        "symbol": display_name, "interval": interval,
+        "gex": gex, "symbol": display_name, "interval": interval,
         "error": None,
     }
+
+
+# ── Helpers for offline tools (backtest_chart.py, noise_area.py) ──────────────
+# Not used by chart_bot; analyze_chart above is unchanged.
+
+_INTERVAL_MINUTES = {"1m": 1, "2m": 2, "3m": 3, "5m": 5, "10m": 10, "15m": 15, "1H": 60}
+_FUT_SOURCE = {"NIFTY": ("NFO", "NIFTY"), "BANKNIFTY": ("NFO", "BANKNIFTY"), "SENSEX": ("BFO", "SENSEX")}
+_FUT_TOKEN_CACHE: dict = {}
+
+
+def drop_open_candle(df: pd.DataFrame, interval_key: str,
+                     now: datetime.datetime | None = None) -> pd.DataFrame:
+    """Drop the last candle if it hasn't closed yet (Kite timestamps are candle starts)."""
+    mins = _INTERVAL_MINUTES.get(interval_key)
+    if not mins or df.empty:
+        return df
+    now = now or datetime.datetime.now(_IST)
+    if df.index[-1] + pd.Timedelta(minutes=mins) > now:
+        return df.iloc[:-1]
+    return df
+
+
+def front_future(symbol: str, api_key: str, access_token: str) -> tuple[int | None, str | None]:
+    """(instrument_token, "EXCHANGE:TRADINGSYMBOL") of the nearest-expiry future, cached per day."""
+    src = _FUT_SOURCE.get(symbol.upper())
+    if not src:
+        return None, None
+    key = (symbol.upper(), datetime.date.today().isoformat())
+    if key in _FUT_TOKEN_CACHE:
+        return _FUT_TOKEN_CACHE[key]
+    exchange, name = src
+    hit = (None, None)
+    try:
+        r = requests.get(f"{_KITE_BASE}/instruments/{exchange}",
+                         headers=_hdrs(api_key, access_token), timeout=30)
+        if r.ok:
+            df = pd.read_csv(StringIO(r.text))
+            m = df[(df["name"] == name) & (df["instrument_type"] == "FUT")].copy()
+            m["expiry"] = pd.to_datetime(m["expiry"]).dt.date
+            m = m[m["expiry"] >= datetime.date.today()].sort_values("expiry")
+            if not m.empty:
+                hit = (int(m.iloc[0]["instrument_token"]), f"{exchange}:{m.iloc[0]['tradingsymbol']}")
+    except Exception:
+        hit = (None, None)
+    _FUT_TOKEN_CACHE[key] = hit
+    return hit
+
+
+def front_future_token(symbol: str, api_key: str, access_token: str) -> int | None:
+    return front_future(symbol, api_key, access_token)[0]
+
+
+def analyze_df(df: pd.DataFrame, interval: str, gex: dict | None = None) -> dict:
+    """Same pipeline as analyze_chart, on an already-fetched DataFrame."""
+    df       = compute_indicators(df, intraday=interval != "1D")
+    df       = detect_swings(df, n=3)
+    df, evts = detect_structure(df)
+    obs      = detect_order_blocks(df, evts)
+    fvgs     = detect_fvg(df)
+    df       = generate_signals(df, obs, evts)
+    summary  = build_summary(df, evts)
+    cpr      = compute_cpr(df, interval)
+    verdict  = generate_verdict(df, evts, obs, fvgs, summary, cpr=cpr, gex=gex)
+    return {"df": df, "events": evts, "obs": obs, "fvgs": fvgs,
+            "summary": summary, "verdict": verdict, "cpr": cpr, "gex": gex}
+
+
+def _with_futures_volume(df: pd.DataFrame, symbol: str, interval: str,
+                         api_key: str, access_token: str) -> pd.DataFrame:
+    """Index candles carry no volume, so VWAP was a plain average of prices.
+    Use the front-month future's volume as the weights (same timestamps)."""
+    if df.empty or df["Volume"].sum() > 0:
+        return df
+    fut_tok = front_future_token(symbol, api_key, access_token)
+    if not fut_tok:
+        return df
+    try:
+        fut = fetch_candles(fut_tok, interval, api_key, access_token)
+    except Exception:
+        return df
+    vol = fut["Volume"].reindex(df.index).fillna(0)
+    if vol.sum() <= 0:
+        return df
+    df = df.copy()
+    df["Volume"] = vol.values
+    return df

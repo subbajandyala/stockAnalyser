@@ -49,7 +49,24 @@ KITE_PASSWORD=...
 KITE_TOTP_SECRET=...        # base32 TOTP secret from Kite Account Security page
 KITE_AUTO_TRADE=1           # set to 1 to enable live order execution
 NTFY_TOPIC=...              # ntfy.sh topic for push notifications
+
+# Optional second Kite account — trades the same candles at the same moment
+KITE2_NAME=...              # label on its log lines and pushes
+KITE2_USER_ID=...
+KITE2_PASSWORD=...
+KITE2_TOTP_SECRET=...
+KITE2_API_KEY=...           # its own Kite Connect app
+KITE2_API_SECRET=...
+KITE2_ACCESS_TOKEN=...      # written by auto_token.py at 08:00
+KITE2_AUTO_TRADE=1
+KITE2_NTFY_TOPIC=...        # optional; defaults to NTFY_TOPIC
+KITE2_PROXY=http://<ip>:8888  # Zerodha links each static IP to ONE account: account 2's
+                              # calls go out through a tinyproxy relay on its whitelisted IP
 ```
+
+Alternative to KITE2_*: a separate trading droplet with its own `.env` (that account's
+details as `KITE_*`, `KITE_NAME=<name>` to tag its pushes, `TRADE_ONLY=1` so
+`start_droplet.sh` runs only `ticker_daemon.py` + `chart_bot.py` — no duplicate alerts).
 
 `~/.kite_creds.json` on the droplet holds `api_key`, `access_token`, and optionally `ntfy_agent_topic` / `telegram_bot_token` / `telegram_chat_id`.
 
@@ -81,6 +98,9 @@ Cron entry:
 | `gamma_blast_bot.py` | cron | ntfy |
 | `red_flag_bot.py` | cron | ntfy |
 | `eod_report.py` | cron, 15:35 | ntfy |
+| `chart_bot.py --loop --interval 30` | start_droplet.sh, every 30 s | ntfy; only Kite order executor (candles engine: book at +20%, big strong candles ride with a trailing stop, exit if not working in 6 min) |
+| `chart_bot.py --preflight` | before 9:15 (no orders) | ntfy READY / NOT READY |
+| `replay_bot.py` | manual, before deploying a rule change | console + data/replay_*.csv |
 
 All bots support `--once` flag (single scan, exit) and `--state-file` for dedup.
 
@@ -119,6 +139,7 @@ fetch_ohlcv_yf_compat(symbol, period="1y", interval="1d")  # drop-in for yf.down
 - Only fires when `KITE_AUTO_TRADE=1`
 - Supported symbols: `NIFTY` (NFO, lot=65), `SENSEX` (BFO, lot=20)
 - Falls back to 1 lot if margin fetch fails (order always attempts to fire)
+- Lot cap per order: NIFTY 2, SENSEX 3 (`MAX_LOTS`; `.env` `CHART_MAX_LOTS_NIFTY` / `CHART_MAX_LOTS_SENSEX`, 0 = balance only)
 - GTT: SL = entry − scalp_stop_pts, Target = entry + scalp_target_pts
 
 ---
@@ -138,6 +159,8 @@ fetch_ohlcv_yf_compat(symbol, period="1y", interval="1d")  # drop-in for yf.down
 | `technical.py` | Breakout readiness |
 | `agent_flow.py` | Multi-timeframe OI + momentum → CALL/PUT/NO TRADE |
 | `sensex_option_moves.py` | SENSEX intraday option move signals |
+| `candles.py` | chart_bot default engine: reads the forming 3m candle (strong / engulfing / hammer / shooting star, range ≥ 1.2× avg) → CE / PE; `CHART_CANDLE_SOURCE=future` reads the current-month NIFTY / SENSEX futures chart instead of the index (order prices converted to spot with the basis) |
+| `setups.py` | chart_bot alternative engine: regime + setups on 3m (trend pullback, ORB, VWAP reclaim/reject, range fade) |
 | `open_low.py` | NIFTY100 Open=Low intraday momentum setups |
 | `elder_ray.py` | Elder Ray Bull/Bear Power multi-timeframe |
 | `smart_alerts.py` | Smart money alerts |
@@ -223,3 +246,16 @@ Kite REST API
 ## Development branch
 
 Active development: `claude/sensex-option-moves-analysis-ma3tr7`
+
+### Reference branch: `chart-success`
+
+`chart-success` is a frozen copy of the working trading setup (commit `662b8e9`,
+23 Oct 2026): candles engine on 3m, book at +20%, ride mode, 6-min exit, SL buffer
+NIFTY 15 / SENSEX 30, lot cap NIFTY 2 / SENSEX 3, fill chasing, second account
+support, TRADE_ONLY droplet mode.
+
+- Never commit to `chart-success` unless the user explicitly asks.
+- Before changing trading logic on the active branch, compare against it
+  (`git diff chart-success -- <file>`) and say what differs from it.
+- To roll a droplet back: `git fetch origin chart-success && git checkout chart-success`
+  then `bash start_droplet.sh`.

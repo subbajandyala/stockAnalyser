@@ -11,18 +11,19 @@ Dedup rules (per instrument, per day):
   • State resets at start of each trading day
 
 Start (via start_droplet.sh or manually):
-  nohup /root/venv/bin/python scripts/rsi_scalp_bot.py >> rsi_scalp.log 2>&1 &
+  nohup /root/venv/bin/python -u scripts/rsi_scalp_bot.py >> rsi_scalp.log 2>&1 &
 
 Single scan (test):
-  /root/venv/bin/python scripts/rsi_scalp_bot.py --once
+  /root/venv/bin/python -u scripts/rsi_scalp_bot.py --once
 
 Test notification:
-  /root/venv/bin/python scripts/rsi_scalp_bot.py --test-notify
+  /root/venv/bin/python -u scripts/rsi_scalp_bot.py --test-notify
 """
 
 import argparse
 import datetime
 import json
+import logging
 import os
 import pathlib
 import subprocess
@@ -35,6 +36,12 @@ import requests
 from screener.rsi_scalp import analyze_rsi_scalp
 from screener.kite_order import place_rsi_scalp_order, exit_orphan_mis_positions
 
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    datefmt="%H:%M:%S",
+)
+
 _IST          = datetime.timezone(datetime.timedelta(hours=5, minutes=30))
 MARKET_OPEN   = datetime.time(9, 20)
 MARKET_CLOSE  = datetime.time(15, 15)
@@ -43,14 +50,28 @@ SCAN_INTERVAL = 300   # 5 minutes
 RSI_THRESHOLD = 70
 INDEXES       = ["NIFTY", "SENSEX"]
 _DEFAULT_NTFY_TOPIC = "nty-revanth-subba-rsi"
+_STATE_FILE   = "/root/stockAnalyser/rsi_scalp_state.json"
 
 
 # ── Credentials ───────────────────────────────────────────────────────────────
 
 def _kite_creds() -> tuple[str, str]:
-    """Return (api_key, access_token) from env or ~/.kite_creds.json."""
+    """Return (api_key, access_token). Priority: env vars → .env → ~/.kite_creds.json."""
     api_key      = os.environ.get("KITE_API_KEY", "")
     access_token = os.environ.get("KITE_ACCESS_TOKEN", "")
+    # .env first — auto_token.py always writes the fresh token here
+    if not api_key or not access_token:
+        env_path = pathlib.Path(__file__).parent.parent / ".env"
+        if env_path.exists():
+            for line in env_path.read_text().splitlines():
+                if "=" in line and not line.startswith("#"):
+                    k, _, v = line.partition("=")
+                    k = k.strip(); v = v.strip().strip('"').strip("'")
+                    if k == "KITE_API_KEY":
+                        api_key = api_key or v
+                    elif k == "KITE_ACCESS_TOKEN":
+                        access_token = access_token or v
+    # ~/.kite_creds.json as fallback
     if not api_key or not access_token:
         creds_file = pathlib.Path.home() / ".kite_creds.json"
         if creds_file.exists():
@@ -60,15 +81,6 @@ def _kite_creds() -> tuple[str, str]:
                 access_token = access_token or data.get("access_token", "")
             except Exception:
                 pass
-    if not api_key or not access_token:
-        for line in (pathlib.Path(__file__).parent.parent / ".env").read_text().splitlines() if (pathlib.Path(__file__).parent.parent / ".env").exists() else []:
-            if "=" in line:
-                k, _, v = line.partition("=")
-                k = k.strip(); v = v.strip().strip('"').strip("'")
-                if k == "KITE_API_KEY":
-                    api_key = v
-                elif k == "KITE_ACCESS_TOKEN":
-                    access_token = v
     return api_key, access_token
 
 
@@ -82,11 +94,20 @@ def _ntfy_topic() -> str:
             if src.exists():
                 try:
                     if src.suffix == ".json":
-                        t = json.loads(src.read_text()).get("rsi_scalp_ntfy_topic", "")
+                        c = json.loads(src.read_text())
+                        t = c.get("rsi_scalp_ntfy_topic", "") or c.get("ntfy_agent_topic", "")
                     else:
                         for line in src.read_text().splitlines():
-                            if "RSI_SCALP_NTFY_TOPIC" in line and "=" in line:
-                                t = line.split("=", 1)[1].strip().strip('"').strip("'")
+                            line = line.strip()
+                            if not line or line.startswith("#") or "=" not in line:
+                                continue
+                            k, v = line.split("=", 1)
+                            k = k.strip(); v = v.strip().strip('"').strip("'")
+                            if k == "RSI_SCALP_NTFY_TOPIC":
+                                t = v
+                                break
+                            if k == "NTFY_TOPIC" and not t:
+                                t = v  # use shared topic as fallback
                 except Exception:
                     pass
             if t:
@@ -151,26 +172,66 @@ def _fmt_alert(index: str, opt: str, result: dict) -> tuple[str, str]:
     return title, body
 
 
+# ── State persistence ─────────────────────────────────────────────────────────
+
+def _load_state(path: str) -> dict:
+    try:
+        return json.loads(pathlib.Path(path).read_text())
+    except Exception:
+        return {}
+
+
+def _save_state(path: str, state: dict) -> None:
+    pathlib.Path(path).write_text(json.dumps(state, indent=2))
+
+
+# ── Signal log (for EOD report) ───────────────────────────────────────────────
+
+def _append_signal_log(date_str: str, entry: dict) -> None:
+    path = pathlib.Path(f"/tmp/rsi_scalp_log_{date_str}.json")
+    try:
+        log = json.loads(path.read_text()) if path.exists() else {"date": date_str, "signals": []}
+    except Exception:
+        log = {"date": date_str, "signals": []}
+    log["signals"].append(entry)
+    try:
+        path.write_text(json.dumps(log, indent=2))
+    except Exception as e:
+        print(f"  [log] rsi_scalp log write failed: {e}")
+
+
+def _bot_tradingsymbols(state: dict) -> set:
+    """Return the set of tradingsymbols the bot placed today (for orphan-exit scoping)."""
+    today = datetime.datetime.now(_IST).date().isoformat()
+    return {
+        v["tradingsymbol"]
+        for v in state.values()
+        if isinstance(v, dict) and v.get("tradingsymbol") and v.get("date") == today
+    }
+
+
 # ── Dedup logic ───────────────────────────────────────────────────────────────
 # State key: "NIFTY_22500_CE"
-# State value: {"above_70": bool, "date": "YYYY-MM-DD"}
+# State value: {"above_70": bool, "date": "YYYY-MM-DD", "tradingsymbol": ..., "order_id": ...}
 
 def _instrument_key(index: str, strike: int, opt: str) -> str:
     return f"{index}_{strike}_{opt}"
 
 
 def _should_alert(key: str, current_rsi: float, state: dict) -> bool:
-    today    = datetime.datetime.now(_IST).date().isoformat()
-    prev     = state.get(key, {})
+    today     = datetime.datetime.now(_IST).date().isoformat()
+    prev      = state.get(key, {})
     now_above = current_rsi >= RSI_THRESHOLD
 
-    # Reset on new day
+    # New day — reset state and fire if RSI already above 70 at market open
+    # Same-day restarts are safe because disk-persisted state has date==today
+    # so they fall through to the else branch below (no re-fire on restart)
     if prev.get("date") != today:
         state[key] = {"above_70": now_above, "date": today}
-        return now_above  # fire if already above 70 on first scan of day
+        return now_above
 
     was_above = prev.get("above_70", False)
-    state[key] = {"above_70": now_above, "date": today}
+    state[key] = {**prev, "above_70": now_above}
 
     # Fire only on the transition from below → above
     return not was_above and now_above
@@ -178,10 +239,30 @@ def _should_alert(key: str, current_rsi: float, state: dict) -> bool:
 
 # ── Single scan pass ──────────────────────────────────────────────────────────
 
+def _is_auto_trade() -> bool:
+    """Check KITE_AUTO_TRADE in env vars, then .env file."""
+    if os.environ.get("KITE_AUTO_TRADE") == "1":
+        return True
+    env_path = pathlib.Path(__file__).parent.parent / ".env"
+    if env_path.exists():
+        for line in env_path.read_text().splitlines():
+            line = line.strip()
+            if "=" in line and not line.startswith("#"):
+                k, v = line.split("=", 1)
+                if k.strip() == "KITE_AUTO_TRADE" and v.strip().strip('"').strip("'") == "1":
+                    return True
+    return False
+
+
 def _scan(ntfy_topic: str, state: dict) -> None:
     now_ist      = datetime.datetime.now(_IST)
     alerts_fired = 0
-    auto_trade   = os.environ.get("KITE_AUTO_TRADE", "0") == "1"
+    auto_trade   = _is_auto_trade()
+    if auto_trade:
+        print("  [AUTO-TRADE ON]", flush=True)
+
+    # At most one order per index per scan — prevents CE + PE firing simultaneously
+    _ordered_this_scan: set = set()
 
     for index in INDEXES:
         result = analyze_rsi_scalp(index)
@@ -214,13 +295,34 @@ def _scan(ntfy_topic: str, state: dict) -> None:
                 print(f"  ntfy.sh [{ntfy_topic}]: {'OK' if ok else 'FAILED'}")
                 alerts_fired += 1
 
+                log_entry = {
+                    "time":       now_ist.strftime("%H:%M IST"),
+                    "index":      index,
+                    "opt":        opt,
+                    "strike":     strike,
+                    "spot":       spot,
+                    "rsi":        round(rsi, 1),
+                    "prev_rsi":   round(result.get(f"{opt.lower()}_prev_rsi", 0), 1),
+                    "ltp":        round(result.get(f"{opt.lower()}_price", 0), 2),
+                    "expiry":     result.get("expiry", ""),
+                    "auto_trade": "off",
+                    "tradingsymbol": "",
+                    "order_id":   "",
+                }
+
                 if auto_trade:
+                    if index in _ordered_this_scan:
+                        print(f"  Already placed {index} order this scan — skipping {opt}")
+                        log_entry["auto_trade"] = f"skipped: already placed {index} this scan"
+                        _append_signal_log(now_ist.date().isoformat(), log_entry)
+                        continue
                     api_key, access_token = _kite_creds()
                     if api_key and access_token:
                         print(f"  KITE_AUTO_TRADE=1 — placing RSI scalp order: {index} {opt}")
                         order_res = place_rsi_scalp_order(index, opt, spot, api_key, access_token, ntfy_topic)
                         if order_res.get("error"):
                             print(f"  Order FAILED: {order_res['error']}")
+                            log_entry["auto_trade"] = f"failed: {order_res['error']}"
                         else:
                             print(
                                 f"  Order OK: {order_res['tradingsymbol']} "
@@ -228,8 +330,20 @@ def _scan(ntfy_topic: str, state: dict) -> None:
                                 f"limit={order_res['limit_price']} "
                                 f"exit_in=60s | id={order_res['order_id']}"
                             )
+                            log_entry.update({
+                                "auto_trade":    "placed",
+                                "tradingsymbol": order_res["tradingsymbol"],
+                                "order_id":      order_res["order_id"],
+                            })
+                            # Record bot's exact contract — used to scope orphan exit
+                            state[inst_key]["tradingsymbol"] = order_res["tradingsymbol"]
+                            state[inst_key]["order_id"]      = order_res["order_id"]
+                            _ordered_this_scan.add(index)
                     else:
                         print("  KITE_AUTO_TRADE=1 but no Kite creds found — skipping order")
+                        log_entry["auto_trade"] = "skipped: no kite creds"
+
+                _append_signal_log(now_ist.date().isoformat(), log_entry)
 
     print(f"  [{now_ist.strftime('%H:%M:%S')}] Scan done — {alerts_fired} alert(s) fired")
 
@@ -240,19 +354,21 @@ def run_worker() -> None:
     ntfy_topic = _ntfy_topic()
     print(f"RSI Scalp worker started — {INDEXES} — topic: {ntfy_topic}")
 
-    # Exit any MIS positions left open from a previous crashed run
+    # Load persisted state so restart never re-fires already-seen crossovers
+    state: dict = _load_state(_STATE_FILE)
+
+    # Exit only MIS positions the bot placed — never touch manual positions
     if os.environ.get("KITE_AUTO_TRADE", "0") == "1":
         api_key, access_token = _kite_creds()
         if api_key and access_token:
-            print("  Checking for orphaned MIS positions from previous run...")
-            orphans = exit_orphan_mis_positions(api_key, access_token)
+            known = _bot_tradingsymbols(state)
+            print(f"  Checking for orphaned MIS positions (bot-placed only: {known or 'none'})...")
+            orphans = exit_orphan_mis_positions(api_key, access_token, known_ts=known)
             if orphans:
                 for o in orphans:
                     print(f"  Orphan exit: SELL {o['qty']}×{o['tradingsymbol']} | {o['order_id']}")
             else:
                 print("  No orphaned MIS positions found.")
-
-    state: dict = {}
 
     while True:
         now_ist = datetime.datetime.now(_IST)
@@ -276,6 +392,7 @@ def run_worker() -> None:
         except Exception as e:
             print(f"  Scan error: {e}")
 
+        _save_state(_STATE_FILE, state)  # persist after every scan
         time.sleep(SCAN_INTERVAL)
 
 

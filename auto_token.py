@@ -13,6 +13,11 @@ Reads from .env:
     KITE_API_SECRET     Kite Connect app secret
 
 Writes KITE_ACCESS_TOKEN back to .env, then restarts the ticker daemon.
+
+Second account (optional): the same five settings prefixed KITE2_ (KITE2_USER_ID,
+KITE2_PASSWORD, KITE2_TOTP_SECRET, KITE2_API_KEY, KITE2_API_SECRET) → writes
+KITE2_ACCESS_TOKEN. Each account is refreshed on its own; one failing never
+stops the other.
 """
 
 import datetime
@@ -48,13 +53,27 @@ def _load_env() -> dict:
     return env
 
 
-def _save_token(token: str):
+def _save_token(token: str, prefix: str = "KITE_"):
+    name = f"{prefix}ACCESS_TOKEN"
     text = _ENV_FILE.read_text(encoding="utf-8")
-    if "KITE_ACCESS_TOKEN" in text:
-        text = re.sub(r"KITE_ACCESS_TOKEN=.*", f"KITE_ACCESS_TOKEN={token}", text)
+    if re.search(rf"^{name}=", text, re.MULTILINE):
+        text = re.sub(rf"^{name}=.*$", f"{name}={token}", text, flags=re.MULTILINE)
     else:
-        text = text.rstrip("\n") + f"\nKITE_ACCESS_TOKEN={token}\n"
+        text = text.rstrip("\n") + f"\n{name}={token}\n"
     _ENV_FILE.write_text(text, encoding="utf-8")
+    if prefix != "KITE_":
+        return
+
+    # Also update ~/.kite_creds.json so bots that read it get the fresh token
+    import json
+    creds_file = Path.home() / ".kite_creds.json"
+    if creds_file.exists():
+        try:
+            data = json.loads(creds_file.read_text())
+            data["access_token"] = token
+            creds_file.write_text(json.dumps(data, indent=2))
+        except Exception as e:
+            _log(f"Warning: could not update ~/.kite_creds.json: {e}")
 
 
 def _get_access_token(user_id: str, password: str, totp_secret: str,
@@ -72,14 +91,24 @@ def _get_access_token(user_id: str, password: str, totp_secret: str,
     _log("Password login OK")
 
     # 2. TOTP
-    totp_code = pyotp.TOTP(totp_secret).now()
+    secret = re.sub(r"[\s-]", "", totp_secret).upper()   # setup key is often copied with spaces
+    if len(secret) < 16 or not re.fullmatch(r"[A-Z2-7]+=*", secret):
+        raise RuntimeError(f"TOTP_SECRET doesn't look like a Kite TOTP setup key "
+                           f"({len(secret)} chars) — paste the 32-letter key, not a 6-digit code")
+    totp_code = pyotp.TOTP(secret).now()
     r = sess.post("https://kite.zerodha.com/api/twofa", data={
         "user_id":      user_id,
         "request_id":   request_id,
         "twofa_value":  totp_code,
         "twofa_type":   "totp",
     })
-    r.raise_for_status()
+    if not r.ok:
+        try:
+            msg = r.json().get("message", r.text)
+        except ValueError:
+            msg = r.text
+        raise RuntimeError(f"2FA rejected by Kite ({r.status_code}): {msg} — check TOTP_SECRET is the "
+                           f"current setup key and the server clock is right")
     body = r.json()
     if body.get("status") != "success":
         raise RuntimeError(f"2FA failed: {body}")
@@ -98,7 +127,11 @@ def _get_access_token(user_id: str, password: str, totp_secret: str,
             request_token = m.group(1)
             break
     if not request_token:
-        raise RuntimeError(f"request_token not found. Final URL: {r.url}")
+        hint = ""
+        if "/connect/authorize" in r.url:
+            hint = (" — this app has never been authorized: open https://kite.zerodha.com/connect/login"
+                    f"?v=3&api_key={api_key} in a browser, log in as this account, tap Authorize, then rerun")
+        raise RuntimeError(f"request_token not found. Final URL: {r.url}{hint}")
     _log(f"request_token: {request_token[:8]}…")
 
     # 4. Generate access token
@@ -107,34 +140,40 @@ def _get_access_token(user_id: str, password: str, totp_secret: str,
     return data["access_token"]
 
 
-def main():
-    env = _load_env()
-    required = ["KITE_USER_ID", "KITE_PASSWORD", "KITE_TOTP_SECRET",
-                "KITE_API_KEY", "KITE_API_SECRET"]
-    missing = [k for k in required if not env.get(k)]
+def _refresh(env: dict, prefix: str) -> bool:
+    """Log in one account (KITE_ or KITE2_) and save its new token. True on success."""
+    keys = ["USER_ID", "PASSWORD", "TOTP_SECRET", "API_KEY", "API_SECRET"]
+    missing = [prefix + k for k in keys if not env.get(prefix + k)]
     if missing:
         _log(f"ERROR: Missing in .env: {missing}")
-        sys.exit(1)
-
-    _log("Starting token refresh…")
+        return False
+    _log(f"Starting token refresh ({prefix.rstrip('_')})…")
     try:
-        token = _get_access_token(
-            env["KITE_USER_ID"], env["KITE_PASSWORD"], env["KITE_TOTP_SECRET"],
-            env["KITE_API_KEY"],  env["KITE_API_SECRET"],
-        )
+        token = _get_access_token(*(env[prefix + k] for k in keys))
     except Exception as e:
-        _log(f"ERROR getting token: {e}")
+        _log(f"ERROR getting token ({prefix.rstrip('_')}): {e}")
+        return False
+    _save_token(token, prefix)
+    _log(f"Token saved ({prefix.rstrip('_')}): {token[:8]}…")
+    return True
+
+
+def main():
+    env = _load_env()
+    ok = [_refresh(env, "KITE_")]
+    if env.get("KITE2_USER_ID") or env.get("KITE2_API_KEY"):
+        ok.append(_refresh(env, "KITE2_"))
+    if not any(ok):
         sys.exit(1)
 
-    _save_token(token)
-    _log(f"Token saved: {token[:8]}…")
-
-    # Restart ticker daemon with new token
+    # Restart ticker daemon and bots with the new token(s)
     script_dir = Path(__file__).parent
     subprocess.run(["bash", str(script_dir / "stop_droplet.sh")], check=False)
     import time; time.sleep(2)
     subprocess.run(["bash", str(script_dir / "start_droplet.sh")], check=False)
     _log("Ticker daemon restarted. Done.")
+    if not all(ok):
+        sys.exit(1)
 
 
 if __name__ == "__main__":

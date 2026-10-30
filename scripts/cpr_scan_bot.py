@@ -118,6 +118,22 @@ def _save_state(date_str: str, state: dict) -> None:
     _state_path(date_str).write_text(json.dumps(state, indent=2))
 
 
+# ── Signal log (for EOD postmortem) ───────────────────────────────────────────
+
+def _cpr_log_path(date_str: str) -> pathlib.Path:
+    return pathlib.Path(f"/tmp/cpr_scan_log_{date_str}.json")
+
+
+def _append_cpr_log(date_str: str, entry: dict) -> None:
+    p = _cpr_log_path(date_str)
+    try:
+        log = json.loads(p.read_text()) if p.exists() else {"date": date_str, "signals": []}
+    except Exception:
+        log = {"date": date_str, "signals": []}
+    log["signals"].append(entry)
+    p.write_text(json.dumps(log, indent=2))
+
+
 # ── Kite helpers ──────────────────────────────────────────────────────────────
 
 def _build_token_map(kite: KiteConnect) -> dict[str, int]:
@@ -289,6 +305,32 @@ def scan_once(state: dict, token_map: dict, cpr_cache: dict,
 
     if not ce_signals and not pe_signals:
         return
+
+    # Log every signal for EOD postmortem
+    for s in ce_signals:
+        _append_cpr_log(date_str, {
+            "time":      f"{time_str} IST",
+            "symbol":    s["symbol"],
+            "direction": "CE",
+            "spot":      s["ltp"],
+            "tc":        s["tc"],
+            "bc":        s.get("bc", ""),
+            "pp":        s["pp"],
+            "narrow":    s.get("narrow", False),
+            "width":     round(s.get("width", 0), 2),
+        })
+    for s in pe_signals:
+        _append_cpr_log(date_str, {
+            "time":      f"{time_str} IST",
+            "symbol":    s["symbol"],
+            "direction": "PE",
+            "spot":      s["ltp"],
+            "tc":        s.get("tc", ""),
+            "bc":        s["bc"],
+            "pp":        s["pp"],
+            "narrow":    s.get("narrow", False),
+            "width":     round(s.get("width", 0), 2),
+        })
 
     # Build notification
     lines = [f"CPR Crossover Scan  {time_str} IST"]

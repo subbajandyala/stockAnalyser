@@ -24,6 +24,7 @@ Test notification:
 import argparse
 import datetime
 import json
+import logging
 import os
 import pathlib
 import subprocess
@@ -37,31 +38,62 @@ import requests
 
 from screener.cpr_adx import analyze_cpr_adx, NIFTY50_FNO
 
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    datefmt="%H:%M:%S",
+)
+
 _IST         = datetime.timezone(datetime.timedelta(hours=5, minutes=30))
 MARKET_OPEN  = datetime.time(9, 20)
-MARKET_CLOSE = datetime.time(14, 30)
+MARKET_CLOSE = datetime.time(14, 31)   # inclusive of the 14:30 scan + digest
 SCAN_INTERVAL_SEC = 60        # scan every 60 seconds
 
 MIN_SIGNAL_SCORE  = 3         # regular signal threshold
 STRONG_SCORE      = 5         # strong / upgrade threshold
 
 _DEFAULT_NTFY_TOPIC = "marketPulse-cpr-adx-bot"
+_STATE_FILE = "/root/stockAnalyser/cpr_adx_state.json"
+
+
+# ── State persistence ─────────────────────────────────────────────────────────
+
+def _load_state(path: str) -> dict:
+    try:
+        return json.loads(pathlib.Path(path).read_text())
+    except Exception:
+        return {}
+
+
+def _save_state(path: str, state: dict) -> None:
+    try:
+        pathlib.Path(path).write_text(json.dumps(state, indent=2))
+    except Exception as e:
+        print(f"  Warning: could not save state: {e}")
+
+
+# ── Signal log (for EOD report) ───────────────────────────────────────────────
+
+def _append_signal_log(date_str: str, entry: dict) -> None:
+    path = pathlib.Path(f"/tmp/cpr_adx_log_{date_str}.json")
+    try:
+        log = json.loads(path.read_text()) if path.exists() else {"date": date_str, "signals": []}
+    except Exception:
+        log = {"date": date_str, "signals": []}
+    log["signals"].append(entry)
+    try:
+        path.write_text(json.dumps(log, indent=2))
+    except Exception as e:
+        print(f"  [log] cpr_adx log write failed: {e}")
 
 
 # ── Credentials ───────────────────────────────────────────────────────────────
 
 def _kite_creds() -> tuple[str, str]:
+    """Priority: env vars → .env → ~/.kite_creds.json."""
     api_key = os.environ.get("KITE_API_KEY", "")
     token   = os.environ.get("KITE_ACCESS_TOKEN", "")
-    if not (api_key and token):
-        p = pathlib.Path.home() / ".kite_creds.json"
-        if p.exists():
-            try:
-                c = json.loads(p.read_text())
-                api_key = api_key or c.get("api_key", "")
-                token   = token   or c.get("access_token", "")
-            except Exception:
-                pass
+    # .env first — auto_token.py always writes the fresh token here
     if not (api_key and token):
         env_path = pathlib.Path(__file__).parent.parent / ".env"
         if env_path.exists():
@@ -74,6 +106,16 @@ def _kite_creds() -> tuple[str, str]:
                         api_key = api_key or v
                     elif k.strip() == "KITE_ACCESS_TOKEN":
                         token = token or v
+    # ~/.kite_creds.json as fallback
+    if not (api_key and token):
+        p = pathlib.Path.home() / ".kite_creds.json"
+        if p.exists():
+            try:
+                c = json.loads(p.read_text())
+                api_key = api_key or c.get("api_key", "")
+                token   = token   or c.get("access_token", "")
+            except Exception:
+                pass
     return api_key, token
 
 
@@ -87,11 +129,20 @@ def _ntfy_topic() -> str:
             if src.exists():
                 try:
                     if src.suffix == ".json":
-                        t = json.loads(src.read_text()).get("cpr_adx_ntfy_topic", "")
+                        c = json.loads(src.read_text())
+                        t = c.get("cpr_adx_ntfy_topic", "") or c.get("ntfy_agent_topic", "")
                     else:
                         for line in src.read_text().splitlines():
-                            if "CPR_ADX_NTFY_TOPIC" in line and "=" in line:
-                                t = line.split("=", 1)[1].strip().strip('"').strip("'")
+                            line = line.strip()
+                            if not line or line.startswith("#") or "=" not in line:
+                                continue
+                            k, v = line.split("=", 1)
+                            k = k.strip(); v = v.strip().strip('"').strip("'")
+                            if k == "CPR_ADX_NTFY_TOPIC":
+                                t = v
+                                break
+                            if k == "NTFY_TOPIC" and not t:
+                                t = v  # shared topic as fallback
                 except Exception:
                     pass
             if t:
@@ -199,7 +250,7 @@ def _should_alert(sym: str, result: dict, state: dict) -> tuple[bool, bool]:
     prev      = state.get(sym, {})
     prev_date = prev.get("date", "")
 
-    # Reset on new trading day
+    # New trading day — always fire a fresh alert regardless of yesterday's direction.
     if prev_date != today:
         return True, False
 
@@ -238,6 +289,7 @@ def _scan(symbols: list[str], api_key: str, access_token: str,
         results = list(pool.map(_analyse, symbols))
 
     alerts_fired = 0
+    active: list[dict] = []
     for result in results:
         sym = result["symbol"]
 
@@ -253,6 +305,10 @@ def _scan(symbols: list[str], api_key: str, access_token: str,
         marker = "🚀" if abs(score) >= STRONG_SCORE else ("⚡" if abs(score) >= MIN_SIGNAL_SCORE else "  ")
         print(f"  {marker} {sym:14s} | {direction:5s} | score {score:+d} | ADX {adx:4.0f} | {stars}")
 
+        _track_wait(sym, result, state, now_ist)
+        if direction != "WAIT":
+            active.append(result)
+
         should_alert, is_upgrade = _should_alert(sym, result, state)
         if not should_alert:
             continue
@@ -266,8 +322,90 @@ def _scan(symbols: list[str], api_key: str, access_token: str,
         alerts_fired += 1
 
         _update_state(sym, result, state)
+        _save_state(_STATE_FILE, state)
 
+        today = now_ist.date().isoformat()
+        _append_signal_log(today, {
+            "time":      now_ist.strftime("%H:%M IST"),
+            "symbol":    sym,
+            "direction": result["direction"],
+            "signal":    result["signal"],
+            "stars":     result["stars"],
+            "score":     result["score"],
+            "price":     result["price"],
+            "adx":       round(float(result["adx"]), 1),
+            "di_plus":   result["di_p"],
+            "di_minus":  result["di_m"],
+            "cpr_bot":   result["cpr"]["bot"],
+            "cpr_top":   result["cpr"]["top"],
+            "cpr_width": round(result["cpr"]["width_pct"], 2),
+            "sl":        result.get("sl", ""),
+            "target":    result.get("target", ""),
+            "rr":        result.get("rr", ""),
+            "upgraded":  "Yes" if is_upgrade else "No",
+            "reasons":   " | ".join(result.get("reasons", [])[:3]),
+        })
+
+    _send_digest_if_due(active, state, ntfy_topic, now_ist)
+    _save_state(_STATE_FILE, state)
     print(f"  [{now_ist.strftime('%H:%M:%S')}] Scan done — {alerts_fired} alert(s) fired")
+
+
+REARM_AFTER_WAIT_MIN = 15   # a stock must sit at WAIT this long before a new signal re-alerts
+
+
+def _track_wait(sym: str, result: dict, state: dict, now_ist: datetime.datetime) -> None:
+    """Re-arm a stock once its signal has faded to WAIT for a full 15m candle.
+
+    Without this, a stock that signalled in the morning stays silent all day even
+    if it later gives a fresh setup in the same direction.
+    """
+    prev = state.get(sym)
+    if not isinstance(prev, dict) or prev.get("date") != now_ist.date().isoformat():
+        return
+    if result["direction"] != "WAIT":
+        prev.pop("wait_since", None)
+        return
+    if prev.get("direction", "WAIT") == "WAIT":
+        return
+    since = prev.get("wait_since")
+    if not since:
+        prev["wait_since"] = now_ist.isoformat()
+    elif (now_ist - datetime.datetime.fromisoformat(since)).total_seconds() >= REARM_AFTER_WAIT_MIN * 60:
+        prev["direction"] = "WAIT"
+        prev["strength"] = ""
+        prev.pop("wait_since", None)
+        print(f"  {sym:14s}: WAIT for {REARM_AFTER_WAIT_MIN}m — re-armed for a fresh signal")
+
+
+def _send_digest_if_due(active: list[dict], state: dict, topic: str,
+                        now_ist: datetime.datetime) -> None:
+    """One push per 15-minute slot listing every stock with an active signal."""
+    if now_ist.time() < datetime.time(9, 30):
+        return
+    slot = f"{now_ist.date().isoformat()} {now_ist.hour:02d}:{now_ist.minute // 15 * 15:02d}"
+    if state.get("_digest_slot") == slot:
+        return
+    state["_digest_slot"] = slot
+
+    active = sorted(active, key=lambda r: -abs(r["score"]))
+    buys   = sum(1 for r in active if r["direction"] == "BUY")
+    shorts = len(active) - buys
+    title  = f"CPR+ADX {slot[-5:]} update: {buys} BUY, {shorts} SHORT"
+    if active:
+        lines = []
+        for r in active[:15]:
+            arrow = "↑" if r["direction"] == "BUY" else "↓"
+            sl_t  = f" | SL {r['sl']:,.1f} T {r['target']:,.1f}" if r.get("sl") and r.get("target") else ""
+            lines.append(f"{'🚀' if abs(r['score']) >= STRONG_SCORE else '⚡'} {r['symbol']} {arrow} "
+                         f"{r['direction']} {r['score']:+d} @ ₹{r['price']:,.1f}{sl_t}")
+        if len(active) > 15:
+            lines.append(f"… and {len(active) - 15} more")
+        body = "\n".join(lines)
+    else:
+        body = "No stocks with an active CPR+ADX signal right now."
+    ok = send_ntfy(title, body + "\n\nIntraday MIS · Verify before trading.", topic, priority="default")
+    print(f"  [DIGEST] {title} — ntfy {'OK' if ok else 'FAILED'}")
 
 
 # ── Worker (continuous loop) ──────────────────────────────────────────────────
@@ -281,11 +419,17 @@ def run_worker(symbols: list[str]) -> None:
         sys.exit(1)
 
     print(f"CPR+ADX worker started — {len(symbols)} stocks — topic: {ntfy_topic}")
-    state: dict = {}
+    state: dict = _load_state(_STATE_FILE)
+    print(f"  Loaded {len(state)} dedup entries from state file")
 
     while True:
         now_ist = datetime.datetime.now(_IST)
         t       = now_ist.time()
+
+        if now_ist.weekday() >= 5:  # Saturday / Sunday
+            print(f"[{now_ist.strftime('%H:%M IST')}] Weekend — market closed, sleeping 1h")
+            time.sleep(3600)
+            continue
 
         if t < MARKET_OPEN:
             wait_sec = (
@@ -350,6 +494,10 @@ def scan_once(symbols: list[str]) -> None:
 
     now_ist = datetime.datetime.now(_IST)
     print(f"[{now_ist.strftime('%H:%M:%S IST')}] CPR+ADX one-shot scan — {len(symbols)} stocks")
+
+    if now_ist.weekday() >= 5:
+        print("Weekend — market closed, skipping.")
+        return
 
     if not (MARKET_OPEN <= now_ist.time() <= MARKET_CLOSE):
         print("Outside scan window (09:20–14:30) — skipping.")

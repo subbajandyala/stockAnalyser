@@ -68,21 +68,56 @@ def _get_option_tokens(index: str, strike: float, expiry: datetime.date) -> dict
     exchange = _OPT_EXCHANGE[index]
     df = _load_option_instruments(exchange)
     if df.empty:
+        print(f"  [token] {exchange} instruments empty — API/auth error?")
         return {}
     try:
         df["expiry_dt"] = pd.to_datetime(df["expiry"]).dt.date
+        strike_f = float(strike)
+
+        # Primary match: by name field (strip whitespace for robustness)
         mask = (
-            (df["name"].str.upper() == index) &
+            (df["name"].str.strip().str.upper() == index.upper()) &
             (df["expiry_dt"] == expiry) &
-            (df["strike"].astype(float) == float(strike)) &
+            (df["strike"].astype(float) == strike_f) &
             (df["instrument_type"].isin(["CE", "PE"]))
         )
         hits = df[mask]
+
+        # Fallback: match by tradingsymbol prefix (catches name field mismatches)
+        if hits.empty:
+            ts_mask = (
+                df["tradingsymbol"].str.upper().str.startswith(index.upper()) &
+                (df["expiry_dt"] == expiry) &
+                (df["strike"].astype(float) == strike_f) &
+                (df["instrument_type"].isin(["CE", "PE"]))
+            )
+            hits = df[ts_mask]
+            if not hits.empty:
+                print(f"  [token] {index} {int(strike_f)} {expiry}: found via tradingsymbol fallback")
+
+        if hits.empty:
+            # Diagnostic: why did we fail?
+            name_df = df[df["name"].str.strip().str.upper() == index.upper()]
+            if name_df.empty:
+                avail = df["name"].str.strip().str.upper().unique()[:8].tolist()
+                print(f"  [token] '{index}' not in {exchange} names. Have: {avail}")
+            else:
+                exp_df = name_df[name_df["expiry_dt"] == expiry]
+                if exp_df.empty:
+                    avail_exp = sorted(name_df["expiry_dt"].unique())[:5]
+                    print(f"  [token] {index} found but no expiry {expiry}. Have: {avail_exp}")
+                else:
+                    avail_strikes = sorted(exp_df["strike"].astype(float).unique())
+                    near = [s for s in avail_strikes if abs(s - strike_f) <= 500]
+                    print(f"  [token] {index} {expiry}: no strike {int(strike_f)}. Nearby: {near}")
+            return {}
+
         return {
             row["instrument_type"]: int(row["instrument_token"])
             for _, row in hits.iterrows()
         }
-    except Exception:
+    except Exception as e:
+        print(f"  [token] Exception: {e}")
         return {}
 
 

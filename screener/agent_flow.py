@@ -6,11 +6,13 @@ a high-probability CALL / PUT buying recommendation, or NO TRADE.
 """
 
 import datetime
+import io
 from typing import Optional
 
 import numpy as np
 import pandas as pd
-from screener.kite_data import fetch_ohlcv as _kite_ohlcv
+import requests
+from screener.kite_data import _KITE_BASE, _hdrs, fetch_ohlcv as _kite_ohlcv
 from screener.option_chain import (
     fetch_option_chain, get_expiries, parse_chain,
     atm_strike, calc_pcr, calc_max_pain,
@@ -19,6 +21,13 @@ from screener.option_chain import (
 _IST = datetime.timezone(datetime.timedelta(hours=5, minutes=30))
 
 INSTRUMENTS = ["NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX"]
+
+_FUT_EXCHANGE = {
+    "NIFTY": "NFO", "BANKNIFTY": "NFO", "FINNIFTY": "NFO",
+    "MIDCPNIFTY": "NFO", "SENSEX": "BFO",
+}
+_FUT_INSTR_CACHE: dict = {}
+_FUT_INSTR_TTL = 3600
 
 
 # ── Data helpers ──────────────────────────────────────────────────────────────
@@ -52,6 +61,213 @@ def _vwap(df: pd.DataFrame) -> float:
         return 0.0
     tp = (df["High"] + df["Low"] + df["Close"]) / 3
     return float((tp * df["Volume"]).sum() / df["Volume"].sum())
+
+
+# ── Futures instruments + 5m candles ─────────────────────────────────────────
+
+def _load_fut_instruments(exchange: str) -> pd.DataFrame:
+    now = datetime.datetime.now(_IST).timestamp()
+    cached = _FUT_INSTR_CACHE.get(exchange, {})
+    if cached.get("ts", 0) + _FUT_INSTR_TTL > now:
+        return cached["df"]
+    try:
+        r = requests.get(
+            f"{_KITE_BASE}/instruments/{exchange}",
+            headers=_hdrs(),
+            timeout=30,
+        )
+        if not r.ok:
+            return cached.get("df", pd.DataFrame())
+        df = pd.read_csv(io.StringIO(r.text))
+        _FUT_INSTR_CACHE[exchange] = {"df": df, "ts": now}
+        return df
+    except Exception:
+        return cached.get("df", pd.DataFrame())
+
+
+def _fetch_fut_5m(token: int) -> pd.DataFrame:
+    to_d = datetime.date.today()
+    fr_d = to_d - datetime.timedelta(days=3)
+    try:
+        r = requests.get(
+            f"{_KITE_BASE}/instruments/historical/{token}/5minute",
+            headers=_hdrs(),
+            params={
+                "from": fr_d.strftime("%Y-%m-%d %H:%M:%S"),
+                "to":   to_d.strftime("%Y-%m-%d %H:%M:%S"),
+                "oi":   "1",
+            },
+            timeout=30,
+        )
+        if not r.ok:
+            return pd.DataFrame()
+        candles = r.json().get("data", {}).get("candles", [])
+        if not candles:
+            return pd.DataFrame()
+    except Exception:
+        return pd.DataFrame()
+
+    rows = [c[:7] if len(c) >= 7 else c[:6] + [0] for c in candles]
+    df = pd.DataFrame(rows, columns=["datetime", "Open", "High", "Low", "Close", "Volume", "OI"])
+    df["datetime"] = pd.to_datetime(df["datetime"])
+    df = df.set_index("datetime").sort_index()
+    for col in ["Open", "High", "Low", "Close", "Volume", "OI"]:
+        df[col] = pd.to_numeric(df[col], errors="coerce")
+    return df.dropna(subset=["Close"])
+
+
+def _futures_buildup(symbol: str) -> dict:
+    """
+    4-quadrant futures OI analysis:
+      Price UP  + OI UP   → Long Buildup   (fresh longs — strong bullish)
+      Price UP  + OI DOWN → Short Covering (shorts exiting — weak bullish)
+      Price DOWN + OI UP  → Short Buildup  (fresh shorts — strong bearish)
+      Price DOWN + OI DOWN→ Long Unwinding (longs exiting — weak bearish)
+    """
+    exchange = _FUT_EXCHANGE.get(symbol, "NFO")
+    df_instr = _load_fut_instruments(exchange)
+    if df_instr.empty:
+        return {"signal": "Unknown"}
+
+    try:
+        df_instr["expiry_dt"] = pd.to_datetime(df_instr["expiry"]).dt.date
+        today = datetime.date.today()
+        futs = df_instr[
+            (df_instr["name"].str.strip().str.upper() == symbol.upper()) &
+            (df_instr["instrument_type"] == "FUT") &
+            (df_instr["expiry_dt"] >= today)
+        ]
+        if futs.empty:
+            return {"signal": "Unknown"}
+        near = futs.sort_values("expiry_dt").iloc[0]
+        token = int(near["instrument_token"])
+    except Exception:
+        return {"signal": "Unknown"}
+
+    df = _fetch_fut_5m(token)
+    if df is None or len(df) < 3:
+        return {"signal": "Unknown"}
+
+    curr_oi   = float(df["OI"].iloc[-1])
+    prev_oi   = float(df["OI"].iloc[-2])
+    curr_close = float(df["Close"].iloc[-1])
+    prev_close = float(df["Close"].iloc[-2])
+
+    # If OI data absent, fall back to price-only signals
+    if curr_oi == 0 and prev_oi == 0:
+        return {"signal": "Unknown", "fut_price": round(curr_close, 2)}
+
+    price_up = curr_close > prev_close
+    oi_up    = curr_oi    > prev_oi
+
+    if price_up and oi_up:
+        signal = "Long Buildup"
+    elif price_up and not oi_up:
+        signal = "Short Covering"
+    elif not price_up and oi_up:
+        signal = "Short Buildup"
+    else:
+        signal = "Long Unwinding"
+
+    return {
+        "signal":     signal,
+        "fut_price":  round(curr_close, 2),
+        "price_chg":  round(curr_close - prev_close, 2),
+        "oi_chg":     int(curr_oi - prev_oi),
+    }
+
+
+# ── GEX helpers ───────────────────────────────────────────────────────────────
+
+def _norm_pdf(x: float) -> float:
+    return float(np.exp(-0.5 * x * x) / np.sqrt(2.0 * np.pi))
+
+
+def _bs_gamma(S: float, K: float, T: float, sigma: float) -> float:
+    """Black-Scholes gamma. r=0.065 (Indian repo rate proxy)."""
+    if T <= 0 or sigma <= 0 or S <= 0 or K <= 0:
+        return 0.0
+    r = 0.065
+    try:
+        d1 = (np.log(S / K) + (r + 0.5 * sigma ** 2) * T) / (sigma * np.sqrt(T))
+        return _norm_pdf(float(d1)) / (S * sigma * np.sqrt(T))
+    except Exception:
+        return 0.0
+
+
+def _calc_gex(df_chain: pd.DataFrame, spot: float, expiry: str,
+              vix: float = 14.5) -> dict:
+    """
+    Gamma Exposure (GEX) per strike.
+
+    Net GEX > 0 → dealers LONG gamma → sell rallies / buy dips → mean-reversion / pin
+    Net GEX < 0 → dealers SHORT gamma → chase moves → trending / volatile
+
+    Gamma Wall = strike with highest absolute GEX = key magnet level.
+
+    IV source: use chain CE IV / PE IV when available (> 0),
+    else fall back to VIX-based proxy with a simple smile.
+    """
+    if df_chain.empty or spot <= 0:
+        return {"regime": "Unknown", "net_gex": 0.0, "gamma_wall": spot, "signals": []}
+
+    try:
+        exp_dt = datetime.datetime.strptime(expiry, "%d-%b-%Y").date()
+        dte    = max((exp_dt - datetime.date.today()).days, 0)
+    except Exception:
+        dte = 7
+    T = max(dte / 365.0, 1.0 / 365.0)
+
+    base_iv = max(float(vix) / 100.0, 0.08)   # VIX ≈ annualised ATM IV
+
+    rows = []
+    for _, row in df_chain.iterrows():
+        K      = float(row["Strike"])
+        ce_oi  = int(row.get("CE OI", 0))
+        pe_oi  = int(row.get("PE OI", 0))
+
+        ce_iv_raw = float(row.get("CE IV", 0))
+        pe_iv_raw = float(row.get("PE IV", 0))
+        moneyness = abs(K / spot - 1.0)
+        smile     = moneyness * 1.5        # simple OTM smile bump
+        iv = max(ce_iv_raw / 100.0, pe_iv_raw / 100.0, base_iv + smile)
+
+        gamma  = _bs_gamma(spot, K, T, iv)
+        ce_gex = gamma * ce_oi * spot
+        pe_gex = gamma * pe_oi * spot
+
+        rows.append({"strike": K, "ce_gex": ce_gex, "pe_gex": pe_gex,
+                     "net_gex": ce_gex - pe_gex})
+
+    if not rows:
+        return {"regime": "Unknown", "net_gex": 0.0, "gamma_wall": spot, "signals": []}
+
+    df_gex   = pd.DataFrame(rows)
+    net_gex  = float(df_gex["net_gex"].sum())
+    wall_idx = df_gex["net_gex"].abs().idxmax()
+    gamma_wall = float(df_gex.loc[wall_idx, "strike"])
+    regime   = "Positive" if net_gex >= 0 else "Negative"
+
+    signals = []
+    if regime == "Negative":
+        signals.append("Negative GEX — Trending/Volatile")
+    else:
+        signals.append("Positive GEX — Mean-Reverting")
+
+    wall_pct = (gamma_wall - spot) / spot * 100
+    if wall_pct > 0.5:
+        signals.append(f"Gamma Wall {int(gamma_wall)} — Resistance")
+    elif wall_pct < -0.5:
+        signals.append(f"Gamma Wall {int(gamma_wall)} — Support")
+    else:
+        signals.append(f"Gamma Wall {int(gamma_wall)} — ATM Pin")
+
+    return {
+        "regime":     regime,
+        "net_gex":    round(net_gex, 2),
+        "gamma_wall": gamma_wall,
+        "signals":    signals,
+    }
 
 
 # ── Market structure ──────────────────────────────────────────────────────────
@@ -134,7 +350,9 @@ def _oi_analysis(df_chain: pd.DataFrame, spot: float) -> dict:
 # ── Bias engine ───────────────────────────────────────────────────────────────
 
 def _market_bias(trend: str, oi: dict, spot: float,
-                 vwap: float, ema20: float, ema50: float, vix: float) -> dict:
+                 vwap: float, ema20: float, ema50: float, vix: float,
+                 fut_buildup: str = "Unknown",
+                 gex: Optional[dict] = None) -> dict:
     bull, bear = 0, 0
 
     # Trend weight 25
@@ -160,6 +378,25 @@ def _market_bias(trend: str, oi: dict, spot: float,
     pcr = oi.get("pcr", 1.0)
     if pcr > 1.2:    bull += 10
     elif pcr < 0.8:  bear += 10
+
+    # Futures OI buildup weight 15 (strong) / 7 (weak)
+    if fut_buildup == "Long Buildup":    bull += 15
+    elif fut_buildup == "Short Covering": bull += 7
+    elif fut_buildup == "Short Buildup":  bear += 15
+    elif fut_buildup == "Long Unwinding": bear += 7
+
+    # GEX weight: regime amplifies dominant direction; gamma wall acts as level
+    if gex and gex.get("regime") != "Unknown":
+        gex_regime = gex["regime"]
+        gex_wall   = gex.get("gamma_wall", spot)
+        wall_pct   = (gex_wall - spot) / spot * 100
+        if gex_regime == "Negative":
+            # Dealers short gamma → moves get amplified → add to leading side
+            if bull > bear:  bull += 10
+            elif bear > bull: bear += 10
+        # Gamma wall position: resistance above spot, support below
+        if wall_pct > 0.5:    bear += 5   # wall above → resistance
+        elif wall_pct < -0.5: bull += 5   # wall below → support
 
     # VIX penalty (uncertain market)
     if vix > 20:
@@ -323,8 +560,19 @@ def run_agent_analysis(symbol: str, api_key: str, access_token: str) -> dict:
     # 3. OI analysis
     oi = _oi_analysis(df_chain, spot)
 
-    # 4. Bias
-    bias_r = _market_bias(trend, oi, spot, vwap_v, ema20, ema50, vix)
+    # 3b. Futures OI buildup (4-quadrant)
+    fut_data   = _futures_buildup(symbol)
+    fut_signal = fut_data.get("signal", "Unknown")
+    if fut_signal not in ("Unknown",):
+        oi["signals"].append(fut_signal)
+
+    # 3c. Gamma Exposure (GEX)
+    gex = _calc_gex(df_chain, spot, expiry, vix)
+    for sig in gex.get("signals", []):
+        oi["signals"].append(sig)
+
+    # 4. Bias (includes futures buildup + GEX weights)
+    bias_r = _market_bias(trend, oi, spot, vwap_v, ema20, ema50, vix, fut_signal, gex)
     bias, conf = bias_r["bias"], bias_r["confidence"]
 
     common = {**base,
@@ -332,7 +580,8 @@ def run_agent_analysis(symbol: str, api_key: str, access_token: str) -> dict:
               "spot": spot, "vwap": vwap_v, "ema20": ema20, "ema50": ema50,
               "vix": vix, "trend": trend, "expiry": expiry,
               "oi": oi, "df_chain": df_chain,
-              "support": oi["support"], "resistance": oi["resistance"]}
+              "support": oi["support"], "resistance": oi["resistance"],
+              "fut_buildup": fut_data, "gex": gex}
 
     # 5. Direction
     if bias in ("Strong Bullish", "Moderately Bullish"):

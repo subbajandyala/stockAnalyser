@@ -38,14 +38,27 @@ MIN_RATING   = 3   # alert only on 3-star and above
 # ── Credentials ───────────────────────────────────────────────────────────────
 
 def _kite_creds() -> tuple[str, str]:
+    """Priority: env vars → .env → ~/.kite_creds.json."""
     api_key = os.environ.get("KITE_API_KEY", "")
     token   = os.environ.get("KITE_ACCESS_TOKEN", "")
+    if not (api_key and token):
+        env_path = pathlib.Path(__file__).parent.parent / ".env"
+        if env_path.exists():
+            for line in env_path.read_text().splitlines():
+                line = line.strip()
+                if "=" in line and not line.startswith("#"):
+                    k, v = line.split("=", 1)
+                    v = v.strip().strip('"').strip("'")
+                    if k.strip() == "KITE_API_KEY":
+                        api_key = api_key or v
+                    elif k.strip() == "KITE_ACCESS_TOKEN":
+                        token = token or v
     if not (api_key and token):
         p = pathlib.Path.home() / ".kite_creds.json"
         if p.exists():
             try:
                 c = json.loads(p.read_text())
-                api_key = api_key or c.get("api_key", "plz6ik09bgb62mey")
+                api_key = api_key or c.get("api_key", "")
                 token   = token   or c.get("access_token", "")
             except Exception:
                 pass
@@ -55,12 +68,22 @@ def _kite_creds() -> tuple[str, str]:
 def _ntfy_topic() -> str:
     t = os.environ.get("NTFY_TOPIC", "")
     if not t:
-        p = pathlib.Path.home() / ".kite_creds.json"
-        if p.exists():
-            try:
-                t = json.loads(p.read_text()).get("ntfy_agent_topic", "")
-            except Exception:
-                pass
+        for src in [
+            pathlib.Path.home() / ".kite_creds.json",
+            pathlib.Path(__file__).parent.parent / ".env",
+        ]:
+            if src.exists():
+                try:
+                    if src.suffix == ".json":
+                        t = json.loads(src.read_text()).get("ntfy_agent_topic", "")
+                    else:
+                        for line in src.read_text().splitlines():
+                            if "NTFY_TOPIC" in line and "=" in line:
+                                t = line.split("=", 1)[1].strip().strip('"').strip("'")
+                except Exception:
+                    pass
+            if t:
+                break
     return t
 
 
@@ -94,6 +117,14 @@ def send_ntfy(title: str, body: str, topic: str) -> bool:
 _STARS = {1: "★", 2: "★★", 3: "★★★", 4: "★★★★", 5: "★★★★★"}
 
 
+_FUT_EMOJI = {
+    "Long Buildup":    "↑OI",
+    "Short Covering":  "↑SC",
+    "Short Buildup":   "↓OI",
+    "Long Unwinding":  "↓LU",
+}
+
+
 def _fmt_alert(r: dict) -> tuple[str, str]:
     symbol    = r["symbol"]
     direction = r["direction"]        # CALL / PUT
@@ -104,14 +135,31 @@ def _fmt_alert(r: dict) -> tuple[str, str]:
     rating    = r.get("rating", 3)
     prob      = r.get("probability", 0)
     tgt       = r.get("targets", {})
-    signals   = r.get("signals", [])
     spot      = r.get("spot", 0)
     expiry    = r.get("expiry", "")
     now_ist   = datetime.datetime.now(_IST)
 
+    # Futures buildup
+    fut       = r.get("fut_buildup", {})
+    fut_sig   = fut.get("signal", "")
+    fut_tag   = _FUT_EMOJI.get(fut_sig, "")
+
+    # GEX
+    gex       = r.get("gex", {})
+    gex_reg   = gex.get("regime", "")
+    gex_wall  = gex.get("gamma_wall", 0)
+    gex_emoji = "⚡" if gex_reg == "Negative" else ("🔒" if gex_reg == "Positive" else "")
+
+    # Filter out GEX/futures lines from signals — shown in dedicated section
+    _skip = {"Long Buildup", "Short Covering", "Short Buildup", "Long Unwinding",
+             "Negative GEX — Trending/Volatile", "Positive GEX — Mean-Reverting"}
+    core_signals = [s for s in r.get("signals", [])
+                    if not any(s.startswith(k) for k in _skip)
+                    and "Gamma Wall" not in s]
+    wall_signal  = next((s for s in r.get("signals", []) if "Gamma Wall" in s), "")
+
     emoji  = "🚀" if rating >= 4 else "⚡"
     dline  = "🟢 BUY CALL (CE)" if direction == "CALL" else "🔴 BUY PUT (PE)"
-    opt    = f"{symbol} {strike} {'CE' if direction == 'CALL' else 'PE'}"
     stars  = _STARS.get(rating, "★★★")
 
     lines = [
@@ -136,15 +184,31 @@ def _fmt_alert(r: dict) -> tuple[str, str]:
             f"R:R    : {tgt.get('rr', 0):.1f}x",
         ]
 
-    if signals:
+    # ── Futures buildup + GEX block ──────────────────────────────────────────
+    lines.append(f"")
+    if fut_sig and fut_sig != "Unknown":
+        price_chg = fut.get("price_chg", 0)
+        oi_chg    = fut.get("oi_chg", 0)
+        chg_str   = f"  Fut {fut_tag} {price_chg:+.0f}  OI {oi_chg:+,}"
+        lines.append(f"Futures: {fut_sig}{chg_str}")
+    if gex_reg and gex_reg != "Unknown":
+        wall_str = f"  Wall: {int(gex_wall):,}" if gex_wall else ""
+        lines.append(f"GEX    : {gex_emoji} {gex_reg}{wall_str}")
+        if wall_signal:
+            lines.append(f"         {wall_signal}")
+
+    # ── Why (OI / price signals only) ────────────────────────────────────────
+    if core_signals:
         lines.append(f"")
         lines.append(f"Why:")
-        for s in signals[:4]:
+        for s in core_signals[:5]:
             lines.append(f"  - {s}")
 
     lines += ["", "Verify before executing. Not financial advice."]
 
-    title = f"Agent Flow: {direction} {symbol} {strike} | {stars}"
+    # Title includes GEX tag so it's visible in notification preview
+    gex_title = f" | {gex_emoji}{gex_reg[:3]}" if gex_reg and gex_reg != "Unknown" else ""
+    title = f"Agent Flow: {direction} {symbol} {strike} | {stars}{gex_title}"
     return title, "\n".join(lines)
 
 
@@ -161,9 +225,24 @@ def _save_state(path: str, state: dict) -> None:
     pathlib.Path(path).write_text(json.dumps(state, indent=2))
 
 
+# ── Signal log (for EOD report) ───────────────────────────────────────────────
+
+def _append_signal_log(date_str: str, entry: dict) -> None:
+    path = pathlib.Path(f"/tmp/agent_flow_log_{date_str}.json")
+    try:
+        log = json.loads(path.read_text()) if path.exists() else {"date": date_str, "signals": []}
+    except Exception:
+        log = {"date": date_str, "signals": []}
+    log["signals"].append(entry)
+    try:
+        path.write_text(json.dumps(log, indent=2))
+    except Exception as e:
+        print(f"  [log] agent_flow log write failed: {e}")
+
+
 # ── Single scan ───────────────────────────────────────────────────────────────
 
-def scan_once(symbols: list[str], state_file: str) -> None:
+def scan_once(symbols: list[str], state_file: str, force: bool = False) -> None:
     api_key, access_token = _kite_creds()
     ntfy_topic = _ntfy_topic()
 
@@ -174,7 +253,11 @@ def scan_once(symbols: list[str], state_file: str) -> None:
     now_ist = datetime.datetime.now(_IST)
     print(f"[{now_ist.strftime('%H:%M:%S IST')}] Agent Flow scan — {', '.join(symbols)}")
 
-    if not (MARKET_OPEN <= now_ist.time() <= MARKET_CLOSE):
+    if not force and now_ist.weekday() >= 5:
+        print("Weekend — market closed, skipping.")
+        return
+
+    if not force and not (MARKET_OPEN <= now_ist.time() <= MARKET_CLOSE):
         print("Market closed — no scan needed.")
         return
 
@@ -201,6 +284,28 @@ def scan_once(symbols: list[str], state_file: str) -> None:
         print(f"  {marker} {symbol:12s} | {'NO TRADE' if no_trade else direction:8s} | {bias:20s} | {conf}% conf | {rating}★")
 
         if no_trade or rating < MIN_RATING:
+            # Log NO TRADE / weak scans so the EOD Agent Flow sheet is never blank
+            tgt_nt = result.get("targets", {}) or {}
+            _append_signal_log(now_ist.strftime("%Y-%m-%d"), {
+                "time":       now_ist.strftime("%H:%M IST"),
+                "symbol":     symbol,
+                "direction":  direction or "NO TRADE",
+                "bias":       bias,
+                "confidence": conf,
+                "rating":     rating,
+                "strike":     int(result.get("strike", 0)),
+                "spot":       result.get("spot", 0),
+                "ltp":        result.get("ltp", 0),
+                "expiry":     result.get("expiry", ""),
+                "sl":         tgt_nt.get("sl", ""),
+                "t1":         tgt_nt.get("t1", ""),
+                "t2":         tgt_nt.get("t2", ""),
+                "t3":         tgt_nt.get("t3", ""),
+                "rr":         tgt_nt.get("rr", ""),
+                "futures":    result.get("fut_buildup", {}).get("signal", ""),
+                "gex":        result.get("gex", {}).get("regime", ""),
+                "signals":    " | ".join(result.get("signals", [])[:4]),
+            })
             continue
 
         # deduplicate: skip if same direction+strike already alerted
@@ -218,6 +323,28 @@ def scan_once(symbols: list[str], state_file: str) -> None:
             print(f"  ntfy.sh : {'OK' if ok else 'FAILED'}")
         else:
             print("  No ntfy topic configured.")
+
+        tgt = result.get("targets", {}) or {}
+        _append_signal_log(now_ist.strftime("%Y-%m-%d"), {
+            "time":       now_ist.strftime("%H:%M IST"),
+            "symbol":     symbol,
+            "direction":  direction,
+            "bias":       result.get("bias", ""),
+            "confidence": result.get("confidence", 0),
+            "rating":     result.get("rating", 0),
+            "strike":     int(result.get("strike", 0)),
+            "spot":       result.get("spot", 0),
+            "ltp":        result.get("ltp", 0),
+            "expiry":     result.get("expiry", ""),
+            "sl":         tgt.get("sl", ""),
+            "t1":         tgt.get("t1", ""),
+            "t2":         tgt.get("t2", ""),
+            "t3":         tgt.get("t3", ""),
+            "rr":         tgt.get("rr", ""),
+            "futures":    result.get("fut_buildup", {}).get("signal", ""),
+            "gex":        result.get("gex", {}).get("regime", ""),
+            "signals":    " | ".join(result.get("signals", [])[:4]),
+        })
 
         # ── Auto-execute order ─────────────────────────────────────────────────────────────
         if _AUTO_TRADE and symbol in _TRADE_SYMBOLS:
@@ -274,10 +401,16 @@ if __name__ == "__main__":
                     help="Symbols to scan")
     ap.add_argument("--once", action="store_true",
                     help="Single scan then exit (GitHub Actions mode)")
-    ap.add_argument("--state-file", default="/tmp/af_state.json",
-                    help="State file for dedup (default: /tmp/af_state.json)")
+    ap.add_argument("--loop", action="store_true",
+                    help="Run as daemon, scanning every --interval seconds")
+    ap.add_argument("--interval", type=int, default=300,
+                    help="Loop interval in seconds (default: 300)")
+    ap.add_argument("--state-file", default="/root/stockAnalyser/af_state.json",
+                    help="State file for dedup (default: /root/stockAnalyser/af_state.json)")
     ap.add_argument("--test-notify", action="store_true",
                     help="Send a test notification and exit")
+    ap.add_argument("--force", action="store_true",
+                    help="Run scan even outside market hours")
     args = ap.parse_args()
 
     symbols = [s.upper() for s in args.symbols]
@@ -300,7 +433,16 @@ if __name__ == "__main__":
         ok = send_ntfy(title, body, ntfy_topic)
         print(f"ntfy.sh: {'OK' if ok else 'FAILED'}")
     elif args.once:
-        scan_once(symbols, args.state_file)
+        scan_once(symbols, args.state_file, force=args.force)
+    elif args.loop:
+        interval = args.interval
+        print(f"Agent Flow bot loop started — scanning every {interval}s")
+        while True:
+            try:
+                scan_once(symbols, args.state_file, force=args.force)
+            except Exception as e:
+                print(f"[loop] Unhandled error: {e}")
+            time.sleep(interval)
     else:
-        print("Use --once for GitHub Actions mode.")
+        print("Use --once for a single scan or --loop for daemon mode.")
         sys.exit(1)
