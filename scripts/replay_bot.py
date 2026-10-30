@@ -526,8 +526,6 @@ def main() -> None:
             # CHART_CANDLE_SOURCE=future: the current contract's own 3m history (it was the
             # 2nd month before the last expiry), as the live bot reads it
             fut = front_future_token(sym, api_key, access_token) if cb._candles.SOURCE == "future" else None
-            if cb._candles.SOURCE == "option":
-                print("  CHART_CANDLE_SOURCE=option: Kite keeps no history for expired options — replaying the index chart")
             print(f"Fetching {sym}{' FUT (front month)' if fut else ''} 3m history…")
             df3 = _fetch(fut or tok, "3minute", start, end, api_key, access_token)
             if df3.empty:
