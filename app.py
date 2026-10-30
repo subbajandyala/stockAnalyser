@@ -1,5 +1,7 @@
 import time
 import datetime
+import os
+import pathlib
 import streamlit as st
 import pandas as pd
 import plotly.graph_objects as go
@@ -79,6 +81,46 @@ from screener.oi_buildup_history import (
     ALL_INSTRUMENTS    as _OIH_ALL_INSTRUMENTS,
 )
 from screener.chart_analysis import analyze_chart as _analyze_chart, INTERVAL_CFG as _CA_INTERVAL_CFG
+
+
+def _screen_env(name: str) -> str:
+    """Value from the environment, else from .env next to app.py ("" if unset)."""
+    v = os.environ.get(name, "").strip()
+    if v:
+        return v
+    try:
+        for line in (pathlib.Path(__file__).parent / ".env").read_text().splitlines():
+            if line.strip().startswith(f"{name}="):
+                return line.split("=", 1)[1].strip().strip('"').strip("'")
+    except Exception:
+        pass
+    return ""
+
+
+def _screen_card_data(sym: str, api_key: str, access_token: str) -> dict | None:
+    """The 5m screen-engine decision for the Chart Analysis tab — the same rules and
+    .env thresholds chart_bot trades with (CHART_ENGINE=screen). Display only: no orders."""
+    if sym not in ("NIFTY", "SENSEX", "BANKNIFTY"):
+        return None
+    try:
+        from screener import screen_logic as _sl
+    except ImportError:
+        return {"error": "the screen engine is not on this branch"}
+    _sl.SOURCE = (_screen_env("CHART_SCREEN_SOURCE") or "future").lower()
+    _sl.apply({k: v for k, v in {
+        "room_rr": _screen_env("CHART_SCREEN_ROOM_RR"), "near_pct": _screen_env("CHART_SCREEN_NEAR_PCT"),
+        "open_target_r": _screen_env("CHART_SCREEN_OPEN_TARGET_R"),
+        "g5_neutral": _screen_env("CHART_SCREEN_15M_NEUTRAL") == "1" or None,
+        "strong": _screen_env("CHART_SCREEN_STRONG"), "moderate": _screen_env("CHART_SCREEN_MODERATE"),
+    }.items() if v})
+    try:
+        res = _sl.scan(sym, api_key, access_token)
+    except Exception as e:
+        return {"error": str(e)}
+    res["settings"] = _sl.settings()
+    res["grade"] = (_screen_env("CHART_SCREEN_GRADE") or "STRONG").upper()
+    res["chart_source"] = _sl.SOURCE
+    return res
 from screener.cpr_adx import analyze_cpr_adx as _cpr_adx_analyze, NIFTY50_FNO as _CPR_ADX_SYMBOLS
 from screener.rsi_scalp import analyze_rsi_scalp as _rsi_scalp_analyze
 from plotly.subplots import make_subplots
@@ -8563,6 +8605,8 @@ def page_chart_analysis():
         st.session_state["ca_ts"] = datetime.datetime.now(
             datetime.timezone(datetime.timedelta(hours=5, minutes=30))
         ).strftime("%I:%M:%S %p IST")
+        # Screen-engine card (the bot's 5m rules) — fetched once per Analyse click
+        st.session_state["ca_screen"] = _screen_card_data(_ca_sym, _ca_api, _ca_tok)
 
     _ca_res = st.session_state.get("ca_result")
     _ca_ts  = st.session_state.get("ca_ts", "")
@@ -8779,6 +8823,89 @@ def page_chart_analysis():
   <div style="display:grid;grid-template-columns:1fr{"" if not _trade_lines else " 1fr"};gap:16px;">
     <div>{_reason_rows}</div>
     {"<div>" + _trade_lines + "</div>" if _trade_lines else ""}
+  </div>
+</div>""", unsafe_allow_html=True)
+
+    # ── Screen Engine Card (the bot's 5m rules, display only) ─────────────────
+    _scr = st.session_state.get("ca_screen")
+    if _scr is not None:
+        if _scr.get("error"):
+            st.markdown(f'<div style="background:#1a1e2a;border:1px solid #2a2e39;border-radius:12px;'
+                        f'padding:12px 18px;margin-bottom:14px;color:#8b949e;font-size:0.8rem;">'
+                        f'<b style="color:#e6edf3;">Bot rules (5m screen engine)</b> — not available: '
+                        f'{_scr["error"]}</div>', unsafe_allow_html=True)
+        else:
+            _sa      = _scr.get("action", "NO_DATA")
+            _sset    = _scr.get("settings", {})
+            _sgrades = ("STRONG", "MODERATE") if _scr.get("grade") == "MODERATE" else ("STRONG",)
+            _strades = any(_sa == f"{g}_{s}" for g in _sgrades for s in ("CE", "PE"))
+            _sc      = ("#00d4aa" if _sa.endswith("_CE") else "#f85149" if _sa.endswith("_PE") else "#8b949e")
+            if _sa.startswith("MODERATE"):
+                _sc = "#ffd700"
+            _sbg     = {"#00d4aa": "rgba(0,212,170,0.10)", "#f85149": "rgba(248,81,73,0.10)",
+                        "#ffd700": "rgba(255,215,0,0.08)"}.get(_sc, "rgba(139,148,158,0.06)")
+            _sside   = _scr.get("side")
+            _sgates  = _scr.get("gates") or {}
+            _gate_txt = {
+                "G1": "5m structure break (BOS / CHoCH) ≤ 6 candles ago, price still beyond it",
+                "G2": "EMA20 vs EMA50, and price vs VWAP",
+                "G3": "ADX ≥ 25 and rising, DI gap ≥ 5",
+                "G4": "RSI 50–72 (CE) / 28–50 (PE)",
+                "G5": "15m trend and RSI confirm",
+                "G6": f"Room ≥ {_sset.get('room_rr', 1.5):g}R to the next level, not within "
+                      f"{_sset.get('near_pct', 0.1):g}% of a level",
+            }
+            _gate_rows = "".join(
+                f'<div style="font-size:0.78rem;color:{"#e6edf3" if _ok else "#8b949e"};margin:2px 0;">'
+                f'{"✅" if _ok else "❌"} <b>{_g}</b> {_gate_txt.get(_g, "")}</div>'
+                for _g, _ok in _sgates.items())
+            _sp = _scr.get("plan") or {}
+            _plan_rows = ""
+            for _lbl, _val, _col in [
+                ("Entry type", _sp.get("entry_type"), "#e6edf3"),
+                ("Entry", _sp.get("entry"), "#e6edf3"),
+                ("Stop (5m close)", _sp.get("stop"), "#f85149"),
+                ("Target", _sp.get("target"), "#3fb950"),
+                ("Risk : Reward", f"1 : {_sp['rr']}" if _sp.get("rr") else None, "#ffd700"),
+                ("Invalidation", _sp.get("invalidation"), "#8b949e"),
+            ]:
+                if _val is not None and _val != "":
+                    _vs = f"{_val:,.1f}" if isinstance(_val, (int, float)) else str(_val)
+                    _plan_rows += (f'<div style="display:flex;justify-content:space-between;padding:3px 0;">'
+                                   f'<span style="color:#6e7681;font-size:0.75rem;">{_lbl}</span>'
+                                   f'<span style="color:{_col};font-size:0.8rem;font-weight:700;">{_vs}</span></div>')
+            _why = "".join(f'<div style="font-size:0.72rem;color:#8b949e;margin:1px 0;">• {_r}</div>'
+                           for _r in (_scr.get("reasoning") or []))
+            _bar = _scr.get("bar")
+            _bar_s = _bar.strftime("%d %b %H:%M") if hasattr(_bar, "strftime") else "—"
+            _head_note = (f'checking the <b>{_sside}</b> side — ' if _sside and not _strades else "") + (
+                _scr.get("failed_reason") or "")
+            _score = _scr.get("score")
+            st.markdown(f"""
+<div style="background:{_sbg};border:2px solid {_sc};border-radius:12px;padding:16px 18px;margin-bottom:14px;">
+  <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px;flex-wrap:wrap;gap:8px;">
+    <div>
+      <span style="font-size:1.5rem;font-weight:900;color:{_sc};letter-spacing:-0.5px;">{_sa.replace("_", " ")}</span>
+      <div style="font-size:0.65rem;color:#6e7681;letter-spacing:1px;text-transform:uppercase;margin-top:2px;">
+        Bot rules · 5m screen engine · {_sym_disp} · {_scr.get("chart_source", "")} chart · candle {_bar_s}
+      </div>
+    </div>
+    <div style="text-align:right;">
+      <div style="font-size:0.6rem;color:#6e7681;text-transform:uppercase;">Score (trades ≥ {_sset.get("strong", 75)})</div>
+      <div style="font-size:1.4rem;font-weight:900;color:{_sc};">{_score if _score is not None else "—"}</div>
+      <div style="font-size:0.68rem;font-weight:700;color:{"#00d4aa" if _strades else "#8b949e"};">
+        {"BOT WOULD TRADE" if _strades else "bot would not trade"}</div>
+    </div>
+  </div>
+  <div style="font-size:0.75rem;color:#8b949e;margin-bottom:10px;">{_head_note}</div>
+  <div style="display:grid;grid-template-columns:1fr{" 1fr" if _plan_rows else ""};gap:16px;">
+    <div>{_gate_rows or '<div style="font-size:0.78rem;color:#8b949e;">No gate check (see the note above)</div>'}{_why}</div>
+    {"<div>" + _plan_rows + "</div>" if _plan_rows else ""}
+  </div>
+  <div style="font-size:0.62rem;color:#6e7681;margin-top:10px;">
+    Same rules and .env settings as chart_bot (room {_sset.get("room_rr", 1.5):g}R, near {_sset.get("near_pct", 0.1):g}%,
+    open-room target {_sset.get("open_target_r", 0):g}R, STRONG ≥ {_sset.get("strong", 75)}) on the last closed 5m candle.
+    Display only — no orders. The card above is the older chart signal.
   </div>
 </div>""", unsafe_allow_html=True)
 
