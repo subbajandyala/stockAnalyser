@@ -119,6 +119,8 @@ _candles.MIN_RANGE_MULT = float(_env_setting("CHART_CANDLE_MIN_MULT") or _candle
 # Candle chart: the index (default), the current-month future (CHART_CANDLE_SOURCE=future)
 # or the ATM CE / PE premium charts (CHART_CANDLE_SOURCE=option)
 _candles.SOURCE = (_env_setting("CHART_CANDLE_SOURCE") or "spot").lower()
+# Option charts: the buy candle's volume must be ≥ this × normal (0 = off)
+_candles.VOL_MULT = float(_env_setting("CHART_OPTION_VOL_MULT") or _candles.VOL_MULT)
 # Lot cap per order (0 = only the balance limits it)
 for _sym in list(_ko.MAX_LOTS):
     _v = _env_setting(f"CHART_MAX_LOTS_{_sym}")
@@ -230,7 +232,9 @@ def _auto_trade_enabled() -> bool:
 _AUTO_TRADE = _auto_trade_enabled()
 print(f"[chart_bot] AUTO_TRADE={'ON' if _AUTO_TRADE else 'OFF (set KITE_AUTO_TRADE=1 in .env to enable)'}"
       + (f" | engine candles on {CANDLE_TF}{' future chart' if _candles.SOURCE == 'future' else ' ATM CE / PE charts' if _candles.SOURCE == 'option' else ''} "
-         f"(≥ {_candles.MIN_RANGE_MULT:g}× avg range) | book at "
+         f"(≥ {_candles.MIN_RANGE_MULT:g}× avg range"
+         + (f", volume ≥ {_candles.VOL_MULT:g}× normal" if _candles.SOURCE == "option" and _candles.VOL_MULT
+            else ", volume off" if _candles.SOURCE == "option" else "") + ") | book at "
          f"+{CANDLE_BOOK_PCT:.0%}" + "".join(f" ({k} +{v:g} pts)" for k, v in CANDLE_BOOK_PTS.items())
          + (f", stop −{CANDLE_SL_PCT:.0%}" if CANDLE_SL_PCT else "")
          + f", exit if not working in {SCALP_MAX_MIN} min | entries until {SIGNAL_CLOSE:%H:%M}, "

@@ -30,6 +30,10 @@ a volatility spike) → no trade. A bearish candle on a chart is the exit signal
 side ("against"). The option candle's low is the stop: it is handed to the order as the
 index level an ATM option (delta 0.5) needs to reach it, so the option stop, its 5–15%
 clamp and the anti-hunt buffer work as before.
+Option charts have real traded volume, so a bullish premium candle also needs volume
+≥ VOL_MULT × the normal volume (median of the last 20 candles, opening candles left out).
+The forming candle is judged on its pace: volume so far ÷ the share of the candle gone
+(a 3m candle 60 s old with 30k traded counts as 90k). Exits don't need volume.
 """
 
 import datetime
@@ -49,6 +53,8 @@ AVG_CANDLES = 20
 # chart_bot sets it from CHART_CANDLE_MIN_MULT.
 MIN_RANGE_MULT = 1.2
 SOURCE = "spot"           # "spot" (the index), "future" (current-month futures) or "option" (ATM CE / PE)
+VOL_MULT = 1.5            # option charts: candle volume ≥ this × normal (0 = off; CHART_OPTION_VOL_MULT)
+_TF_SEC = {"1m": 60, "3m": 180, "5m": 300}
 _INDEX_QUOTE = {"NIFTY": "NSE:NIFTY 50", "BANKNIFTY": "NSE:NIFTY BANK", "SENSEX": "BSE:SENSEX"}
 _LABEL = {
     "strong_bull": "Strong bull candle", "strong_bear": "Strong bear candle",
@@ -148,11 +154,28 @@ def _with_ltp(df: pd.DataFrame, ltp: float | None) -> pd.DataFrame:
     return df
 
 
+def _volume_pace(df: pd.DataFrame, interval: str, now: datetime.datetime) -> tuple[float, float, float]:
+    """(last candle's volume at its current pace, normal volume, ratio)."""
+    if "Volume" not in df or len(df) < 12:
+        return 0.0, 0.0, 0.0
+    d = df.tail(40)
+    prior = d.iloc[:-1]
+    today = d.index[-1].date()
+    keep = ~((prior.index.date == today) & (prior.index.time < OPENING_END))
+    if keep.sum() >= 10:
+        prior = prior[keep]
+    normal = float(prior["Volume"].tail(AVG_CANDLES).median() or 0)
+    tf = _TF_SEC.get(interval, 180)
+    gone = (now - d.index[-1]).total_seconds() / tf
+    vol = float(d["Volume"].iloc[-1]) / min(max(gone, 1 / 6), 1.0)
+    return vol, normal, (vol / normal if normal > 0 else 0.0)
+
+
 def _finish(res: dict, interval: str, now: datetime.datetime) -> dict:
     """Forming flag; no signal from a candle younger than MIN_AGE_SEC."""
     start = res.get("candle_time")
     age = (now - start).total_seconds() if start is not None else 0
-    res["forming"] = age < {"1m": 60, "3m": 180, "5m": 300}.get(interval, 180)
+    res["forming"] = age < _TF_SEC.get(interval, 180)
     if res["signal"] and res["forming"] and age < MIN_AGE_SEC:
         res["text"] += f" — candle only {age:.0f}s old, waiting for its shape"
         res["signal"] = None
@@ -179,18 +202,28 @@ def _scan_options(symbol: str, interval: str, api_key: str, access_token: str,
     keys = {side: f"{ex}:{c['tradingsymbol']}" for side, c in legs.items()}
     q = _quote_ltp(list(keys.values()), api_key, access_token)
     reads = {}
+    vols = {}
     for side, c in legs.items():
         df = fetch_candles(c["instrument_token"], interval, api_key, access_token)
         reads[side] = _finish(read(_with_ltp(df, q.get(keys[side]))), interval, now)
+        vols[side] = _volume_pace(df, interval, now)
     for r in reads.values():                           # on a premium chart "BUY CE" means "premium up"
         r["text"] = r["text"].replace("→ BUY CE", "→ premium up").replace("→ BUY PE", "→ premium down")
     ce, pe = reads["CE"], reads["PE"]
+    for side, r in reads.items():
+        if r["signal"] == "CE" and VOL_MULT:            # bullish premium candle: is the volume behind it?
+            v, normal, ratio = vols[side]
+            r["vol_ratio"] = round(ratio, 2)
+            r["text"] += (f" vol {ratio:.1f}× normal {normal:,.0f}"
+                          + (" ✓" if ratio >= VOL_MULT else f" ✗ needs {VOL_MULT:g}×"))
     up = [s for s in ("CE", "PE") if reads[s]["signal"] == "CE"]        # bullish candle on that premium
     against = [s for s in ("CE", "PE") if reads[s]["signal"] == "PE"]   # bearish candle on that premium
     res = {**(reads[up[0]] if len(up) == 1 else ce), "signal": None, "stop": None}
     res["text"] = (f"{strike} CE {legs['CE']['tradingsymbol']}: {ce['text']} | "
                    f"PE {legs['PE']['tradingsymbol']}: {pe['text']}")
-    if len(up) == 1:
+    if len(up) == 1 and VOL_MULT and reads[up[0]].get("vol_ratio", 0) < VOL_MULT:
+        res["text"] = f"{up[0]} premium up on low volume — no trade [{res['text']}]"
+    elif len(up) == 1:
         side, r = up[0], reads[up[0]]
         prem_dist = r["spot"] - r["stop"]                  # premium from the close down to the candle low
         res.update(signal=side, label=f"{side} premium: {r['label']}",
