@@ -22,6 +22,14 @@ Chart source (chart_bot sets SOURCE from CHART_CANDLE_SOURCE): "spot" (default) 
 the index; "future" reads the current-month NIFTY FUT / SENSEX FUT candles, with the
 future's last price from Kite for the forming candle. A futures reading also carries
 "basis" (future − index now) so the order can work in spot prices.
+
+"option" reads the ATM CE and ATM PE 3m charts of the contract the bot would buy (same
+expiry choice as kite_order): a bullish candle (strong bull / engulfing / hammer) on the
+CE chart → BUY CE, on the PE chart → BUY PE; both at once (premiums jumping together,
+a volatility spike) → no trade. A bearish candle on a chart is the exit signal for that
+side ("against"). The option candle's low is the stop: it is handed to the order as the
+index level an ATM option (delta 0.5) needs to reach it, so the option stop, its 5–15%
+clamp and the anti-hunt buffer work as before.
 """
 
 import datetime
@@ -40,7 +48,7 @@ AVG_CANDLES = 20
 # 1.2 cut whipsaw / chop losses by about two-thirds in the stress test (23 Oct);
 # chart_bot sets it from CHART_CANDLE_MIN_MULT.
 MIN_RANGE_MULT = 1.2
-SOURCE = "spot"           # "spot" (the index) or "future" (current-month futures)
+SOURCE = "spot"           # "spot" (the index), "future" (current-month futures) or "option" (ATM CE / PE)
 _INDEX_QUOTE = {"NIFTY": "NSE:NIFTY 50", "BANKNIFTY": "NSE:NIFTY BANK", "SENSEX": "BSE:SENSEX"}
 _LABEL = {
     "strong_bull": "Strong bull candle", "strong_bear": "Strong bear candle",
@@ -129,10 +137,84 @@ def _live_ltp(token: int) -> float | None:
         return None
 
 
+def _with_ltp(df: pd.DataFrame, ltp: float | None) -> pd.DataFrame:
+    """The forming candle closes at the last price."""
+    if ltp and not df.empty:
+        i = df.index[-1]
+        df = df.copy()
+        df.loc[i, "Close"] = ltp
+        df.loc[i, "High"] = max(df.loc[i, "High"], ltp)
+        df.loc[i, "Low"] = min(df.loc[i, "Low"], ltp)
+    return df
+
+
+def _finish(res: dict, interval: str, now: datetime.datetime) -> dict:
+    """Forming flag; no signal from a candle younger than MIN_AGE_SEC."""
+    start = res.get("candle_time")
+    age = (now - start).total_seconds() if start is not None else 0
+    res["forming"] = age < {"1m": 60, "3m": 180, "5m": 300}.get(interval, 180)
+    if res["signal"] and res["forming"] and age < MIN_AGE_SEC:
+        res["text"] += f" — candle only {age:.0f}s old, waiting for its shape"
+        res["signal"] = None
+    return res
+
+
+def _scan_options(symbol: str, interval: str, api_key: str, access_token: str,
+                  now: datetime.datetime, token: int) -> dict:
+    """ATM CE and ATM PE charts → one reading (see the module docstring)."""
+    from screener import kite_order as _ko
+    idx_key = _INDEX_QUOTE.get(symbol.upper())
+    spot = _live_ltp(token) or _quote_ltp([idx_key], api_key, access_token).get(idx_key)
+    if not spot:
+        return {"error": "no live index price for the ATM strike"}
+    kite = _ko._kite_client(api_key, access_token)
+    strike = _ko._atm_strike(spot, symbol)
+    ex = _ko._EXCHANGE[symbol]
+    legs = {}
+    for side in ("CE", "PE"):
+        c = _ko.option_contract(kite, symbol, strike, side)
+        if not c:
+            return {"error": f"no {symbol} {strike} {side} contract"}
+        legs[side] = c
+    keys = {side: f"{ex}:{c['tradingsymbol']}" for side, c in legs.items()}
+    q = _quote_ltp(list(keys.values()), api_key, access_token)
+    reads = {}
+    for side, c in legs.items():
+        df = fetch_candles(c["instrument_token"], interval, api_key, access_token)
+        reads[side] = _finish(read(_with_ltp(df, q.get(keys[side]))), interval, now)
+    for r in reads.values():                           # on a premium chart "BUY CE" means "premium up"
+        r["text"] = r["text"].replace("→ BUY CE", "→ premium up").replace("→ BUY PE", "→ premium down")
+    ce, pe = reads["CE"], reads["PE"]
+    up = [s for s in ("CE", "PE") if reads[s]["signal"] == "CE"]        # bullish candle on that premium
+    against = [s for s in ("CE", "PE") if reads[s]["signal"] == "PE"]   # bearish candle on that premium
+    res = {**(reads[up[0]] if len(up) == 1 else ce), "signal": None, "stop": None}
+    res["text"] = (f"{strike} CE {legs['CE']['tradingsymbol']}: {ce['text']} | "
+                   f"PE {legs['PE']['tradingsymbol']}: {pe['text']}")
+    if len(up) == 1:
+        side, r = up[0], reads[up[0]]
+        prem_dist = r["spot"] - r["stop"]                  # premium from the close down to the candle low
+        res.update(signal=side, label=f"{side} premium: {r['label']}",
+                   stop=round(spot - 2 * prem_dist if side == "CE" else spot + 2 * prem_dist, 2),
+                   premium=r["spot"], premium_stop=r["stop"], contract=legs[side]["tradingsymbol"])
+        res["text"] = f"BUY {side} — {res['text']}"
+    elif len(up) == 2:
+        res["text"] = f"CE and PE premiums both jumping (volatility spike) — no trade [{res['text']}]"
+    res.update(spot=spot, against=against, error=None, source="option", basis=0.0,
+               forming=ce.get("forming", False), candle_time=ce.get("candle_time"))
+    return res
+
+
 def scan(symbol: str, interval: str, api_key: str, access_token: str,
          now: datetime.datetime | None = None) -> dict:
     """Live: Kite candles + the last price for the forming candle, then read()."""
     basis, source = 0.0, "spot"
+    if SOURCE == "option" and symbol.upper() in ("NIFTY", "SENSEX"):
+        now = now or datetime.datetime.now(_IST)
+        try:
+            token, _ = resolve_token(symbol, api_key, access_token)
+            return _scan_options(symbol.upper(), interval, api_key, access_token, now, token)
+        except Exception as e:
+            return {"error": str(e)}
     try:
         token, _ = resolve_token(symbol, api_key, access_token)
         fut, fut_key = front_future(symbol, api_key, access_token) if SOURCE == "future" else (None, None)
@@ -149,25 +231,14 @@ def scan(symbol: str, interval: str, api_key: str, access_token: str,
         if ltp and spot_now:
             basis = ltp - spot_now
     else:
-        source = "spot" if SOURCE == "spot" else "spot (no futures contract found)"
+        source = ("spot" if SOURCE == "spot" else "spot (no option chart for this index)"
+                  if SOURCE == "option" else "spot (no futures contract found)")
         ltp = _live_ltp(token)
-    if ltp and not df.empty:
-        i = df.index[-1]
-        df = df.copy()
-        df.loc[i, "Close"] = ltp
-        df.loc[i, "High"] = max(df.loc[i, "High"], ltp)
-        df.loc[i, "Low"] = min(df.loc[i, "Low"], ltp)
-    res = read(df)
+    res = read(_with_ltp(df, ltp))
     res["error"] = None
     res["source"], res["basis"] = source, round(basis, 2)
     if fut and not basis and res["signal"]:
         # without both live prices the strike would be picked off the futures price
         res["text"] += " — no live futures / index price for the basis, no trade"
         res["signal"] = None
-    start = res.get("candle_time")
-    age = (now - start).total_seconds() if start is not None else 0
-    res["forming"] = age < {"1m": 60, "3m": 180, "5m": 300}.get(interval, 180)
-    if res["signal"] and res["forming"] and age < MIN_AGE_SEC:
-        res["text"] += f" — candle only {age:.0f}s old, waiting for its shape"
-        res["signal"] = None
-    return res
+    return _finish(res, interval, now)

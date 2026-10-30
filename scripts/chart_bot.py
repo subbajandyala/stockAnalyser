@@ -116,7 +116,8 @@ CANDLE_TF       = _env_setting("CHART_CANDLE_TF") or "3m"
 CANDLE_BOOK_PCT = float(_env_setting("CHART_BOOK_PCT") or 0.20)
 SCALP_MAX_MIN   = int(_env_setting("CHART_SCALP_MAX_MIN") or 6)
 _candles.MIN_RANGE_MULT = float(_env_setting("CHART_CANDLE_MIN_MULT") or _candles.MIN_RANGE_MULT)
-# Candle chart: the index (default) or the current-month future (CHART_CANDLE_SOURCE=future)
+# Candle chart: the index (default), the current-month future (CHART_CANDLE_SOURCE=future)
+# or the ATM CE / PE premium charts (CHART_CANDLE_SOURCE=option)
 _candles.SOURCE = (_env_setting("CHART_CANDLE_SOURCE") or "spot").lower()
 # Lot cap per order (0 = only the balance limits it)
 for _sym in list(_ko.MAX_LOTS):
@@ -228,7 +229,7 @@ def _auto_trade_enabled() -> bool:
 
 _AUTO_TRADE = _auto_trade_enabled()
 print(f"[chart_bot] AUTO_TRADE={'ON' if _AUTO_TRADE else 'OFF (set KITE_AUTO_TRADE=1 in .env to enable)'}"
-      + (f" | engine candles on {CANDLE_TF}{' future chart' if _candles.SOURCE == 'future' else ''} "
+      + (f" | engine candles on {CANDLE_TF}{' future chart' if _candles.SOURCE == 'future' else ' ATM CE / PE charts' if _candles.SOURCE == 'option' else ''} "
          f"(≥ {_candles.MIN_RANGE_MULT:g}× avg range) | book at "
          f"+{CANDLE_BOOK_PCT:.0%}" + "".join(f" ({k} +{v:g} pts)" for k, v in CANDLE_BOOK_PTS.items())
          + (f", stop −{CANDLE_SL_PCT:.0%}" if CANDLE_SL_PCT else "")
@@ -1003,10 +1004,14 @@ def _monitor_positions(
             if not OPPOSITE_EXIT:
                 continue
             cres = _read_candle(symbol, api_key, access_token, now_ist)
-            if not cres.get("error") and cres.get("signal") and cres["signal"] != recorded_direction:
+            flip = bool(cres.get("signal")) and cres.get("signal") != recorded_direction
+            # option chart: a bearish candle on the held side's own premium also exits
+            weak = recorded_direction in (cres.get("against") or [])
+            if not cres.get("error") and (flip or weak):
+                why = (f"{cres['label']} against" if flip
+                       else f"bearish candle on the {recorded_direction} premium —")
                 _exit_bot_position(kite, symbol, state, trade_key,
-                                   f"opposite candle — {cres['label']} against the {recorded_direction} trade",
-                                   ntfy_topic)
+                                   f"opposite candle — {why} the {recorded_direction} trade", ntfy_topic)
             continue
         if state.get(f"{trade_key}:mode") == "book":
             sres = _setups.scan(symbol, SETUP_TF, api_key, access_token)

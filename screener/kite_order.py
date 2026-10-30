@@ -205,7 +205,7 @@ def _option_instruments(kite: KiteConnect, exchange: str) -> pd.DataFrame | None
         _LOG.error(f"instruments({exchange}) failed: {e}")
         return hit[1] if hit else None
     df = df[df["name"].isin(list(LOT_SIZE) + ["BANKNIFTY"]) & df["instrument_type"].isin(["CE", "PE"])]
-    df = df[["name", "instrument_type", "strike", "expiry", "tradingsymbol"]].copy()
+    df = df[["name", "instrument_type", "strike", "expiry", "tradingsymbol", "instrument_token"]].copy()
     _INSTR_CACHE[exchange] = (today, df)
     return df
 
@@ -214,6 +214,12 @@ def _resolve_tradingsymbol(
     kite: KiteConnect, symbol: str, strike: int, opt_type: str
 ) -> str | None:
     """Return the nearest-expiry tradingsymbol for symbol+strike+type, or None."""
+    row = option_contract(kite, symbol, strike, opt_type)
+    return row["tradingsymbol"] if row else None
+
+
+def option_contract(kite: KiteConnect, symbol: str, strike: int, opt_type: str) -> dict | None:
+    """{"tradingsymbol", "instrument_token"} of the contract the bot trades, or None."""
     exchange = _EXCHANGE[symbol]
     df = _option_instruments(kite, exchange)
     if df is None:
@@ -231,10 +237,11 @@ def _resolve_tradingsymbol(
         _LOG.error(f"No instrument found: {symbol} {strike} {opt_type} on {exchange}")
         return None
     # On the symbol's own expiry day, skip the 0DTE contract (wild premium swings)
-    if filtered.iloc[0]["expiry"] == today and len(filtered) > 1:
+    row = filtered.iloc[0]
+    if row["expiry"] == today and len(filtered) > 1:
         _LOG.info(f"{symbol} expiry day — using next weekly {filtered.iloc[1]['expiry']}")
-        return str(filtered.iloc[1]["tradingsymbol"])
-    return str(filtered.iloc[0]["tradingsymbol"])
+        row = filtered.iloc[1]
+    return {"tradingsymbol": str(row["tradingsymbol"]), "instrument_token": int(row["instrument_token"])}
 
 
 def _calc_qty(kite: KiteConnect, symbol: str, ltp: float, capital_fraction: float = 1.0) -> int:
