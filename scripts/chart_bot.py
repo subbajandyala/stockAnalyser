@@ -101,6 +101,12 @@ def _env_setting(name: str) -> str:
     return ""
 
 
+# ma-cpr-scalp: only these indices are scanned, alerted and traded (CHART_SYMBOLS=NIFTY default;
+# CHART_SYMBOLS=NIFTY,SENSEX brings SENSEX back). BANKNIFTY never auto-trades.
+SYMBOLS = [x.strip().upper() for x in (_env_setting("CHART_SYMBOLS") or "NIFTY").split(",") if x.strip()]
+_TRADE_SYMBOLS = {x for x in SYMBOLS if x in ("NIFTY", "SENSEX")}
+
+
 # Signal timeframe (orders come from this chart) and optional confirmation chart.
 # Override in .env, e.g. CHART_PRIMARY_TF=15m and CHART_CONFIRM_TF=5m for the 15 Oct setup.
 PRIMARY_TF = _env_setting("CHART_PRIMARY_TF") or "5m"
@@ -306,6 +312,7 @@ def _auto_trade_enabled() -> bool:
 
 _AUTO_TRADE = _auto_trade_enabled()
 print(f"[chart_bot] AUTO_TRADE={'ON' if _AUTO_TRADE else 'OFF (set KITE_AUTO_TRADE=1 in .env to enable)'}"
+      f" | indices {','.join(SYMBOLS)} (orders: {','.join(sorted(_TRADE_SYMBOLS)) or 'none'})"
       + (f" | signal MA50+CPR on {CANDLE_TF} index (confirmed MA {'/'.join(str(n) for n in sorted(_macpr.ENTRY_MAS))} cross in, "
          f"{'2 closes' if _macpr.EXIT_CONFIRM else '1 close'} past MA{_macpr.EXIT_MA} out"
          + (", CPR filter" if _macpr.CPR_RULE else "")
