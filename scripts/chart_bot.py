@@ -1121,7 +1121,8 @@ def _monitor_positions(
 
 # ── Candles engine scan ──────────────────────────────────────────────────────
 
-_CANDLE_CACHE: dict = {}          # symbol → this scan's reading (filled before the account workers)
+_CANDLE_CACHE: dict = {}
+_DETAIL_SEEN: dict = {}           # symbol → last candle whose status block was printed          # symbol → this scan's reading (filled before the account workers)
 
 
 def _read_candle(symbol: str, api_key: str, access_token: str, now_ist: datetime.datetime) -> dict:
@@ -1144,6 +1145,7 @@ def _v3_exit_reason(kite, symbol: str, state: dict, trade_key: str, direction: s
     if MACPR:
         # the 10 MA exit: 2 closes past it after the entry candle (the entry candle counts)
         sig_t, lc_t = state.get(f"{trade_key}:sig_t"), cres.get("lc_time")
+        _macpr_trade_status(symbol, state, trade_key, direction, cres)
         if sig_t and lc_t is not None and lc_t.strftime("%H:%M") > sig_t and cres.get(f"exit_{direction}"):
             return (f"{_macpr.EXIT_MA} MA exit — {lc_t:%H:%M} close {cres['lc_close']:,.1f} "
                     f"{'below' if direction == 'CE' else 'above'} MA{_macpr.EXIT_MA} "
@@ -1171,6 +1173,34 @@ def _v3_exit_reason(kite, symbol: str, state: dict, trade_key: str, direction: s
         if d["side"] and d["side"] != direction:
             return f"direction turned — {d['text']}"
     return None
+
+
+def _macpr_trade_status(symbol: str, state: dict, trade_key: str, direction: str, cres: dict) -> None:
+    """One line per closed candle for an open MA + CPR trade: index move, best so far, exit line, liquidity."""
+    lc_t = cres.get("lc_time")
+    if lc_t is None or state.get(f"{trade_key}:status_t") == f"{lc_t:%H:%M}":
+        return
+    state[f"{trade_key}:status_t"] = f"{lc_t:%H:%M}"
+    e = float(state.get(f"{trade_key}:entry_close") or 0)
+    if not e:
+        return
+    s = 1 if direction == "CE" else -1
+    c = float(cres.get("lc_close") or 0)
+    best = max(float(state.get(f"{trade_key}:best") or 0),
+               (float(cres.get("high") or c) - e) if s > 0 else (e - float(cres.get("low") or c)))
+    state[f"{trade_key}:best"] = round(best, 1)
+    em = cres.get(f"ma{_macpr.EXIT_MA}")
+    past = em and ((c < em) if s > 0 else (c > em))
+    liq = state.get(f"{trade_key}:liq")
+    if liq and not state.get(f"{trade_key}:liq_hit") and ((s > 0 and best >= float(liq) - e) or (s < 0 and best >= e - float(liq))):
+        state[f"{trade_key}:liq_hit"] = f"{lc_t:%H:%M}"
+    liq_txt = ("" if not liq else f" | liquidity {float(liq):,.0f} REACHED at {state[f'{trade_key}:liq_hit']} (working)"
+               if state.get(f"{trade_key}:liq_hit") else f" | liquidity {float(liq):,.0f} not reached yet")
+    print(f"  [MACPR TRADE] {symbol} {direction} since {state.get(f'{trade_key}:entry_t', '?')} @ {e:,.1f} | "
+          f"{lc_t:%H:%M} close {c:,.1f} ({(c - e) * s:+.1f} index pts, best {best:+.1f}) | "
+          f"MA{_macpr.EXIT_MA} {em:,.1f}: " + ("close PAST it — one more exits" if past and _macpr.EXIT_CONFIRM
+                                                 else "close past it" if past else "holding")
+          + liq_txt)
 
 
 def _v3_gate(symbol: str, sig: str, candle: str, state: dict, today: str,
@@ -1218,7 +1248,12 @@ def _scan_candles(symbols: list[str], state: dict, api_key: str, access_token: s
         sig = res.get("signal")
         print(f"  {'🚀' if sig else '  '} {symbol:10s} | {CANDLE_TF} {'forming' if res.get('forming') else 'closed '} "
               f"| {res['text']}")
-        if res.get("smc") and (sig or log_tick):
+        # ma-cpr-scalp: a full status block once per closed candle (the 30 s scans in between stay one line)
+        if res.get("detail") and _DETAIL_SEEN.get(symbol) != res.get("lc_time"):
+            _DETAIL_SEEN[symbol] = res.get("lc_time")
+            print(f"  ┌─ [MACPR] {symbol} {CANDLE_TF} candle closed")
+            print(res["detail"])
+        elif res.get("smc") and (sig or log_tick):
             print(f"               {res['smc']}")
         view = {**res, "regime": f"{CANDLE_TF} candle", "setup": res.get("pattern"),
                 "reasons": [res["text"]]}
@@ -1293,6 +1328,8 @@ def _scan_candles(symbols: list[str], state: dict, api_key: str, access_token: s
             f"{trade_key}:candle": candle,
             f"{trade_key}:entry_t": now_ist.strftime("%H:%M"),
             f"{trade_key}:mid": res.get("mid"),
+            f"{trade_key}:entry_close": res.get("close") or res.get("spot"),
+            f"{trade_key}:liq": res.get("liq_up") if sig == "CE" else res.get("liq_dn"),
             f"{trade_key}:sig_t": res["candle_time"].strftime("%H:%M") if res.get("candle_time") is not None else "",
         })
         state[f"{today}:{symbol}:n_trades"] = int(state.get(f"{today}:{symbol}:n_trades") or 0) + 1

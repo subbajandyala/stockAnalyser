@@ -114,7 +114,7 @@ def smc_levels(df: pd.DataFrame, close: float, eq_pts: float = 6) -> dict:
     return out
 
 
-def read(df: pd.DataFrame, eq_pts: float = 6) -> dict:
+def _read_core(df: pd.DataFrame, eq_pts: float = 6) -> dict:
     """Read CLOSED candles only. The last row is the confirmation candle, the one before it the signal."""
     out = {"signal": None, "label": "MA50 + CPR", "pattern": None, "range_mult": 0.0,
            "candle_time": None, "mid": None, "text": ""}
@@ -184,6 +184,79 @@ def read(df: pd.DataFrame, eq_pts: float = 6) -> dict:
     out["label"] = f"MA50 cross {'up' if sig == 'CE' else 'down'} (confirmed)"
     out["text"] = base + f" — {sig_txt} → BUY {sig}"
     return out
+
+
+def read(df: pd.DataFrame, eq_pts: float = 6) -> dict:
+    """_read_core() plus out["detail"]: a multi-line status block for the log (one per closed candle)."""
+    out = _read_core(df, eq_pts)
+    if out.get("candle_time") is None or len(df) < MA_SLOW + 3:
+        return out
+    try:
+        out["detail"] = _detail(df, out)
+    except Exception as e:                          # logging only
+        out["detail"] = f"  detail error: {e}"
+    return out
+
+
+def _detail(df: pd.DataFrame, out: dict) -> str:
+    c = df["Close"].astype(float)
+    ma10, ma20, ma50 = (c.rolling(n).mean() for n in (MA_FAST, MA_MID, MA_SLOW))
+    side = (c > ma50).astype(int) * 2 - 1
+    i = len(df) - 1
+    t, close = df.index[i], out["close"]
+    o, h, l = float(df["Open"].iloc[i]), out["high"], out["low"]
+    m10, m20, m50 = out["ma10"], out["ma20"], out["ma50"]
+    col = "bull" if close > o else "bear" if close < o else "doji"
+    lines = [f"  Candle : {t:%H:%M}  O {o:,.1f}  H {h:,.1f}  L {l:,.1f}  C {close:,.1f}  "
+             f"({close - o:+.1f} {col}, range {h - l:.1f}, vs prev close {close - float(c.iloc[i - 1]):+.1f})"]
+    stack = ("10>20>50 bull stack" if m10 > m20 > m50 else "10<20<50 bear stack" if m10 < m20 < m50
+             else "mixed (MAs tangled)")
+    lines.append(f"  MAs    : MA10 {m10:,.1f} ({close - m10:+.1f})  MA20 {m20:,.1f} ({close - m20:+.1f})  "
+                 f"MA50 {m50:,.1f} ({close - m50:+.1f}) | {stack} | spread {max(m10, m20, m50) - min(m10, m20, m50):.1f}")
+    # 50 MA crosses
+    flips = side.ne(side.shift())
+    flips.iloc[0] = False
+    xs = [k for k in range(i, max(0, i - 120), -1) if flips.iloc[k]]
+    last_x = (f"{df.index[xs[0]]:%H:%M} {'up' if side.iloc[xs[0]] > 0 else 'down'} "
+              f"({i - xs[0]} candle{'s' if i - xs[0] != 1 else ''} ago)") if xs else "none in the last 120 candles"
+    n30 = int(flips.iloc[max(1, i - FLIP_LOOKBACK + 1):i + 1].sum())
+    lines.append(f"  50 MA  : price {'ABOVE' if side.iloc[i] > 0 else 'BELOW'} → "
+                 f"{'CE' if side.iloc[i] > 0 else 'PE'} side | last cross {last_x} | "
+                 f"crosses in last 30 min: {n30}" + (" (choppy)" if n30 >= 2 else ""))
+    if out.get("cpr_lo") is not None:
+        lo, hi, piv, w = out["cpr_lo"], out["cpr_hi"], out["cpr_p"], out["cpr_width_pct"]
+        kind = "thin → trend day" if w < THIN_CPR_PCT else "wide → range day" if w > WIDE_CPR_PCT else "normal"
+        c2 = [float(c.iloc[k]) for k in (i - 1, i)]
+        pos = ("2 closes ABOVE → no PE" if all(x > hi for x in c2) else
+               "2 closes BELOW → no CE" if all(x < lo for x in c2) else
+               "above, 1 close only (needs 2)" if close > hi else
+               "below, 1 close only (needs 2)" if close < lo else "INSIDE the CPR")
+        dist = f"+{close - hi:.1f} from top" if close > hi else f"−{lo - close:.1f} from bottom" if close < lo else ""
+        lines.append(f"  CPR    : {lo:,.1f}–{hi:,.1f} pivot {piv:,.1f} ({w:.2f}% {kind}) | {pos}"
+                     + (f" | {dist}" if dist else ""))
+    # what happens next
+    if out.get("signal"):
+        nxt = f"SIGNAL → BUY {out['signal']}"
+    elif flips.iloc[i]:
+        s_ = "CE" if side.iloc[i] > 0 else "PE"
+        nxt = (f"{t:%H:%M} crossed {'up' if s_ == 'CE' else 'down'} — the next candle closing "
+               f"{'above' if s_ == 'CE' else 'below'} MA50 (~{m50:,.0f}) confirms {s_}")
+    else:
+        s_ = "PE" if side.iloc[i] > 0 else "CE"
+        nxt = (f"no setup — a close {'below' if s_ == 'PE' else 'above'} MA50 (~{m50:,.0f}, "
+               f"{abs(close - m50):.0f} pts away) starts a {s_} setup")
+    blocked = out["text"].split(" — ", 1)[1] if " — " in out["text"] else ""
+    if "but" in blocked or "too late" in blocked:
+        nxt = blocked
+    lines.append(f"  Next   : {nxt}")
+    ce_n = sum(float(c.iloc[k]) < float((ma10 if EXIT_MA == MA_FAST else c.rolling(EXIT_MA).mean()).iloc[k]) for k in (i - 1, i))
+    pe_n = sum(float(c.iloc[k]) > float((ma10 if EXIT_MA == MA_FAST else c.rolling(EXIT_MA).mean()).iloc[k]) for k in (i - 1, i))
+    need = 2 if EXIT_CONFIRM else 1
+    lines.append(f"  Exit   : a CE exits on {need} close(s) below MA{EXIT_MA} (now {min(ce_n, need)}/{need}), "
+                 f"a PE on {need} close(s) above it (now {min(pe_n, need)}/{need})")
+    if out.get("smc"):
+        lines.append(f"  {out['smc']}")
+    return "\n".join(lines)
 
 
 def scan(symbol: str, interval: str, api_key: str, access_token: str,
