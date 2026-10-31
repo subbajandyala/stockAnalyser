@@ -128,14 +128,15 @@ _macpr.EXIT_MA = int(_env_setting("CHART_MACPR_EXIT_MA") or 10)
 _macpr.CPR_RULE = (_env_setting("CHART_MACPR_CPR") or "1") != "0"
 _macpr.EXIT_CONFIRM = (_env_setting("CHART_MACPR_EXIT_CONFIRM") or "1") != "0"
 # Monitoring pushes when a closed candle touches / breaks / confirms the 10, 20, 50 MA (no orders).
-# CHART_MA_ALERTS=0 off · CHART_MA_ALERT_MAS=10,20,50 · CHART_MA_ALERT_KINDS=break,confirm,support,reject
+# CHART_MA_ALERTS=0 off · CHART_MA_ALERT_CPR=0 no CPR pushes · CHART_MA_ALERT_MAS=10,20,50 · CHART_MA_ALERT_KINDS=break,confirm,support,reject
 # CHART_MA_ALERT_GAP_MIN=15 (same MA + kind + direction not pushed again within this; 50 MA breaks /
 # confirms always push) · CHART_MA_ALERT_TOPIC
 # (own ntfy topic; default NTFY_TOPIC) · CHART_MA_ALERT_PRIORITY=low (silent; "default" to buzz)
 MA_ALERTS = MACPR and (_env_setting("CHART_MA_ALERTS") or "1") != "0"
 MA_ALERT_MAS = {int(x) for x in (_env_setting("CHART_MA_ALERT_MAS") or "10,20,50").split(",") if x.strip().isdigit()}
 MA_ALERT_KINDS = {x.strip().lower() for x in
-                  (_env_setting("CHART_MA_ALERT_KINDS") or "break,confirm,support,reject").split(",") if x.strip()}
+                  (_env_setting("CHART_MA_ALERT_KINDS") or "break,confirm,support,reject,enter,trap").split(",") if x.strip()}
+MA_ALERT_CPR = (_env_setting("CHART_MA_ALERT_CPR") or "1") != "0"     # CPR break / confirm / trap / touch pushes
 MA_ALERT_GAP_MIN = int(_env_setting("CHART_MA_ALERT_GAP_MIN") or 15)
 MA_ALERT_PRIORITY = _env_setting("CHART_MA_ALERT_PRIORITY") or "low"
 _candles.MIN_RANGE_MULT = float(_env_setting("CHART_CANDLE_MIN_MULT") or _candles.MIN_RANGE_MULT)
@@ -1196,11 +1197,12 @@ def _ma_alert(symbol: str, res: dict, ntfy_topic: str) -> None:
     t = res.get("lc_time")
     evs, keep = res.get("ma_events") or [], []
     for e in evs:
-        if e["ma"] not in MA_ALERT_MAS or e["kind"] not in MA_ALERT_KINDS:
+        if e["kind"] not in MA_ALERT_KINDS or (e["ma"] not in MA_ALERT_MAS if e["ma"] != "CPR" else not MA_ALERT_CPR):
             continue
         k = (symbol, e["ma"], e["kind"], e["above"])      # per direction: a break back the other way still pushes
         last = _MA_ALERT_LAST.get(k)
-        always = e["ma"] == _macpr.MA_SLOW and e["kind"] in ("break", "confirm")   # the trade signal line
+        always = (e["ma"] in (_macpr.MA_SLOW, "CPR")          # the trade signal line and the CPR filter
+                  and e["kind"] in ("break", "confirm", "trap", "enter"))
         if not always and last is not None and t is not None and (t - last).total_seconds() < MA_ALERT_GAP_MIN * 60:
             continue
         _MA_ALERT_LAST[k] = t
@@ -1208,7 +1210,7 @@ def _ma_alert(symbol: str, res: dict, ntfy_topic: str) -> None:
     if not keep:
         return
     close = res.get("close") or 0
-    lines = [f"• {e['text']} — MA{e['ma']} {e['level']:,.1f} ({close - e['level']:+.1f})" for e in keep]
+    lines = [f"• {e['text']} — {e['name']} {e['level']:,.1f} ({close - e['level']:+.1f})" for e in keep]
     print(f"  [MA ALERT] {symbol} {t:%H:%M}: " + " · ".join(e["text"] for e in keep))
     topic = _env_setting("CHART_MA_ALERT_TOPIC") or ntfy_topic
     if not topic:
@@ -1216,6 +1218,7 @@ def _ma_alert(symbol: str, res: dict, ntfy_topic: str) -> None:
     head = keep[0]["text"] + (f" +{len(keep) - 1}" if len(keep) > 1 else "")
     body = (f"{t:%H:%M} close {close:,.1f}\n" + "\n".join(lines)
             + f"\nMA10 {res.get('ma10', 0):,.0f} · MA20 {res.get('ma20', 0):,.0f} · MA50 {res.get('ma50', 0):,.0f}"
+            + (f" · CPR {res['cpr_lo']:,.0f}–{res['cpr_hi']:,.0f}" if res.get("cpr_lo") else "")
             + (f"\n{res['smc']}" if res.get("smc") else ""))
     send_ntfy(f"{symbol} {head}", body, topic, priority=MA_ALERT_PRIORITY)
 

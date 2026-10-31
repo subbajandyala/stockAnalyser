@@ -215,8 +215,54 @@ def ma_events(df: pd.DataFrame) -> list[dict]:
             kind, txt = "reject", f"REJECTED at MA{n} (high {hi:,.1f}, closed below)"
         else:
             continue
-        evs.append({"ma": n, "kind": kind, "text": txt, "level": round(m0, 1), "above": up0})
-    return evs
+        evs.append({"ma": n, "kind": kind, "text": txt, "level": round(m0, 1), "above": up0,
+                    "name": f"MA{n}"})
+    return evs + cpr_events(df)
+
+
+def cpr_events(df: pd.DataFrame) -> list[dict]:
+    """What the last closed candle did at the previous day's CPR (for the monitoring pushes).
+
+    break    close moved above the CPR top / below the CPR bottom
+    enter    close moved back inside the CPR
+    confirm  2nd close beyond the CPR (your rule: a break needs 2 candles)
+    trap     a 1-candle break that closed back inside / through on the next candle
+    support  above the CPR, low touched the top, closed above
+    reject   below the CPR, high touched the bottom, closed below
+    """
+    i = len(df) - 1
+    if i < 3:
+        return []
+    if df.index[i - 2].date() != df.index[i].date():
+        return []                                  # needs 3 of today's candles (no comparing with yesterday)
+    lv = cpr(df, df.index[i].date())
+    if not lv:
+        return []
+    piv, lo, hi = lv
+    c = df["Close"].astype(float)
+    pos = lambda x: 1 if x > hi else -1 if x < lo else 0          # above / below / inside
+    p0, p1, p2 = pos(float(c.iloc[i])), pos(float(c.iloc[i - 1])), pos(float(c.iloc[i - 2]))
+    h0, l0 = float(df["High"].iloc[i]), float(df["Low"].iloc[i])
+    rng = f"CPR {lo:,.1f}–{hi:,.1f}"
+    ev = None
+    if p0 != p1 and p1 != 0 and p1 != p2:
+        ev = ("trap", f"CPR break FAILED — 1 candle {'above' if p1 > 0 else 'below'}, then back "
+                      f"{'inside' if p0 == 0 else 'through'} (trap)", hi if p1 > 0 else lo)
+    elif p0 != p1 and p0 != 0:
+        ev = ("break", f"broke {'ABOVE' if p0 > 0 else 'BELOW'} the CPR ({rng})", hi if p0 > 0 else lo)
+    elif p0 != p1:
+        ev = ("enter", f"back INSIDE the CPR from {'above' if p1 > 0 else 'below'} ({rng})", piv)
+    elif p0 != 0 and p1 != p2:
+        ev = ("confirm", f"CONFIRMED {'above' if p0 > 0 else 'below'} the CPR (2nd close) → "
+                         f"{'no PE' if p0 > 0 else 'no CE'}", hi if p0 > 0 else lo)
+    elif p0 > 0 and l0 <= hi:
+        ev = ("support", f"took SUPPORT at the CPR top {hi:,.1f} (low {l0:,.1f}, closed above)", hi)
+    elif p0 < 0 and h0 >= lo:
+        ev = ("reject", f"REJECTED at the CPR bottom {lo:,.1f} (high {h0:,.1f}, closed below)", lo)
+    if not ev:
+        return []
+    return [{"ma": "CPR", "name": "CPR", "kind": ev[0], "text": ev[1], "level": round(ev[2], 1),
+             "above": p0 > 0}]
 
 
 def read(df: pd.DataFrame, eq_pts: float = 6) -> dict:
