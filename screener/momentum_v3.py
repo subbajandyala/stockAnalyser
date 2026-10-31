@@ -93,8 +93,16 @@ def supertrend_up(df: pd.DataFrame, period: int = 10, mult: float = 3.0) -> bool
     return bool(up)
 
 
+def _same_tz(now: datetime.datetime, idx) -> datetime.datetime:
+    """now in the same timezone style as Kite's candle index (aware vs naive)."""
+    tz = getattr(idx, "tz", None)
+    if tz is None:
+        return now.replace(tzinfo=None) if now.tzinfo else now
+    return now.astimezone(tz) if now.tzinfo else now.replace(tzinfo=tz)
+
+
 def _closed(df: pd.DataFrame, minutes: int, now: datetime.datetime) -> pd.DataFrame:
-    if len(df) and df.index[-1] + pd.Timedelta(minutes=minutes) > now.replace(tzinfo=None):
+    if len(df) and df.index[-1] + pd.Timedelta(minutes=minutes) > _same_tz(now, df.index):
         return df.iloc[:-1]
     return df
 
@@ -142,7 +150,7 @@ def _price_and_range_votes(symbol: str, api_key: str, access_token: str, now: da
     d15 = _closed(fetch_candles(fut, "15m", api_key, access_token), 15, now)
     q = _quote([fut_key], api_key, access_token).get(fut_key, {})
     ltp = float(q.get("last_price") or (d3["Close"].iloc[-1] if len(d3) else 0))
-    today = d3[d3.index.date == now.date()]
+    today = d3[d3.index.date == _same_tz(now, d3.index).date()]
     if today.empty or not ltp:
         return 0, 0, "no candles today", ltp
     tp = (today["High"] + today["Low"] + today["Close"]) / 3

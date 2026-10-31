@@ -1947,7 +1947,7 @@ def preflight(symbols: list[str], state_file: str, notify: bool = False) -> bool
     print(f"[{now_ist:%Y-%m-%d %H:%M IST}] chart_bot preflight — no orders are placed\n")
     add("PASS" if _AUTO_TRADE else "FAIL", "auto-trade", "ON" if _AUTO_TRADE else "OFF — set KITE_AUTO_TRADE=1 in .env")
     if ENGINE == "candles":
-        add("PASS", "rules", f"candles engine on {CANDLE_TF} (forming candle, ≥ {_candles.MIN_RANGE_MULT:g}× avg "
+        add("PASS", "rules", f"candles engine on {CANDLE_TF} ({'closed' if _candles.ON_CLOSE else 'forming'} candle, {_candles.SOURCE} chart, ≥ {_candles.MIN_RANGE_MULT:g}× avg "
                              f"range), book at +{CANDLE_BOOK_PCT:.0%}, "
                              f"exit if not working after {SCALP_MAX_MIN} min, ride "
                              + (f"strong candles ≥ {RIDE_MULT:g}× avg" if RIDE_MULT else "off")
