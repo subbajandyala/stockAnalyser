@@ -39,6 +39,13 @@ CPR_RULE = True           # 2 closes above CPR → no PE; 2 closes below → no 
 EXIT_MA = MA_FAST         # exit line (10 MA); 20 is the slower alternative
 EXIT_CONFIRM = True       # exit needs 2 closes past the exit MA (False: the first close exits)
 THIN_CPR_PCT, WIDE_CPR_PCT = 0.20, 0.40
+# Line targets (your method): at entry mark MA 10 / 20 / 50 and the CPR (bottom, pivot, top).
+# Target = the nearest line AHEAD of price (above for CE, below for PE), at least LEVEL_MIN index
+# points away; stop = the 50 MA the entry crossed. No line ahead ("open sky") → no line target,
+# the 10 MA exit rides it. STOP_ON: "touch" = index trades back to the stop line, "close" = a
+# 3m candle closes beyond it.
+LEVEL_MIN = {"NIFTY": 10.0, "SENSEX": 30.0}
+STOP_ON = "close"        # backtest 23–30 Oct: close +240, touch +111 (MA50 wicks stopped the winners)
 SMC_INFO = True           # show Smart Money levels in the log / push (information only, never gates)
 SMC_BARS = 200            # candles the SMC read looks back over
 EQ_PTS = {"NIFTY": 6, "SENSEX": 20}   # swing highs / lows this close together = equal highs / lows
@@ -184,6 +191,31 @@ def _read_core(df: pd.DataFrame, eq_pts: float = 6) -> dict:
     out["label"] = f"MA50 cross {'up' if sig == 'CE' else 'down'} (confirmed)"
     out["text"] = base + f" — {sig_txt} → BUY {sig}"
     return out
+
+
+def _lines(res: dict) -> list[tuple[str, float]]:
+    out = [(f"MA{n}", res.get(f"ma{n}")) for n in (MA_FAST, MA_MID, MA_SLOW)]
+    if res.get("cpr_lo") is not None:
+        out += [("CPR bottom", res["cpr_lo"]), ("CPR pivot", res["cpr_p"]), ("CPR top", res["cpr_hi"])]
+    return [(n, float(v)) for n, v in out if v is not None]
+
+
+def trade_levels(res: dict, side: str, price: float, min_pts: float = 10.0) -> dict:
+    """Target / stop lines for a trade entered at `price` (index): nearest line ahead, the 50 MA behind."""
+    s = 1 if side == "CE" else -1
+    lines = _lines(res)
+    ahead = [(n, v) for n, v in lines if (v - price) * s >= min_pts]
+    tp = min(ahead, key=lambda z: (z[1] - price) * s) if ahead else (None, None)
+    m50 = float(res["ma50"]) if res.get("ma50") is not None else None
+    if m50 is not None and (price - m50) * s > 0:
+        sl = (f"MA{MA_SLOW}", m50)
+    else:                                          # price already back at / past the 50 MA: nearest line behind
+        behind = [(n, v) for n, v in lines if (price - v) * s > 0]
+        sl = max(behind, key=lambda z: z[1] * s) if behind else (None, None)
+    return {"tp_name": tp[0], "tp": round(tp[1], 2) if tp[1] is not None else None,
+            "tp_pts": round((tp[1] - price) * s, 1) if tp[1] is not None else None,
+            "sl_name": sl[0], "sl": round(sl[1], 2) if sl[1] is not None else None,
+            "sl_pts": round((price - sl[1]) * s, 1) if sl[1] is not None else None}
 
 
 def ma_events(df: pd.DataFrame) -> list[dict]:
@@ -334,6 +366,10 @@ def _detail(df: pd.DataFrame, out: dict) -> str:
     need = 2 if EXIT_CONFIRM else 1
     lines.append(f"  Exit   : a CE exits on {need} close(s) below MA{EXIT_MA} (now {min(ce_n, need)}/{need}), "
                  f"a PE on {need} close(s) above it (now {min(pe_n, need)}/{need})")
+    above = sorted((v, n) for n, v in _lines(out) if v > close)
+    below = sorted(((v, n) for n, v in _lines(out) if v < close), reverse=True)
+    lines.append("  Lines  : above " + (", ".join(f"{n} {v:,.0f} (+{v - close:.0f})" for v, n in above) or "none (open sky)")
+                 + " | below " + (", ".join(f"{n} {v:,.0f} (−{close - v:.0f})" for v, n in below) or "none"))
     if out.get("smc"):
         lines.append(f"  {out['smc']}")
     return "\n".join(lines)
@@ -356,6 +392,7 @@ def scan(symbol: str, interval: str, api_key: str, access_token: str,
         closed = df.iloc[:-1]                      # drop the forming candle
     res = read(closed, EQ_PTS.get(symbol.upper(), 6))
     res.update({"error": None, "forming": False, "source": "spot", "basis": 0.0})
+    res["ltp"] = _live_ltp(token) or (float(df["Close"].iloc[-1]) if len(df) else None)   # for line exits
     if res["signal"]:
         age = (now - res["candle_time"]).total_seconds() - tf      # seconds since it closed
         if age > CLOSE_WINDOW_SEC:

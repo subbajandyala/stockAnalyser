@@ -132,6 +132,17 @@ _macpr.EXIT_CONFIRM = (_env_setting("CHART_MACPR_EXIT_CONFIRM") or "1") != "0"
 # CHART_MA_ALERT_GAP_MIN=15 (same MA + kind + direction not pushed again within this; 50 MA breaks /
 # confirms always push) · CHART_MA_ALERT_TOPIC
 # (own ntfy topic; default NTFY_TOPIC) · CHART_MA_ALERT_PRIORITY=low (silent; "default" to buzz)
+# Line targets: target = nearest MA / CPR line ahead, stop = the crossed 50 MA (watched on the index
+# every scan). CHART_MACPR_LINE_EXITS=0 → back to the 10 MA exit + fixed GTT. The GTT sits
+# CHART_MACPR_GTT_MULT × the line distance away (premium ≈ delta 0.5) as a backstop only.
+MACPR_LINES = MACPR and (_env_setting("CHART_MACPR_LINE_EXITS") or "1") != "0"
+for _sym in ("NIFTY", "SENSEX"):
+    _macpr.LEVEL_MIN[_sym] = float(_env_setting(f"CHART_MACPR_MIN_PTS_{_sym}") or _macpr.LEVEL_MIN[_sym])
+_macpr.STOP_ON = (_env_setting("CHART_MACPR_STOP_ON") or "close").lower()
+MACPR_GTT_MULT = float(_env_setting("CHART_MACPR_GTT_MULT") or 1.5)
+MACPR_DELTA = float(_env_setting("CHART_MACPR_DELTA") or 0.5)
+# 10 MA exit with line targets: "open" = only when no line ahead (default), "always", "off"
+MACPR_MA10 = (_env_setting("CHART_MACPR_MA10_EXIT") or "open").lower()
 MA_ALERTS = MACPR and (_env_setting("CHART_MA_ALERTS") or "1") != "0"
 MA_ALERT_MAS = {int(x) for x in (_env_setting("CHART_MA_ALERT_MAS") or "10,20,50").split(",") if x.strip().isdigit()}
 MA_ALERT_KINDS = {x.strip().lower() for x in
@@ -294,7 +305,9 @@ _AUTO_TRADE = _auto_trade_enabled()
 print(f"[chart_bot] AUTO_TRADE={'ON' if _AUTO_TRADE else 'OFF (set KITE_AUTO_TRADE=1 in .env to enable)'}"
       + (f" | signal MA50+CPR on {CANDLE_TF} index (confirmed 50 MA cross in, "
          f"{'2 closes' if _macpr.EXIT_CONFIRM else '1 close'} past MA{_macpr.EXIT_MA} out"
-         + (", CPR filter" if _macpr.CPR_RULE else "") + (f", skip after {_macpr.FLIPS} flips/30m" if _macpr.FLIPS else "")
+         + (", CPR filter" if _macpr.CPR_RULE else "")
+         + (f"; target = next MA/CPR line ahead (≥ {_macpr.LEVEL_MIN['NIFTY']:g}/{_macpr.LEVEL_MIN['SENSEX']:g} pts), "
+            f"stop = crossed 50 MA ({_macpr.STOP_ON}), 10 MA exit {MACPR_MA10}" if MACPR_LINES else "") + (f", skip after {_macpr.FLIPS} flips/30m" if _macpr.FLIPS else "")
          + ")" if MACPR else "")
       + (f" | engine candles on {CANDLE_TF}{' future chart' if _candles.SOURCE == 'future' else ''} "
          f"(≥ {_candles.MIN_RANGE_MULT:g}× avg range) | book at "
@@ -1158,7 +1171,20 @@ def _v3_exit_reason(kite, symbol: str, state: dict, trade_key: str, direction: s
         # the 10 MA exit: 2 closes past it after the entry candle (the entry candle counts)
         sig_t, lc_t = state.get(f"{trade_key}:sig_t"), cres.get("lc_time")
         _macpr_trade_status(symbol, state, trade_key, direction, cres)
-        if sig_t and lc_t is not None and lc_t.strftime("%H:%M") > sig_t and cres.get(f"exit_{direction}"):
+        tp, sl = state.get(f"{trade_key}:idx_tp"), state.get(f"{trade_key}:idx_sl")
+        if MACPR_LINES and (tp or sl):
+            px = cres.get("ltp")
+            s = 1 if direction == "CE" else -1
+            if tp and px and (float(px) - float(tp)) * s >= 0:
+                return (f"target — index {float(px):,.1f} reached {state.get(f'{trade_key}:idx_tp_name')} "
+                        f"{float(tp):,.1f}")
+            new_close = lc_t is not None and sig_t and lc_t.strftime("%H:%M") > sig_t
+            ref = px if _macpr.STOP_ON == "touch" else (cres.get("lc_close") if new_close else None)
+            if sl and ref and (float(sl) - float(ref)) * s >= 0:
+                return (f"stop — index {float(ref):,.1f} back to {state.get(f'{trade_key}:idx_sl_name')} "
+                        f"{float(sl):,.1f}" + (" (candle close)" if _macpr.STOP_ON != "touch" else ""))
+        ma10_on = (not MACPR_LINES or MACPR_MA10 == "always" or (MACPR_MA10 == "open" and not tp))
+        if ma10_on and sig_t and lc_t is not None and lc_t.strftime("%H:%M") > sig_t and cres.get(f"exit_{direction}"):
             return (f"{_macpr.EXIT_MA} MA exit — {lc_t:%H:%M} close {cres['lc_close']:,.1f} "
                     f"{'below' if direction == 'CE' else 'above'} MA{_macpr.EXIT_MA} "
                     f"{cres.get('ma' + str(_macpr.EXIT_MA), '')}" + (" (confirmed)" if _macpr.EXIT_CONFIRM else ""))
@@ -1244,6 +1270,12 @@ def _macpr_trade_status(symbol: str, state: dict, trade_key: str, direction: str
         state[f"{trade_key}:liq_hit"] = f"{lc_t:%H:%M}"
     liq_txt = ("" if not liq else f" | liquidity {float(liq):,.0f} REACHED at {state[f'{trade_key}:liq_hit']} (working)"
                if state.get(f"{trade_key}:liq_hit") else f" | liquidity {float(liq):,.0f} not reached yet")
+    tp, sl = state.get(f"{trade_key}:idx_tp"), state.get(f"{trade_key}:idx_sl")
+    if tp or sl:
+        liq_txt += (f" | target {state.get(f'{trade_key}:idx_tp_name')} {float(tp):,.1f} ({(float(tp) - c) * s:+.0f} to go)"
+                    if tp else " | target: open sky (10 MA exit)") \
+                   + (f" | stop {state.get(f'{trade_key}:idx_sl_name')} {float(sl):,.1f} ({(c - float(sl)) * s:+.0f} room)"
+                      if sl else "")
     print(f"  [MACPR TRADE] {symbol} {direction} since {state.get(f'{trade_key}:entry_t', '?')} @ {e:,.1f} | "
           f"{lc_t:%H:%M} close {c:,.1f} ({(c - e) * s:+.1f} index pts, best {best:+.1f}) | "
           f"MA{_macpr.EXIT_MA} {em:,.1f}: " + ("close PAST it — one more exits" if past and _macpr.EXIT_CONFIRM
@@ -1344,10 +1376,19 @@ def _scan_candles(symbols: list[str], state: dict, api_key: str, access_token: s
         print(f"  [AUTO-TRADE] {res['label']} → {sig} on {symbol} @ {res['spot']:.0f} (candle stop {res['stop']})"
               + (f" {res.get('source')}, basis {basis:+.1f} → spot {spot:.0f}" if basis else "")
               + (f" — RIDE ({res['range_mult']:.1f}× avg candle)" if ride else ""))
+        lv = {}
+        book_pts, sl_pts = CANDLE_BOOK_PTS.get(symbol), CANDLE_SL_PTS.get(symbol)
+        if MACPR_LINES:
+            lv = _macpr.trade_levels(res, sig, spot, _macpr.LEVEL_MIN.get(symbol, 10.0))
+            # GTT backstop in premium points, wider than the lines (the bot exits on the index first)
+            book_pts = round(MACPR_DELTA * lv["tp_pts"] * MACPR_GTT_MULT, 1) if lv["tp_pts"] else None
+            sl_pts = round(max(MACPR_DELTA * lv["sl_pts"] * MACPR_GTT_MULT, 2.0), 1) if lv["sl_pts"] else None
+            print(f"  [LINES] {symbol} {sig} @ {spot:,.1f}: target "
+                  + (f"{lv['tp_name']} {lv['tp']:,.1f} (+{lv['tp_pts']:.0f} pts)" if lv["tp"] else "none ahead — open sky, 10 MA rides it")
+                  + " | stop " + (f"{lv['sl_name']} {lv['sl']:,.1f} (−{lv['sl_pts']:.0f} pts, {_macpr.STOP_ON})" if lv["sl"] else "none"))
         trade = _place_order(symbol, sig, spot, api_key, access_token,
                              chart_sl=res["stop"] - basis, book_pct=CANDLE_BOOK_PCT, ride=ride,
-                             book_pts=CANDLE_BOOK_PTS.get(symbol), sl_pct=CANDLE_SL_PCT,
-                             sl_pts=CANDLE_SL_PTS.get(symbol))
+                             book_pts=book_pts, sl_pct=CANDLE_SL_PCT, sl_pts=sl_pts)
         if "error" in trade:
             print(f"  [AUTO-TRADE] NOT PLACED — {trade['error']}")
             if ntfy_topic and state.get(f"{today}:{symbol}:err_candle") != candle:
@@ -1377,7 +1418,9 @@ def _scan_candles(symbols: list[str], state: dict, api_key: str, access_token: s
             f"{trade_key}:candle": candle,
             f"{trade_key}:entry_t": now_ist.strftime("%H:%M"),
             f"{trade_key}:mid": res.get("mid"),
-            f"{trade_key}:entry_close": res.get("close") or res.get("spot"),
+            f"{trade_key}:entry_close": spot if MACPR_LINES else (res.get("close") or res.get("spot")),
+            f"{trade_key}:idx_tp": lv.get("tp"), f"{trade_key}:idx_tp_name": lv.get("tp_name"),
+            f"{trade_key}:idx_sl": lv.get("sl"), f"{trade_key}:idx_sl_name": lv.get("sl_name"),
             f"{trade_key}:liq": res.get("liq_up") if sig == "CE" else res.get("liq_dn"),
             f"{trade_key}:sig_t": res["candle_time"].strftime("%H:%M") if res.get("candle_time") is not None else "",
         })
@@ -1401,9 +1444,14 @@ def _scan_candles(symbols: list[str], state: dict, api_key: str, access_token: s
                        f"Exit  : {plan}\n"
                        f"SL    : ₹{sl}" + (f" (entry − {CANDLE_SL_PTS[symbol]:g} pts)" if symbol in CANDLE_SL_PTS
                                              else f" (−{CANDLE_SL_PCT:.0%})" if CANDLE_SL_PCT else "") + "\n"
+                       + (f"Index target: {lv['tp_name']} {lv['tp']:,.1f} (+{lv['tp_pts']:.0f} pts)\n" if lv.get("tp")
+                          else "Index target: none ahead (open sky) — 10 MA exit\n" if lv else "")
+                       + (f"Index stop  : {lv['sl_name']} {lv['sl']:,.1f} (−{lv['sl_pts']:.0f} pts)\n" if lv.get("sl") else "")
                        + (f"{res['smc']}\n" if res.get("smc") else "")
-                       + (f"Exit: 2 closes past the {_macpr.EXIT_MA} MA" if MACPR else
-                          f"Exit early: opposite candle, or not working after {SCALP_MAX_MIN} min")),
+                       + ((("Exit: index reaches the target or the stop line"
+                           + (f", or 2 closes past the {_macpr.EXIT_MA} MA" if MACPR_MA10 == "always" or not lv.get("tp") else ""))
+                          if MACPR_LINES else f"Exit: 2 closes past the {_macpr.EXIT_MA} MA") if MACPR else (
+                          f"Exit early: opposite candle, or not working after {SCALP_MAX_MIN} min"))),
                       ntfy_topic)
         if not _acct().get("primary", True):
             continue          # the Sharekhan copy follows account 1 only
