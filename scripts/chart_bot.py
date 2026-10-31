@@ -1218,6 +1218,8 @@ def _scan_candles(symbols: list[str], state: dict, api_key: str, access_token: s
         sig = res.get("signal")
         print(f"  {'🚀' if sig else '  '} {symbol:10s} | {CANDLE_TF} {'forming' if res.get('forming') else 'closed '} "
               f"| {res['text']}")
+        if res.get("smc") and (sig or log_tick):
+            print(f"               {res['smc']}")
         view = {**res, "regime": f"{CANDLE_TF} candle", "setup": res.get("pattern"),
                 "reasons": [res["text"]]}
         if not sig:
@@ -1313,6 +1315,7 @@ def _scan_candles(symbols: list[str], state: dict, api_key: str, access_token: s
                        f"Exit  : {plan}\n"
                        f"SL    : ₹{sl}" + (f" (entry − {CANDLE_SL_PTS[symbol]:g} pts)" if symbol in CANDLE_SL_PTS
                                              else f" (−{CANDLE_SL_PCT:.0%})" if CANDLE_SL_PCT else "") + "\n"
+                       + (f"{res['smc']}\n" if res.get("smc") else "")
                        + (f"Exit: 2 closes past the {_macpr.EXIT_MA} MA" if MACPR else
                           f"Exit early: opposite candle, or not working after {SCALP_MAX_MIN} min")),
                       ntfy_topic)

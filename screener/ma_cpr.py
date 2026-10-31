@@ -28,7 +28,8 @@ import datetime
 
 import pandas as pd
 
-from screener.chart_analysis import _IST, fetch_candles, resolve_token
+from screener.chart_analysis import (_IST, detect_fvg, detect_order_blocks, detect_structure,
+                                     detect_swings, fetch_candles, resolve_token)
 
 MA_FAST, MA_MID, MA_SLOW = 10, 20, 50
 CLOSE_WINDOW_SEC = 90     # enter only this soon after the confirmation candle closed
@@ -38,6 +39,9 @@ CPR_RULE = True           # 2 closes above CPR → no PE; 2 closes below → no 
 EXIT_MA = MA_FAST         # exit line (10 MA); 20 is the slower alternative
 EXIT_CONFIRM = True       # exit needs 2 closes past the exit MA (False: the first close exits)
 THIN_CPR_PCT, WIDE_CPR_PCT = 0.20, 0.40
+SMC_INFO = True           # show Smart Money levels in the log / push (information only, never gates)
+SMC_BARS = 200            # candles the SMC read looks back over
+EQ_PTS = {"NIFTY": 6, "SENSEX": 20}   # swing highs / lows this close together = equal highs / lows
 
 _TF_SEC = {"1m": 60, "3m": 180, "5m": 300}
 
@@ -63,7 +67,54 @@ def cpr(df: pd.DataFrame, day: datetime.date) -> tuple[float, float, float] | No
     return round(piv, 2), round(min(bc, tc), 2), round(max(bc, tc), 2)
 
 
-def read(df: pd.DataFrame) -> dict:
+def smc_levels(df: pd.DataFrame, close: float, eq_pts: float = 6) -> dict:
+    """Smart Money levels from screener/chart_analysis (same code as the Chart tab), information only.
+
+    Liquidity = the nearest swing high above / swing low below that price has not taken yet;
+    equal highs / lows (within eq_pts) mark a liquidity pool. Also the last BOS / CHoCH and the
+    nearest untested order block / unfilled fair value gap on each side. 23–30 Oct: every MA + CPR
+    trade that reached its liquidity level made money — a sign the trade is working, not a target.
+    """
+    h = df.tail(SMC_BARS)
+    s = detect_swings(h, 3).iloc[:-3]            # a swing needs 3 candles after it → confirmed ones only
+    if len(s) < 20:
+        return {}
+    s, ev = detect_structure(s)
+    obs, fvgs = detect_order_blocks(s, ev), detect_fvg(h)
+    hi, lo = h["High"], h["Low"]
+    up = sorted(float(v) for t, v in s["High"][s["swing_high"]].items()
+                if v > close and hi[hi.index > t].max() <= v)
+    dn = sorted((float(v) for t, v in s["Low"][s["swing_low"]].items()
+                 if v < close and lo[lo.index > t].min() >= v), reverse=True)
+    pool = lambda xs: next((round((a + b) / 2, 1) for a, b in zip(xs, xs[1:]) if abs(a - b) <= eq_pts), None)
+    zones = [(z["type"], "OB", z["bottom"], z["top"]) for z in obs] + \
+            [(z["type"], "FVG", z["bottom"], z["top"]) for z in fvgs]
+    above = min((z for z in zones if z[0] == "bearish" and z[2] > close), key=lambda z: z[2], default=None)
+    below = max((z for z in zones if z[0] == "bullish" and z[3] < close), key=lambda z: z[3], default=None)
+    last = ev[-1]["type"].replace("_", " ") if ev else ""
+    out = {"liq_up": up[0] if up else None, "liq_dn": dn[0] if dn else None,
+           "eq_highs": pool(up), "eq_lows": pool(dn), "structure": last,
+           "zone_up": above, "zone_dn": below}
+    parts = []
+    if out["liq_up"]:
+        parts.append(f"liq above {out['liq_up']:,.0f} (+{out['liq_up'] - close:.0f})")
+    if out["liq_dn"]:
+        parts.append(f"liq below {out['liq_dn']:,.0f} (−{close - out['liq_dn']:.0f})")
+    if out["eq_highs"]:
+        parts.append(f"equal highs {out['eq_highs']:,.0f}")
+    if out["eq_lows"]:
+        parts.append(f"equal lows {out['eq_lows']:,.0f}")
+    if above:
+        parts.append(f"bear {above[1]} {above[2]:,.0f}–{above[3]:,.0f}")
+    if below:
+        parts.append(f"bull {below[1]} {below[2]:,.0f}–{below[3]:,.0f}")
+    if last:
+        parts.append(f"last {last}")
+    out["text"] = "SMC: " + ", ".join(parts) if parts else ""
+    return out
+
+
+def read(df: pd.DataFrame, eq_pts: float = 6) -> dict:
     """Read CLOSED candles only. The last row is the confirmation candle, the one before it the signal."""
     out = {"signal": None, "label": "MA50 + CPR", "pattern": None, "range_mult": 0.0,
            "candle_time": None, "mid": None, "text": ""}
@@ -101,6 +152,13 @@ def read(df: pd.DataFrame) -> dict:
         lv_txt = f" | CPR {lo:,.0f}–{hi:,.0f} ({kind} {w:.2f}%), {where}"
     base = (f"{t:%H:%M} close {close:,.1f} | MA10 {out['ma10']:,.0f} MA20 {out['ma20']:,.0f} "
             f"MA50 {out['ma50']:,.0f}{lv_txt}")
+    if SMC_INFO:
+        try:
+            sm = smc_levels(df, close, eq_pts)
+            out["smc"] = sm.get("text", "")
+            out["liq_up"], out["liq_dn"] = sm.get("liq_up"), sm.get("liq_dn")
+        except Exception as e:                      # information only — never blocks a trade
+            out["smc"] = f"SMC: error {e}"
     crossed = side.iloc[j] != side.iloc[j - 1]
     if not crossed or side.iloc[i] != side.iloc[j]:
         where = "above" if side.iloc[i] > 0 else "below"
@@ -143,7 +201,7 @@ def scan(symbol: str, interval: str, api_key: str, access_token: str,
     closed = df
     if len(df) and (now - df.index[-1]).total_seconds() < tf:
         closed = df.iloc[:-1]                      # drop the forming candle
-    res = read(closed)
+    res = read(closed, EQ_PTS.get(symbol.upper(), 6))
     res.update({"error": None, "forming": False, "source": "spot", "basis": 0.0})
     if res["signal"]:
         age = (now - res["candle_time"]).total_seconds() - tf      # seconds since it closed
