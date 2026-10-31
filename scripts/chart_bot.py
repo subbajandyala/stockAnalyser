@@ -146,7 +146,7 @@ V3_SKIP_FIRST  = _flag("CHART_SKIP_FIRST", True)     # skip the first signal of 
 V3_FADE_EXIT   = _flag("CHART_FADE_EXIT", True)      # sell when a candle closes back past the trigger's middle
 V3_DIR_EXIT    = _flag("CHART_DIR_EXIT", True)       # sell when the direction votes turn against the trade
 V3_ROOM        = _flag("CHART_ROOM", True)           # no CE right under the call-OI wall / PE above the put wall
-V3_MAX_TRADES  = int(_num("CHART_MAX_TRADES", 8))    # per index per day (0 = no cap)
+V3_MAX_TRADES  = int(_num("CHART_MAX_TRADES", 0))    # per index per day (0 = no cap, the default)
 V3_PAUSE_AFTER = int(_num("CHART_PAUSE_AFTER", 2))   # losses in a row on an index → pause it
 V3_PAUSE_MIN   = int(_num("CHART_PAUSE_MIN", 30))
 V3_NO_FLIP_MIN = int(_num("CHART_NO_FLIP_MIN", 30))  # after a loss, the other side waits this long
