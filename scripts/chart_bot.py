@@ -54,6 +54,7 @@ from screener.chart_analysis import analyze_chart
 from screener import candles as _candles
 from screener import kite_order as _ko
 from screener import setups as _setups
+from screener import ma_cpr as _macpr
 from screener import momentum_v3 as _v3
 from screener.kite_order import (
     BOOK_PROFIT_PCT,
@@ -114,8 +115,18 @@ SETUP_TF = _env_setting("CHART_SETUP_TF") or "3m"
 # hammer-type candle → buy that side; book the position at +CANDLE_BOOK_PCT;
 # exit early on an opposite candle or when it isn't working after SCALP_MAX_MIN.
 CANDLE_TF       = _env_setting("CHART_CANDLE_TF") or "3m"
-CANDLE_BOOK_PCT = float(_env_setting("CHART_BOOK_PCT") or 0.10)      # used where no points booking is set
-SCALP_MAX_MIN   = int(_env_setting("CHART_SCALP_MAX_MIN") or 12)     # momentum-v3: 12 min (6 cut winners, none bled)
+# ma-cpr-scalp: the trade signal. "macpr" (default) = the manual MA50 + CPR method
+# (screener/ma_cpr.py): confirmed 50 MA cross in, confirmed 10 MA close out, no fixed
+# points target, no time exit. "candles" = the scalp-points candle engine.
+SIGNAL  = (_env_setting("CHART_SIGNAL") or "macpr").lower()
+MACPR   = SIGNAL == "macpr"
+CANDLE_BOOK_PCT = float(_env_setting("CHART_BOOK_PCT") or (0.60 if MACPR else 0.10))   # macpr: far target, the 10 MA exits
+# macpr: no time exit (winners ran 30–80 min); 0 in .env also means off
+SCALP_MAX_MIN   = int(_env_setting("CHART_SCALP_MAX_MIN") or (0 if MACPR else 12)) or 10_000
+_macpr.FLIPS = int(_env_setting("CHART_MACPR_FLIPS") or 0)
+_macpr.EXIT_MA = int(_env_setting("CHART_MACPR_EXIT_MA") or 10)
+_macpr.CPR_RULE = (_env_setting("CHART_MACPR_CPR") or "1") != "0"
+_macpr.EXIT_CONFIRM = (_env_setting("CHART_MACPR_EXIT_CONFIRM") or "1") != "0"
 _candles.MIN_RANGE_MULT = float(_env_setting("CHART_CANDLE_MIN_MULT") or _candles.MIN_RANGE_MULT)
 # Candle chart: the index (default) or the current-month future (CHART_CANDLE_SOURCE=future)
 _candles.SOURCE = (_env_setting("CHART_CANDLE_SOURCE") or "spot").lower()   # scalp-points: index chart (as the 27–28 Oct scalps)
@@ -142,14 +153,14 @@ _candles.ON_CLOSE = _flag("CHART_ENTRY_ON_CLOSE", False)   # scalp-points: the f
 _candles.VOL_MULT = _num("CHART_VOL_MULT", 0)                # scalp-points: no volume gate
 _candles.CHASE_RANGE = _num("CHART_CHASE_RANGE", 0.25)
 V3_DIRECTION   = _flag("CHART_DIRECTION", False)      # trade only the side 2 of 3 votes allow
-V3_SKIP_FIRST  = _flag("CHART_SKIP_FIRST", True)     # skip the first signal of the day per index
-V3_FADE_EXIT   = _flag("CHART_FADE_EXIT", True)      # sell when a candle closes back past the trigger's middle
+V3_SKIP_FIRST  = _flag("CHART_SKIP_FIRST", not MACPR)     # skip the first signal of the day per index
+V3_FADE_EXIT   = _flag("CHART_FADE_EXIT", not MACPR)      # sell when a candle closes back past the trigger's middle
 V3_DIR_EXIT    = _flag("CHART_DIR_EXIT", False)       # sell when the direction votes turn against the trade
 V3_ROOM        = _flag("CHART_ROOM", False)           # no CE right under the call-OI wall / PE above the put wall
 V3_MAX_TRADES  = int(_num("CHART_MAX_TRADES", 0))    # per index per day (0 = no cap, the default)
 V3_PAUSE_AFTER = int(_num("CHART_PAUSE_AFTER", 0))   # losses in a row on an index → pause it
 V3_PAUSE_MIN   = int(_num("CHART_PAUSE_MIN", 30))
-V3_NO_FLIP_MIN = int(_num("CHART_NO_FLIP_MIN", 15))  # after a loss, the other side waits this long
+V3_NO_FLIP_MIN = int(_num("CHART_NO_FLIP_MIN", 0 if MACPR else 15))  # after a loss, the other side waits this long
 _v3.MIN_VOTES = int(_num("CHART_DIR_MIN_VOTES", 2))
 _v3.OI_MIN_PCT = _num("CHART_OI_MIN_PCT", 0.02)
 _v3.OI_LOOKBACK_MIN = int(_num("CHART_OI_LOOKBACK_MIN", 30))
@@ -163,7 +174,7 @@ for _sym in list(_ko.MAX_LOTS):
 # Ride mode: a strong bull / bear candle at least this many times the average range
 # is not sold at +CANDLE_BOOK_PCT — the stop moves to entry +RIDE_LOCK_PCT there and
 # trails 12% below the peak premium. 0 = off (every trade books at the target).
-RIDE_MULT = float(_env_setting("CHART_RIDE_MULT") or 2.0)
+RIDE_MULT = float(_env_setting("CHART_RIDE_MULT") or (0 if MACPR else 2.0))
 # The lock must sit below the booking level, or the stop would land on the price itself:
 # half of it, at most +10% (book 20% → +10%, book 10% → +5%).
 RIDE_LOCK_PCT = float(_env_setting("CHART_RIDE_LOCK_PCT") or min(0.10, CANDLE_BOOK_PCT / 2))
@@ -179,10 +190,12 @@ except ValueError:
 # a new signal is taken while the earlier ones run, if the money allows. 1 = one at a time.
 MAX_OPEN_PER_INDEX = max(1, int(_env_setting("CHART_MAX_OPEN_PER_INDEX") or 1))
 # CHART_OPPOSITE_EXIT=0: an opposite candle no longer closes a trade (only stop, target, square-off)
-OPPOSITE_EXIT = _env_setting("CHART_OPPOSITE_EXIT") != "0"
+OPPOSITE_EXIT = (_env_setting("CHART_OPPOSITE_EXIT") or ("0" if MACPR else "1")) != "0"
 # scalp-points: book NIFTY +10 / SENSEX +30 premium points, stop NIFTY −12 / SENSEX −36
 CANDLE_BOOK_PTS, CANDLE_SL_PTS = {}, {}
-for _sym, _bk, _sl in (("NIFTY", 10, 12), ("SENSEX", 30, 36)):
+# macpr: no points booking / points stop by default — the 10 MA exits, the GTT keeps −20% / +60%
+for _sym, _bk, _sl in (("NIFTY", 0 if MACPR else 10, 0 if MACPR else 12),
+                       ("SENSEX", 0 if MACPR else 30, 0 if MACPR else 36)):
     _v = _num(f"CHART_BOOK_PTS_{_sym}", _bk)
     if _v > 0:
         CANDLE_BOOK_PTS[_sym] = _v
@@ -267,12 +280,17 @@ def _auto_trade_enabled() -> bool:
 
 _AUTO_TRADE = _auto_trade_enabled()
 print(f"[chart_bot] AUTO_TRADE={'ON' if _AUTO_TRADE else 'OFF (set KITE_AUTO_TRADE=1 in .env to enable)'}"
+      + (f" | signal MA50+CPR on {CANDLE_TF} index (confirmed 50 MA cross in, "
+         f"{'2 closes' if _macpr.EXIT_CONFIRM else '1 close'} past MA{_macpr.EXIT_MA} out"
+         + (", CPR filter" if _macpr.CPR_RULE else "") + (f", skip after {_macpr.FLIPS} flips/30m" if _macpr.FLIPS else "")
+         + ")" if MACPR else "")
       + (f" | engine candles on {CANDLE_TF}{' future chart' if _candles.SOURCE == 'future' else ''} "
          f"(≥ {_candles.MIN_RANGE_MULT:g}× avg range) | book at "
          f"+{CANDLE_BOOK_PCT:.0%}" + "".join(f" ({k} +{v:g} pts)" for k, v in CANDLE_BOOK_PTS.items())
          + "".join(f" (stop {k} −{v:g} pts)" for k, v in CANDLE_SL_PTS.items())
          + (f", stop −{CANDLE_SL_PCT:.0%}" if CANDLE_SL_PCT and len(CANDLE_SL_PTS) < 2 else "")
-         + f", exit if not working in {SCALP_MAX_MIN} min | entries until {SIGNAL_CLOSE:%H:%M}, "
+         + (", no time exit" if SCALP_MAX_MIN >= 10_000 else f", exit if not working in {SCALP_MAX_MIN} min")
+         + f" | entries until {SIGNAL_CLOSE:%H:%M}, "
          f"square-off {SQUARE_OFF_TIME:%H:%M}" + (" + cancel orders" if CANCEL_AT_SQUARE_OFF else "")
          + ("" if OPPOSITE_EXIT else ", no opposite-candle exit")
          + (f", up to {MAX_OPEN_PER_INDEX} trades per index" if MAX_OPEN_PER_INDEX > 1 else "")
@@ -1108,7 +1126,8 @@ _CANDLE_CACHE: dict = {}          # symbol → this scan's reading (filled befor
 
 def _read_candle(symbol: str, api_key: str, access_token: str, now_ist: datetime.datetime) -> dict:
     if symbol not in _CANDLE_CACHE:
-        _CANDLE_CACHE[symbol] = _candles.scan(symbol, CANDLE_TF, api_key, access_token, now=now_ist)
+        scan = _macpr.scan if MACPR else _candles.scan
+        _CANDLE_CACHE[symbol] = scan(symbol, CANDLE_TF, api_key, access_token, now=now_ist)
     return _CANDLE_CACHE[symbol]
 
 
@@ -1122,6 +1141,15 @@ def _v3_exit_reason(kite, symbol: str, state: dict, trade_key: str, direction: s
     cres = _read_candle(symbol, api_key, access_token, now_ist)
     if cres.get("error"):
         return None
+    if MACPR:
+        # the 10 MA exit: 2 closes past it after the entry candle (the entry candle counts)
+        sig_t, lc_t = state.get(f"{trade_key}:sig_t"), cres.get("lc_time")
+        if sig_t and lc_t is not None and lc_t.strftime("%H:%M") > sig_t and cres.get(f"exit_{direction}"):
+            return (f"{_macpr.EXIT_MA} MA exit — {lc_t:%H:%M} close {cres['lc_close']:,.1f} "
+                    f"{'below' if direction == 'CE' else 'above'} MA{_macpr.EXIT_MA} "
+                    f"{cres.get('ma' + str(_macpr.EXIT_MA), '')}" + (" (confirmed)" if _macpr.EXIT_CONFIRM else ""))
+        if not (V3_FADE_EXIT or OPPOSITE_EXIT or V3_DIR_EXIT):
+            return None
     trailing = bool(state.get(f"{trade_key}:trailing"))
     # 1. Momentum faded: a candle after the trigger closed back past the trigger's middle
     mid, sig_t, lc_t = state.get(f"{trade_key}:mid"), state.get(f"{trade_key}:sig_t"), cres.get("lc_time")
@@ -1285,7 +1313,8 @@ def _scan_candles(symbols: list[str], state: dict, api_key: str, access_token: s
                        f"Exit  : {plan}\n"
                        f"SL    : ₹{sl}" + (f" (entry − {CANDLE_SL_PTS[symbol]:g} pts)" if symbol in CANDLE_SL_PTS
                                              else f" (−{CANDLE_SL_PCT:.0%})" if CANDLE_SL_PCT else "") + "\n"
-                       f"Exit early: opposite candle, or not working after {SCALP_MAX_MIN} min"),
+                       + (f"Exit: 2 closes past the {_macpr.EXIT_MA} MA" if MACPR else
+                          f"Exit early: opposite candle, or not working after {SCALP_MAX_MIN} min")),
                       ntfy_topic)
         if not _acct().get("primary", True):
             continue          # the Sharekhan copy follows account 1 only
@@ -2005,7 +2034,7 @@ def preflight(symbols: list[str], state_file: str, notify: bool = False) -> bool
         add("PASS", f"{sym} chart", f"{len(df)} candles, last {last:%d-%b %H:%M}, {vol}; "
                                     f"now {v['verdict']} {v['score']:+d} R:R {v.get('rr')}")
         if ENGINE == "candles":
-            cres = _candles.scan(sym, CANDLE_TF, api_key, access_token)
+            cres = (_macpr if MACPR else _candles).scan(sym, CANDLE_TF, api_key, access_token)
             add("FAIL" if cres.get("error") else "PASS", f"{sym} candle", cres.get("error") or
                 f"{cres.get('source')} chart" + (f" (basis {cres['basis']:+.1f})" if cres.get("basis") else "")
                 + f": {cres['text']}")
