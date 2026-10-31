@@ -54,6 +54,7 @@ from screener.chart_analysis import analyze_chart
 from screener import candles as _candles
 from screener import kite_order as _ko
 from screener import setups as _setups
+from screener import momentum_v3 as _v3
 from screener.kite_order import (
     BOOK_PROFIT_PCT,
     LOT_SIZE,
@@ -113,16 +114,52 @@ SETUP_TF = _env_setting("CHART_SETUP_TF") or "3m"
 # hammer-type candle → buy that side; book the position at +CANDLE_BOOK_PCT;
 # exit early on an opposite candle or when it isn't working after SCALP_MAX_MIN.
 CANDLE_TF       = _env_setting("CHART_CANDLE_TF") or "3m"
-CANDLE_BOOK_PCT = float(_env_setting("CHART_BOOK_PCT") or 0.20)
-SCALP_MAX_MIN   = int(_env_setting("CHART_SCALP_MAX_MIN") or 6)
+CANDLE_BOOK_PCT = float(_env_setting("CHART_BOOK_PCT") or 0.10)      # momentum-v3: +10% (best in the tradebooks)
+SCALP_MAX_MIN   = int(_env_setting("CHART_SCALP_MAX_MIN") or 12)     # momentum-v3: 12 min (6 cut winners, none bled)
 _candles.MIN_RANGE_MULT = float(_env_setting("CHART_CANDLE_MIN_MULT") or _candles.MIN_RANGE_MULT)
 # Candle chart: the index (default) or the current-month future (CHART_CANDLE_SOURCE=future)
-_candles.SOURCE = (_env_setting("CHART_CANDLE_SOURCE") or "spot").lower()
+_candles.SOURCE = (_env_setting("CHART_CANDLE_SOURCE") or "future").lower()   # momentum-v3: futures chart
+
+
+def _flag(name: str, default: bool) -> bool:
+    v = _env_setting(name).strip()
+    return default if v == "" else v not in ("0", "false", "off", "no")
+
+
+def _num(name: str, default: float) -> float:
+    try:
+        return float(_env_setting(name) or default)
+    except ValueError:
+        return default
+
+
+# ── Momentum v3 (see screener/momentum_v3.py) — every rule switchable in .env ─────────
+# Trigger: strong / engulfing candles only, traded when the candle CLOSES (not 60 s into it),
+# with futures volume ≥ CHART_VOL_MULT × normal, never chasing a price that already ran.
+_candles.PATTERNS = (None if _env_setting("CHART_PATTERNS").strip().lower() == "all"
+                     else {"strong_bull", "strong_bear", "bull_engulf", "bear_engulf"})
+_candles.ON_CLOSE = _flag("CHART_ENTRY_ON_CLOSE", True)
+_candles.VOL_MULT = _num("CHART_VOL_MULT", 1.5)
+_candles.CHASE_RANGE = _num("CHART_CHASE_RANGE", 0.25)
+V3_DIRECTION   = _flag("CHART_DIRECTION", True)      # trade only the side 2 of 3 votes allow
+V3_SKIP_FIRST  = _flag("CHART_SKIP_FIRST", True)     # skip the first signal of the day per index
+V3_FADE_EXIT   = _flag("CHART_FADE_EXIT", True)      # sell when a candle closes back past the trigger's middle
+V3_DIR_EXIT    = _flag("CHART_DIR_EXIT", True)       # sell when the direction votes turn against the trade
+V3_ROOM        = _flag("CHART_ROOM", True)           # no CE right under the call-OI wall / PE above the put wall
+V3_MAX_TRADES  = int(_num("CHART_MAX_TRADES", 8))    # per index per day (0 = no cap)
+V3_PAUSE_AFTER = int(_num("CHART_PAUSE_AFTER", 2))   # losses in a row on an index → pause it
+V3_PAUSE_MIN   = int(_num("CHART_PAUSE_MIN", 30))
+V3_NO_FLIP_MIN = int(_num("CHART_NO_FLIP_MIN", 30))  # after a loss, the other side waits this long
+_v3.MIN_VOTES = int(_num("CHART_DIR_MIN_VOTES", 2))
+_v3.OI_MIN_PCT = _num("CHART_OI_MIN_PCT", 0.02)
+_v3.OI_LOOKBACK_MIN = int(_num("CHART_OI_LOOKBACK_MIN", 30))
+_v3.ROOM_PCT = _num("CHART_ROOM_PCT", 0.0025)
+_v3.VIX_CRUSH_PCT = _num("CHART_VIX_CRUSH_PCT", 0.0)
+_v3.EVENT_DAYS = {d.strip() for d in _env_setting("CHART_EVENT_DAYS").split(",") if d.strip()}
 # Lot cap per order (0 = only the balance limits it)
 for _sym in list(_ko.MAX_LOTS):
     _v = _env_setting(f"CHART_MAX_LOTS_{_sym}")
-    if _v.strip().isdigit():
-        _ko.MAX_LOTS[_sym] = int(_v)
+    _ko.MAX_LOTS[_sym] = int(_v) if _v.strip().isdigit() else 1    # momentum-v3: 1 lot unless .env says otherwise
 # Ride mode: a strong bull / bear candle at least this many times the average range
 # is not sold at +CANDLE_BOOK_PCT — the stop moves to entry +RIDE_LOCK_PCT there and
 # trails 12% below the peak premium. 0 = off (every trade books at the target).
@@ -134,8 +171,8 @@ RIDE_LOCK_PCT = float(_env_setting("CHART_RIDE_LOCK_PCT") or min(0.10, CANDLE_BO
 # entry + ₹10); replaces CHART_BOOK_PCT for that index. A ride trade's lock is then
 # half the points (entry + ₹5). Empty / 0 = use the percentage.
 # Fixed stop: CHART_SL_PCT=0.10 → stop at entry −10% instead of the candle stop (0 = candle stop)
-try:
-    CANDLE_SL_PCT = float(_env_setting("CHART_SL_PCT") or 0) or None
+try:   # momentum-v3: a −20% disaster stop; the fade / time / direction exits do the real work
+    CANDLE_SL_PCT = float(_env_setting("CHART_SL_PCT") or 0.20) or None
 except ValueError:
     CANDLE_SL_PCT = None
 # CHART_MAX_OPEN_PER_INDEX=3: up to 3 bot trades on one index at once (each its own GTT);
@@ -178,8 +215,9 @@ def _hhmm_setting(name: str, default: datetime.time) -> datetime.time:
 
 
 # Clean signal window: no new signals outside 9:30–15:00 IST (CHART_LAST_ENTRY=14:40 ends it earlier)
-SIGNAL_OPEN  = datetime.time(9, 30)
-SIGNAL_CLOSE = _hhmm_setting("CHART_LAST_ENTRY", datetime.time(15, 0))
+SIGNAL_OPEN  = _hhmm_setting("CHART_FIRST_ENTRY", datetime.time(9, 45))    # momentum-v3: 9:45
+SIGNAL_CLOSE = _hhmm_setting("CHART_LAST_ENTRY", datetime.time(14, 30))    # momentum-v3: 14:30
+_v3.EXPIRY_CUTOFF = _hhmm_setting("CHART_EXPIRY_CUTOFF", datetime.time(13, 0))
 # Open bot trades are sold at square-off (CHART_SQUARE_OFF=15:00 moves it)
 SQUARE_OFF_TIME = _hhmm_setting("CHART_SQUARE_OFF", datetime.time(15, 15))
 # CHART_CANCEL_AT_SQUARE_OFF=1: from square-off on, also cancel every open NIFTY / SENSEX
@@ -236,6 +274,16 @@ print(f"[chart_bot] AUTO_TRADE={'ON' if _AUTO_TRADE else 'OFF (set KITE_AUTO_TRA
          f"square-off {SQUARE_OFF_TIME:%H:%M}" + (" + cancel orders" if CANCEL_AT_SQUARE_OFF else "")
          + ("" if OPPOSITE_EXIT else ", no opposite-candle exit")
          + (f", up to {MAX_OPEN_PER_INDEX} trades per index" if MAX_OPEN_PER_INDEX > 1 else "")
+         + " | v3: " + ", ".join(x for x in (
+             "close-entry" if _candles.ON_CLOSE else "forming-entry",
+             f"vol ≥ {_candles.VOL_MULT:g}×" if _candles.VOL_MULT else "",
+             f"direction {_v3.MIN_VOTES}/3" if V3_DIRECTION else "no direction filter",
+             "skip 1st signal" if V3_SKIP_FIRST else "", "fade exit" if V3_FADE_EXIT else "",
+             "direction exit" if V3_DIR_EXIT else "", "OI room" if V3_ROOM else "",
+             f"max {V3_MAX_TRADES}/index" if V3_MAX_TRADES else "",
+             f"pause {V3_PAUSE_MIN}m after {V3_PAUSE_AFTER} losses" if V3_PAUSE_AFTER else "",
+             f"no flip {V3_NO_FLIP_MIN}m" if V3_NO_FLIP_MIN else "",
+             f"expiry stop {_v3.EXPIRY_CUTOFF:%H:%M}") if x)
          + " | ride "
          + (f"strong candles ≥ {RIDE_MULT:g}× avg (lock +{RIDE_LOCK_PCT:.0%})" if RIDE_MULT else "off")
          + " | max lots " + ", ".join(f"{k} {v or 'no cap'}" for k, v in _ko.MAX_LOTS.items())
@@ -966,6 +1014,20 @@ def _monitor_positions(
                 loss_key = f"{today}:{symbol}:losses:{closed_dir}"
                 n_losses = int(state.get(loss_key) or 0) + 1
                 state[loss_key] = n_losses
+            # Momentum v3: losses in a row pause the index; a loss blocks the other side for a while
+            if pnl is not None:
+                streak_key = f"{today}:{symbol}:loss_streak"
+                streak = int(state.get(streak_key) or 0) + 1 if lost else 0
+                state[streak_key] = streak
+                if lost:
+                    state[f"{today}:{symbol}:last_loss_dir"] = closed_dir
+                    state[f"{today}:{symbol}:last_loss_t"] = now_ist.strftime("%H:%M")
+                if lost and V3_PAUSE_AFTER and streak >= V3_PAUSE_AFTER:
+                    state[f"{today}:{symbol}:pause_until"] = (
+                        now_ist + datetime.timedelta(minutes=V3_PAUSE_MIN)).strftime("%H:%M")
+                    state[streak_key] = 0
+                    print(f"  [V3] {symbol}: {V3_PAUSE_AFTER} losses in a row — paused until "
+                          f"{state[f'{today}:{symbol}:pause_until']}")
             # Remove any leftover GTT so it can't sell an option we no longer hold
             if bot_ts:
                 _clear_slot_gtts(kite, symbol, state, trade_key, bot_ts, ntfy_topic)
@@ -1000,13 +1062,10 @@ def _monitor_positions(
         if not recorded_direction:
             continue
         if state.get(f"{trade_key}:mode") in ("scalp", "ride"):
-            if not OPPOSITE_EXIT:
-                continue
-            cres = _read_candle(symbol, api_key, access_token, now_ist)
-            if not cres.get("error") and cres.get("signal") and cres["signal"] != recorded_direction:
-                _exit_bot_position(kite, symbol, state, trade_key,
-                                   f"opposite candle — {cres['label']} against the {recorded_direction} trade",
-                                   ntfy_topic)
+            why = _v3_exit_reason(kite, symbol, state, trade_key, recorded_direction,
+                                  api_key, access_token, now_ist)
+            if why:
+                _exit_bot_position(kite, symbol, state, trade_key, why, ntfy_topic)
             continue
         if state.get(f"{trade_key}:mode") == "book":
             sres = _setups.scan(symbol, SETUP_TF, api_key, access_token)
@@ -1051,6 +1110,69 @@ def _read_candle(symbol: str, api_key: str, access_token: str, now_ist: datetime
     return _CANDLE_CACHE[symbol]
 
 
+_BULL_PATTERNS = {"strong_bull", "bull_engulf", "hammer"}
+_BEAR_PATTERNS = {"strong_bear", "bear_engulf", "shooting_star"}
+
+
+def _v3_exit_reason(kite, symbol: str, state: dict, trade_key: str, direction: str,
+                    api_key: str, access_token: str, now_ist: datetime.datetime) -> str | None:
+    """Early exits for an open candle trade (the GTT handles target / disaster stop)."""
+    cres = _read_candle(symbol, api_key, access_token, now_ist)
+    if cres.get("error"):
+        return None
+    trailing = bool(state.get(f"{trade_key}:trailing"))
+    # 1. Momentum faded: a candle after the trigger closed back past the trigger's middle
+    mid, sig_t, lc_t = state.get(f"{trade_key}:mid"), state.get(f"{trade_key}:sig_t"), cres.get("lc_time")
+    if V3_FADE_EXIT and not trailing and mid and sig_t and lc_t is not None and lc_t.strftime("%H:%M") > sig_t:
+        c = float(cres.get("lc_close") or 0)
+        if c and ((direction == "CE" and c < float(mid)) or (direction == "PE" and c > float(mid))):
+            return f"momentum faded — candle closed {c:,.1f} back past the trigger's middle {float(mid):,.1f}"
+    # 2. An opposite momentum candle (sell only — no flip; the other side needs its own signal)
+    pat = cres.get("pattern")
+    against = (direction == "CE" and pat in _BEAR_PATTERNS) or (direction == "PE" and pat in _BULL_PATTERNS)
+    big = cres.get("range_mult", 0) >= _candles.MIN_RANGE_MULT
+    if OPPOSITE_EXIT and against and big and pat in (_candles.PATTERNS or (_BULL_PATTERNS | _BEAR_PATTERNS)):
+        return f"opposite candle — {pat.replace('_', ' ')} against the {direction} trade"
+    # 3. The direction votes turned against the trade
+    if V3_DIR_EXIT and not trailing:
+        d = _v3.direction(kite, symbol, api_key, access_token, now_ist)
+        if d["side"] and d["side"] != direction:
+            return f"direction turned — {d['text']}"
+    return None
+
+
+def _v3_gate(symbol: str, sig: str, candle: str, state: dict, today: str,
+             api_key: str, access_token: str, now_ist: datetime.datetime) -> str | None:
+    """Momentum v3 checks before a candle may be traded; the reason it may not, or None."""
+    kite = _kite(api_key, access_token)
+    day = _v3.day_block(kite, symbol, now_ist)
+    if day:
+        return day
+    if V3_MAX_TRADES and int(state.get(f"{today}:{symbol}:n_trades") or 0) >= V3_MAX_TRADES:
+        return f"{V3_MAX_TRADES} trades on {symbol} today"
+    until = state.get(f"{today}:{symbol}:pause_until")
+    if until and now_ist.strftime("%H:%M") < until:
+        return f"paused after {V3_PAUSE_AFTER} losses until {until}"
+    ld, lt = state.get(f"{today}:{symbol}:last_loss_dir"), state.get(f"{today}:{symbol}:last_loss_t")
+    if V3_NO_FLIP_MIN and ld and ld != sig and lt and _minutes_between(lt, now_ist) < V3_NO_FLIP_MIN:
+        return f"no flip: {ld} lost at {lt}, {sig} waits {V3_NO_FLIP_MIN} min"
+    if V3_DIRECTION or V3_ROOM:
+        d = _v3.direction(kite, symbol, api_key, access_token, now_ist)
+        if V3_DIRECTION and d["side"] != sig:
+            return f"direction {d['text']}"
+        if V3_ROOM:
+            room = _v3.room_block(d, sig)
+            if room:
+                return room
+    if V3_SKIP_FIRST:
+        first = state.get(f"{today}:{symbol}:first_seen")
+        if not first:
+            state[f"{today}:{symbol}:first_seen"] = first = candle
+        if first == candle:
+            return "first signal of the day on this index"
+    return None
+
+
 def _scan_candles(symbols: list[str], state: dict, api_key: str, access_token: str,
                   ntfy_topic: str, now_ist: datetime.datetime) -> None:
     """Read the forming candle; a strong candle on a flat index → buy that side."""
@@ -1079,6 +1201,13 @@ def _scan_candles(symbols: list[str], state: dict, api_key: str, access_token: s
         trade_key = next(k for k in _slot_keys(today, symbol) if k not in busy)
         if candle == state.get(f"{today}:{symbol}:lost_candle"):
             print(f"         [{symbol}] already lost on this candle — waiting for the next one")
+            continue
+        why_not = _v3_gate(symbol, sig, candle, state, today, api_key, access_token, now_ist)
+        if why_not:
+            print(f"         [{symbol}] {sig} skipped — {why_not}")
+            if state.get(f"{today}:{symbol}:v3_skip_logged") != candle:
+                state[f"{today}:{symbol}:v3_skip_logged"] = candle
+                _append_chart_log(today, _setup_log_entry(now_ist, symbol, view, f"skipped: {why_not}"))
             continue
         auto = _acct().get("auto_trade", _AUTO_TRADE)
         if not (auto and symbol in _TRADE_SYMBOLS):
@@ -1128,7 +1257,10 @@ def _scan_candles(symbols: list[str], state: dict, api_key: str, access_token: s
                                       else RIDE_LOCK_PCT),
             f"{trade_key}:candle": candle,
             f"{trade_key}:entry_t": now_ist.strftime("%H:%M"),
+            f"{trade_key}:mid": res.get("mid"),
+            f"{trade_key}:sig_t": res["candle_time"].strftime("%H:%M") if res.get("candle_time") is not None else "",
         })
+        state[f"{today}:{symbol}:n_trades"] = int(state.get(f"{today}:{symbol}:n_trades") or 0) + 1
         state[symbol] = f"{today}:{symbol}:{sig}:{res['label']}"
         entry, sl, tgt = trade["entry_price"], trade["sl"], trade["target"]
         t1 = trade.get("t1", tgt)
@@ -1323,6 +1455,32 @@ def _prepare_state(state: dict, today: str) -> None:
         print(f"  [STATE] Pruned {len(stale)} entries from previous days")
 
 
+_UNTRACKED_CHECKED: set = set()
+
+
+def _check_untracked(kite, state: dict, acct: dict, topic: str) -> None:
+    """Once per bot start: warn about open NIFTY / SENSEX options the bot isn't managing
+    (e.g. left behind by a restart or a branch switch — no fade / time exit runs on them)."""
+    who = acct.get("name") or "main"
+    if who in _UNTRACKED_CHECKED:
+        return
+    _UNTRACKED_CHECKED.add(who)
+    try:
+        net = kite.positions().get("net", [])
+    except Exception as e:
+        print(f"  [V3] position check failed — {e}")
+        return
+    tracked = {v for k, v in state.items() if k.endswith(":ts") and v}
+    loose = [p for p in net if p.get("exchange") in ("NFO", "BFO") and int(p.get("quantity") or 0) > 0
+             and str(p.get("tradingsymbol", "")).startswith(("NIFTY", "SENSEX"))
+             and p["tradingsymbol"] not in tracked]
+    for p in loose:
+        msg = f"{p['tradingsymbol']} qty {p['quantity']} is open but not managed by the bot (manual, or left by a restart)"
+        print(f"  [V3] ⚠️ {msg}")
+        if topic:
+            send_ntfy("⚠️ Chart Bot: untracked position", msg + ". Manage it in Kite.", topic, priority="high")
+
+
 def _account_pass(acct: dict, symbols: list[str], state_file: str, now_ist: datetime.datetime,
                   force: bool) -> None:
     """One account's turn: manage its open trades, then enter on this scan's candles."""
@@ -1331,6 +1489,7 @@ def _account_pass(acct: dict, symbols: list[str], state_file: str, now_ist: date
     _prepare_state(state, now_ist.strftime("%Y-%m-%d"))
     key, tok, topic = acct["api_key"], acct["access_token"], acct["ntfy"]
     _monitor_positions(symbols, state, key, tok, topic, now_ist)
+    _check_untracked(_kite(key, tok), state, acct, topic)
     _save_state(path, state)
     if CANCEL_AT_SQUARE_OFF and now_ist.time() >= SQUARE_OFF_TIME:
         _square_off_cleanup(_kite(key, tok), state, now_ist.strftime("%Y-%m-%d"), topic)
@@ -1398,6 +1557,17 @@ def scan_once(symbols: list[str], state_file: str, force: bool = False) -> None:
         _CANDLE_CACHE.clear()
         for sym in symbols:
             _read_candle(sym, api_key, access_token, now_ist)
+        # Momentum v3: refresh the direction votes every few minutes (keeps the OI history whole)
+        if V3_DIRECTION or V3_ROOM:
+            for sym in [x for x in symbols if x in ("NIFTY", "SENSEX")]:
+                fresh = _v3._CACHE.get(sym, (None,))[0] != (now_ist.strftime("%Y-%m-%d %H"),
+                                                           now_ist.minute // _v3.REFRESH_MIN)
+                try:
+                    d = _v3.direction(_kite(api_key, access_token), sym, api_key, access_token, now_ist)
+                    if fresh:
+                        print(f"  [DIR] {sym:7s} {d['text']}")
+                except Exception as e:
+                    print(f"  [DIR] {sym}: {e}")
         _run_accounts(ready, symbols, state_file, now_ist, force)
         print("Done.")
         return
@@ -1833,6 +2003,14 @@ def preflight(symbols: list[str], state_file: str, notify: bool = False) -> bool
             add("FAIL" if cres.get("error") else "PASS", f"{sym} candle", cres.get("error") or
                 f"{cres.get('source')} chart" + (f" (basis {cres['basis']:+.1f})" if cres.get("basis") else "")
                 + f": {cres['text']}")
+            if sym in ("NIFTY", "SENSEX") and (V3_DIRECTION or V3_ROOM):
+                try:
+                    dres = _v3.direction(_kite(api_key, access_token), sym, api_key, access_token,
+                                         datetime.datetime.now(_IST))
+                    add("PASS" if not dres["text"].startswith("direction error") else "WARN",
+                        f"{sym} direction", dres["text"])
+                except Exception as e:
+                    add("WARN", f"{sym} direction", str(e))
         if ENGINE == "setups":
             sres = _setups.scan(sym, SETUP_TF, api_key, access_token)
             if sres.get("error"):

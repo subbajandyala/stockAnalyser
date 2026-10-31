@@ -41,6 +41,12 @@ AVG_CANDLES = 20
 # chart_bot sets it from CHART_CANDLE_MIN_MULT.
 MIN_RANGE_MULT = 1.2
 SOURCE = "spot"           # "spot" (the index) or "future" (current-month futures)
+# Momentum v3 (chart_bot sets these from .env):
+PATTERNS = None           # set of patterns that may trade (None = all); v3: strong + engulfing only
+ON_CLOSE = False          # True: trade the candle that just CLOSED (within CLOSE_WINDOW_SEC), not the forming one
+CLOSE_WINDOW_SEC = 90     # a closed candle older than this is stale — no entry on it any more
+CHASE_RANGE = 0.25        # skip when price already ran this share of the candle's range past its close
+VOL_MULT = 0.0            # closed candle volume ≥ this × normal (median of 20, opening left out); 0 = off
 _INDEX_QUOTE = {"NIFTY": "NSE:NIFTY 50", "BANKNIFTY": "NSE:NIFTY BANK", "SENSEX": "BSE:SENSEX"}
 _LABEL = {
     "strong_bull": "Strong bull candle", "strong_bear": "Strong bear candle",
@@ -103,8 +109,13 @@ def read(df: pd.DataFrame) -> dict:
     if not pattern:
         res["text"] = f"mixed candle (body {body:+.1f}, range {rng:.1f}, close at {pos:.0%} of range)"
         return res
+    if PATTERNS is not None and pattern not in PATTERNS:
+        res["text"] = f"{_LABEL[pattern]} — not a traded pattern"
+        res["pattern"] = pattern
+        return res
     side = "CE" if pattern in ("bull_engulf", "strong_bull", "hammer") else "PE"
-    res.update(signal=side, pattern=pattern, label=_LABEL[pattern], stop=round(l if side == "CE" else h, 2))
+    res.update(signal=side, pattern=pattern, label=_LABEL[pattern], stop=round(l if side == "CE" else h, 2),
+               mid=round((h + l) / 2, 2), close=cl, high=h, low=l)
     res["text"] = (f"{_LABEL[pattern]} → BUY {side} (O {o:,.1f} H {h:,.1f} L {l:,.1f} C {cl:,.1f}, "
                    f"range {rng:.1f} = {rng / avg:.1f}× avg {avg:.1f})")
     return res
@@ -129,6 +140,56 @@ def _live_ltp(token: int) -> float | None:
         return None
 
 
+def _volume_ratio(d: pd.DataFrame) -> float:
+    """Last candle's volume ÷ the normal volume (median of the 20 before it, opening left out)."""
+    if "Volume" not in d or len(d) < 12 or float(d["Volume"].iloc[-1]) <= 0:
+        return 0.0
+    prior = d.iloc[:-1]
+    today = d.index[-1].date()
+    keep = ~((prior.index.date == today) & (prior.index.time < OPENING_END))
+    if keep.sum() >= 10:
+        prior = prior[keep]
+    normal = float(prior["Volume"].tail(AVG_CANDLES).median() or 0)
+    return float(d["Volume"].iloc[-1]) / normal if normal > 0 else 0.0
+
+
+def _read_closed(df: pd.DataFrame, ltp: float | None, interval: str, now: datetime.datetime) -> dict:
+    """v3 entry: read the last CLOSED candle; trade it only right after it closed, without chasing."""
+    tf = {"1m": 60, "3m": 180, "5m": 300}.get(interval, 180)
+    closed = df
+    if len(df) and (now - df.index[-1]).total_seconds() < tf:
+        closed = df.iloc[:-1]                       # drop the forming candle
+    res = read(closed)
+    res["forming"] = False
+    if res.get("candle_time") is None:
+        return res
+    res["lc_time"], res["lc_close"] = res["candle_time"], res.get("close", res.get("spot"))
+    if not res["signal"]:
+        return res
+    age = (now - res["candle_time"]).total_seconds() - tf     # seconds since it closed
+    if age > CLOSE_WINDOW_SEC:
+        res["text"] += f" — closed {age:.0f}s ago, too late to enter"
+        res["signal"] = None
+        return res
+    if VOL_MULT:
+        vr = _volume_ratio(closed.tail(40))
+        res["vol_ratio"] = round(vr, 2)
+        if vr < VOL_MULT:
+            res["text"] += f" — volume {vr:.1f}× normal, needs {VOL_MULT:g}×"
+            res["signal"] = None
+            return res
+        res["text"] += f" vol {vr:.1f}×"
+    rng = res["high"] - res["low"]
+    if ltp and rng > 0:
+        ran = (ltp - res["close"]) if res["signal"] == "CE" else (res["close"] - ltp)
+        if ran > CHASE_RANGE * rng:
+            res["text"] += f" — price already ran {ran:.1f} past the close, not chasing"
+            res["signal"] = None
+            return res
+        res["spot"] = ltp                           # the order works from the price now
+    return res
+
+
 def scan(symbol: str, interval: str, api_key: str, access_token: str,
          now: datetime.datetime | None = None) -> dict:
     """Live: Kite candles + the last price for the forming candle, then read()."""
@@ -151,6 +212,14 @@ def scan(symbol: str, interval: str, api_key: str, access_token: str,
     else:
         source = "spot" if SOURCE == "spot" else "spot (no futures contract found)"
         ltp = _live_ltp(token)
+    if ON_CLOSE:
+        res = _read_closed(df, ltp, interval, now)
+        res["error"] = None
+        res["source"], res["basis"] = source, round(basis, 2)
+        if fut and not basis and res["signal"]:
+            res["text"] += " — no live futures / index price for the basis, no trade"
+            res["signal"] = None
+        return res
     if ltp and not df.empty:
         i = df.index[-1]
         df = df.copy()
