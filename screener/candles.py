@@ -227,6 +227,8 @@ def scan(symbol: str, interval: str, api_key: str, access_token: str,
         df.loc[i, "High"] = max(df.loc[i, "High"], ltp)
         df.loc[i, "Low"] = min(df.loc[i, "Low"], ltp)
     res = read(df)
+    if len(df) >= 2:                               # the last closed candle (fade exit reads it)
+        res["lc_time"], res["lc_close"] = df.index[-2], float(df["Close"].iloc[-2])
     res["error"] = None
     res["source"], res["basis"] = source, round(basis, 2)
     if fut and not basis and res["signal"]:

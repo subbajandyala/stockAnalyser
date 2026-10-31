@@ -114,11 +114,11 @@ SETUP_TF = _env_setting("CHART_SETUP_TF") or "3m"
 # hammer-type candle → buy that side; book the position at +CANDLE_BOOK_PCT;
 # exit early on an opposite candle or when it isn't working after SCALP_MAX_MIN.
 CANDLE_TF       = _env_setting("CHART_CANDLE_TF") or "3m"
-CANDLE_BOOK_PCT = float(_env_setting("CHART_BOOK_PCT") or 0.10)      # momentum-v3: +10% (best in the tradebooks)
+CANDLE_BOOK_PCT = float(_env_setting("CHART_BOOK_PCT") or 0.10)      # used where no points booking is set
 SCALP_MAX_MIN   = int(_env_setting("CHART_SCALP_MAX_MIN") or 12)     # momentum-v3: 12 min (6 cut winners, none bled)
 _candles.MIN_RANGE_MULT = float(_env_setting("CHART_CANDLE_MIN_MULT") or _candles.MIN_RANGE_MULT)
 # Candle chart: the index (default) or the current-month future (CHART_CANDLE_SOURCE=future)
-_candles.SOURCE = (_env_setting("CHART_CANDLE_SOURCE") or "future").lower()   # momentum-v3: futures chart
+_candles.SOURCE = (_env_setting("CHART_CANDLE_SOURCE") or "spot").lower()   # scalp-points: index chart (as the 27–28 Oct scalps)
 
 
 def _flag(name: str, default: bool) -> bool:
@@ -138,18 +138,18 @@ def _num(name: str, default: float) -> float:
 # with futures volume ≥ CHART_VOL_MULT × normal, never chasing a price that already ran.
 _candles.PATTERNS = (None if _env_setting("CHART_PATTERNS").strip().lower() == "all"
                      else {"strong_bull", "strong_bear", "bull_engulf", "bear_engulf"})
-_candles.ON_CLOSE = _flag("CHART_ENTRY_ON_CLOSE", True)
-_candles.VOL_MULT = _num("CHART_VOL_MULT", 1.5)
+_candles.ON_CLOSE = _flag("CHART_ENTRY_ON_CLOSE", False)   # scalp-points: the forming candle (fast)
+_candles.VOL_MULT = _num("CHART_VOL_MULT", 0)                # scalp-points: no volume gate
 _candles.CHASE_RANGE = _num("CHART_CHASE_RANGE", 0.25)
-V3_DIRECTION   = _flag("CHART_DIRECTION", True)      # trade only the side 2 of 3 votes allow
+V3_DIRECTION   = _flag("CHART_DIRECTION", False)      # trade only the side 2 of 3 votes allow
 V3_SKIP_FIRST  = _flag("CHART_SKIP_FIRST", True)     # skip the first signal of the day per index
 V3_FADE_EXIT   = _flag("CHART_FADE_EXIT", True)      # sell when a candle closes back past the trigger's middle
-V3_DIR_EXIT    = _flag("CHART_DIR_EXIT", True)       # sell when the direction votes turn against the trade
-V3_ROOM        = _flag("CHART_ROOM", True)           # no CE right under the call-OI wall / PE above the put wall
+V3_DIR_EXIT    = _flag("CHART_DIR_EXIT", False)       # sell when the direction votes turn against the trade
+V3_ROOM        = _flag("CHART_ROOM", False)           # no CE right under the call-OI wall / PE above the put wall
 V3_MAX_TRADES  = int(_num("CHART_MAX_TRADES", 0))    # per index per day (0 = no cap, the default)
-V3_PAUSE_AFTER = int(_num("CHART_PAUSE_AFTER", 2))   # losses in a row on an index → pause it
+V3_PAUSE_AFTER = int(_num("CHART_PAUSE_AFTER", 0))   # losses in a row on an index → pause it
 V3_PAUSE_MIN   = int(_num("CHART_PAUSE_MIN", 30))
-V3_NO_FLIP_MIN = int(_num("CHART_NO_FLIP_MIN", 30))  # after a loss, the other side waits this long
+V3_NO_FLIP_MIN = int(_num("CHART_NO_FLIP_MIN", 15))  # after a loss, the other side waits this long
 _v3.MIN_VOTES = int(_num("CHART_DIR_MIN_VOTES", 2))
 _v3.OI_MIN_PCT = _num("CHART_OI_MIN_PCT", 0.02)
 _v3.OI_LOOKBACK_MIN = int(_num("CHART_OI_LOOKBACK_MIN", 30))
@@ -171,7 +171,7 @@ RIDE_LOCK_PCT = float(_env_setting("CHART_RIDE_LOCK_PCT") or min(0.10, CANDLE_BO
 # entry + ₹10); replaces CHART_BOOK_PCT for that index. A ride trade's lock is then
 # half the points (entry + ₹5). Empty / 0 = use the percentage.
 # Fixed stop: CHART_SL_PCT=0.10 → stop at entry −10% instead of the candle stop (0 = candle stop)
-try:   # momentum-v3: a −20% disaster stop; the fade / time / direction exits do the real work
+try:   # backstop only when no points stop is set for the index
     CANDLE_SL_PCT = float(_env_setting("CHART_SL_PCT") or 0.20) or None
 except ValueError:
     CANDLE_SL_PCT = None
@@ -180,14 +180,15 @@ except ValueError:
 MAX_OPEN_PER_INDEX = max(1, int(_env_setting("CHART_MAX_OPEN_PER_INDEX") or 1))
 # CHART_OPPOSITE_EXIT=0: an opposite candle no longer closes a trade (only stop, target, square-off)
 OPPOSITE_EXIT = _env_setting("CHART_OPPOSITE_EXIT") != "0"
-CANDLE_BOOK_PTS = {}
-for _sym in ("NIFTY", "SENSEX"):
-    try:
-        _v = float(_env_setting(f"CHART_BOOK_PTS_{_sym}") or 0)
-    except ValueError:
-        _v = 0.0
+# scalp-points: book NIFTY +10 / SENSEX +30 premium points, stop NIFTY −12 / SENSEX −36
+CANDLE_BOOK_PTS, CANDLE_SL_PTS = {}, {}
+for _sym, _bk, _sl in (("NIFTY", 10, 12), ("SENSEX", 30, 36)):
+    _v = _num(f"CHART_BOOK_PTS_{_sym}", _bk)
     if _v > 0:
         CANDLE_BOOK_PTS[_sym] = _v
+    _v = _num(f"CHART_SL_PTS_{_sym}", _sl)
+    if _v > 0:
+        CANDLE_SL_PTS[_sym] = _v
 if RIDE_LOCK_PCT >= CANDLE_BOOK_PCT:
     print(f"[chart_bot] CHART_RIDE_LOCK_PCT {RIDE_LOCK_PCT:g} is not below CHART_BOOK_PCT "
           f"{CANDLE_BOOK_PCT:g} — using {CANDLE_BOOK_PCT / 2:g}", flush=True)
@@ -215,9 +216,9 @@ def _hhmm_setting(name: str, default: datetime.time) -> datetime.time:
 
 
 # Clean signal window: no new signals outside 9:30–15:00 IST (CHART_LAST_ENTRY=14:40 ends it earlier)
-SIGNAL_OPEN  = _hhmm_setting("CHART_FIRST_ENTRY", datetime.time(9, 45))    # momentum-v3: 9:45
-SIGNAL_CLOSE = _hhmm_setting("CHART_LAST_ENTRY", datetime.time(14, 30))    # momentum-v3: 14:30
-_v3.EXPIRY_CUTOFF = _hhmm_setting("CHART_EXPIRY_CUTOFF", datetime.time(13, 0))
+SIGNAL_OPEN  = _hhmm_setting("CHART_FIRST_ENTRY", datetime.time(9, 30))    # scalp-points: 9:30
+SIGNAL_CLOSE = _hhmm_setting("CHART_LAST_ENTRY", datetime.time(15, 0))     # scalp-points: 15:00
+_v3.EXPIRY_CUTOFF = _hhmm_setting("CHART_EXPIRY_CUTOFF", datetime.time(23, 59))  # scalp-points: off
 # Open bot trades are sold at square-off (CHART_SQUARE_OFF=15:00 moves it)
 SQUARE_OFF_TIME = _hhmm_setting("CHART_SQUARE_OFF", datetime.time(15, 15))
 # CHART_CANCEL_AT_SQUARE_OFF=1: from square-off on, also cancel every open NIFTY / SENSEX
@@ -269,7 +270,8 @@ print(f"[chart_bot] AUTO_TRADE={'ON' if _AUTO_TRADE else 'OFF (set KITE_AUTO_TRA
       + (f" | engine candles on {CANDLE_TF}{' future chart' if _candles.SOURCE == 'future' else ''} "
          f"(≥ {_candles.MIN_RANGE_MULT:g}× avg range) | book at "
          f"+{CANDLE_BOOK_PCT:.0%}" + "".join(f" ({k} +{v:g} pts)" for k, v in CANDLE_BOOK_PTS.items())
-         + (f", stop −{CANDLE_SL_PCT:.0%}" if CANDLE_SL_PCT else "")
+         + "".join(f" (stop {k} −{v:g} pts)" for k, v in CANDLE_SL_PTS.items())
+         + (f", stop −{CANDLE_SL_PCT:.0%}" if CANDLE_SL_PCT and len(CANDLE_SL_PTS) < 2 else "")
          + f", exit if not working in {SCALP_MAX_MIN} min | entries until {SIGNAL_CLOSE:%H:%M}, "
          f"square-off {SQUARE_OFF_TIME:%H:%M}" + (" + cancel orders" if CANCEL_AT_SQUARE_OFF else "")
          + ("" if OPPOSITE_EXIT else ", no opposite-candle exit")
@@ -283,7 +285,7 @@ print(f"[chart_bot] AUTO_TRADE={'ON' if _AUTO_TRADE else 'OFF (set KITE_AUTO_TRA
              f"max {V3_MAX_TRADES}/index" if V3_MAX_TRADES else "",
              f"pause {V3_PAUSE_MIN}m after {V3_PAUSE_AFTER} losses" if V3_PAUSE_AFTER else "",
              f"no flip {V3_NO_FLIP_MIN}m" if V3_NO_FLIP_MIN else "",
-             f"expiry stop {_v3.EXPIRY_CUTOFF:%H:%M}") if x)
+             f"expiry stop {_v3.EXPIRY_CUTOFF:%H:%M}" if _v3.EXPIRY_CUTOFF < datetime.time(15, 30) else "") if x)
          + " | ride "
          + (f"strong candles ≥ {RIDE_MULT:g}× avg (lock +{RIDE_LOCK_PCT:.0%})" if RIDE_MULT else "off")
          + " | max lots " + ", ".join(f"{k} {v or 'no cap'}" for k, v in _ko.MAX_LOTS.items())
@@ -1123,7 +1125,9 @@ def _v3_exit_reason(kite, symbol: str, state: dict, trade_key: str, direction: s
     trailing = bool(state.get(f"{trade_key}:trailing"))
     # 1. Momentum faded: a candle after the trigger closed back past the trigger's middle
     mid, sig_t, lc_t = state.get(f"{trade_key}:mid"), state.get(f"{trade_key}:sig_t"), cres.get("lc_time")
-    if V3_FADE_EXIT and not trailing and mid and sig_t and lc_t is not None and lc_t.strftime("%H:%M") > sig_t:
+    # (forming-candle entry: the trigger candle's own close counts too)
+    if (V3_FADE_EXIT and not trailing and mid and sig_t and lc_t is not None
+            and (lc_t.strftime("%H:%M") > sig_t or (not _candles.ON_CLOSE and lc_t.strftime("%H:%M") == sig_t))):
         c = float(cres.get("lc_close") or 0)
         if c and ((direction == "CE" and c < float(mid)) or (direction == "PE" and c > float(mid))):
             return f"momentum faded — candle closed {c:,.1f} back past the trigger's middle {float(mid):,.1f}"
@@ -1228,7 +1232,8 @@ def _scan_candles(symbols: list[str], state: dict, api_key: str, access_token: s
               + (f" — RIDE ({res['range_mult']:.1f}× avg candle)" if ride else ""))
         trade = _place_order(symbol, sig, spot, api_key, access_token,
                              chart_sl=res["stop"] - basis, book_pct=CANDLE_BOOK_PCT, ride=ride,
-                             book_pts=CANDLE_BOOK_PTS.get(symbol), sl_pct=CANDLE_SL_PCT)
+                             book_pts=CANDLE_BOOK_PTS.get(symbol), sl_pct=CANDLE_SL_PCT,
+                             sl_pts=CANDLE_SL_PTS.get(symbol))
         if "error" in trade:
             print(f"  [AUTO-TRADE] NOT PLACED — {trade['error']}")
             if ntfy_topic and state.get(f"{today}:{symbol}:err_candle") != candle:
@@ -1278,7 +1283,8 @@ def _scan_candles(symbols: list[str], state: dict, api_key: str, access_token: s
                        f"Qty   : {trade['qty']}\n"
                        f"Entry : ₹{entry}\n"
                        f"Exit  : {plan}\n"
-                       f"SL    : ₹{sl} (candle stop − {int(_SL_EXTRA.get(symbol, 15))} pts)\n"
+                       f"SL    : ₹{sl}" + (f" (entry − {CANDLE_SL_PTS[symbol]:g} pts)" if symbol in CANDLE_SL_PTS
+                                             else f" (−{CANDLE_SL_PCT:.0%})" if CANDLE_SL_PCT else "") + "\n"
                        f"Exit early: opposite candle, or not working after {SCALP_MAX_MIN} min"),
                       ntfy_topic)
         if not _acct().get("primary", True):

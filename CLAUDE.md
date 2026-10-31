@@ -161,6 +161,7 @@ fetch_ohlcv_yf_compat(symbol, period="1y", interval="1d")  # drop-in for yf.down
 | `sensex_option_moves.py` | SENSEX intraday option move signals |
 | `candles.py` | chart_bot default engine: reads the forming 3m candle (strong / engulfing / hammer / shooting star, range ≥ 1.2× avg) → CE / PE; `CHART_CANDLE_SOURCE=future` reads the current-month NIFTY / SENSEX futures chart instead of the index (order prices converted to spot with the basis) |
 | `momentum_v3.py` | Branch `momentum-v3`: context around the candle trigger — day checks (expiry cutoff, event days), direction votes (future vs VWAP + 15m Supertrend, ATM±2 OI change, opening range; 2 of 3), OI walls (room check), optional VIX-crush strictness. chart_bot gates entries and adds fade / direction exits; every rule is a `.env` switch |
+| (branch `scalp-points`) | Pure intraday scalping on the candle engine: index chart, forming-candle entry, strong / engulfing only, book NIFTY +10 / SENSEX +30 premium points, stop −12 / −36 points (`CHART_SL_PTS_*`), fade exit, 12-min exit, no flip for 15 min after a loss, first signal skipped, no direction / volume / OI gates, 1 lot |
 | `setups.py` | chart_bot alternative engine: regime + setups on 3m (trend pullback, ORB, VWAP reclaim/reject, range fade) |
 | `open_low.py` | NIFTY100 Open=Low intraday momentum setups |
 | `elder_ray.py` | Elder Ray Bull/Bear Power multi-timeframe |
