@@ -186,12 +186,46 @@ def _read_core(df: pd.DataFrame, eq_pts: float = 6) -> dict:
     return out
 
 
+def ma_events(df: pd.DataFrame) -> list[dict]:
+    """What the last closed candle did at the 10 / 20 / 50 MA (for the monitoring pushes).
+
+    break    the close crossed the MA (previous close on the other side)
+    confirm  the candle after a break also closed on the new side
+    support  low touched / dipped under the MA, close stayed above it (previous close above too)
+    reject   high touched / poked over the MA, close stayed below it (previous close below too)
+    """
+    c = df["Close"].astype(float)
+    if len(c) < MA_SLOW + 3:
+        return []
+    i = len(df) - 1
+    hi, lo = float(df["High"].iloc[i]), float(df["Low"].iloc[i])
+    evs = []
+    for n in (MA_FAST, MA_MID, MA_SLOW):
+        m = c.rolling(n).mean()
+        c0, c1, c2 = float(c.iloc[i]), float(c.iloc[i - 1]), float(c.iloc[i - 2])
+        m0, m1, m2 = float(m.iloc[i]), float(m.iloc[i - 1]), float(m.iloc[i - 2])
+        up0, up1, up2 = c0 > m0, c1 > m1, c2 > m2
+        if up0 != up1:
+            kind, txt = "break", f"broke {'ABOVE' if up0 else 'BELOW'} MA{n}"
+        elif up0 == up1 and up1 != up2:
+            kind, txt = "confirm", f"CONFIRMED {'above' if up0 else 'below'} MA{n} (2nd close)"
+        elif up0 and lo <= m0:
+            kind, txt = "support", f"took SUPPORT at MA{n} (low {lo:,.1f}, closed above)"
+        elif not up0 and hi >= m0:
+            kind, txt = "reject", f"REJECTED at MA{n} (high {hi:,.1f}, closed below)"
+        else:
+            continue
+        evs.append({"ma": n, "kind": kind, "text": txt, "level": round(m0, 1), "above": up0})
+    return evs
+
+
 def read(df: pd.DataFrame, eq_pts: float = 6) -> dict:
     """_read_core() plus out["detail"]: a multi-line status block for the log (one per closed candle)."""
     out = _read_core(df, eq_pts)
     if out.get("candle_time") is None or len(df) < MA_SLOW + 3:
         return out
     try:
+        out["ma_events"] = ma_events(df)
         out["detail"] = _detail(df, out)
     except Exception as e:                          # logging only
         out["detail"] = f"  detail error: {e}"

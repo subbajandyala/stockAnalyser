@@ -127,6 +127,17 @@ _macpr.FLIPS = int(_env_setting("CHART_MACPR_FLIPS") or 0)
 _macpr.EXIT_MA = int(_env_setting("CHART_MACPR_EXIT_MA") or 10)
 _macpr.CPR_RULE = (_env_setting("CHART_MACPR_CPR") or "1") != "0"
 _macpr.EXIT_CONFIRM = (_env_setting("CHART_MACPR_EXIT_CONFIRM") or "1") != "0"
+# Monitoring pushes when a closed candle touches / breaks / confirms the 10, 20, 50 MA (no orders).
+# CHART_MA_ALERTS=0 off · CHART_MA_ALERT_MAS=10,20,50 · CHART_MA_ALERT_KINDS=break,confirm,support,reject
+# CHART_MA_ALERT_GAP_MIN=15 (same MA + kind + direction not pushed again within this; 50 MA breaks /
+# confirms always push) · CHART_MA_ALERT_TOPIC
+# (own ntfy topic; default NTFY_TOPIC) · CHART_MA_ALERT_PRIORITY=low (silent; "default" to buzz)
+MA_ALERTS = MACPR and (_env_setting("CHART_MA_ALERTS") or "1") != "0"
+MA_ALERT_MAS = {int(x) for x in (_env_setting("CHART_MA_ALERT_MAS") or "10,20,50").split(",") if x.strip().isdigit()}
+MA_ALERT_KINDS = {x.strip().lower() for x in
+                  (_env_setting("CHART_MA_ALERT_KINDS") or "break,confirm,support,reject").split(",") if x.strip()}
+MA_ALERT_GAP_MIN = int(_env_setting("CHART_MA_ALERT_GAP_MIN") or 15)
+MA_ALERT_PRIORITY = _env_setting("CHART_MA_ALERT_PRIORITY") or "low"
 _candles.MIN_RANGE_MULT = float(_env_setting("CHART_CANDLE_MIN_MULT") or _candles.MIN_RANGE_MULT)
 # Candle chart: the index (default) or the current-month future (CHART_CANDLE_SOURCE=future)
 _candles.SOURCE = (_env_setting("CHART_CANDLE_SOURCE") or "spot").lower()   # scalp-points: index chart (as the 27–28 Oct scalps)
@@ -1175,6 +1186,40 @@ def _v3_exit_reason(kite, symbol: str, state: dict, trade_key: str, direction: s
     return None
 
 
+_MA_ALERT_LAST: dict = {}         # (symbol, ma, kind) → time of the last push
+
+
+def _ma_alert(symbol: str, res: dict, ntfy_topic: str) -> None:
+    """One low-priority push per closed candle listing what it did at the 10 / 20 / 50 MA (monitoring only)."""
+    if not MA_ALERTS or not _acct().get("primary", True):
+        return                       # the second account's thread would push the same thing again
+    t = res.get("lc_time")
+    evs, keep = res.get("ma_events") or [], []
+    for e in evs:
+        if e["ma"] not in MA_ALERT_MAS or e["kind"] not in MA_ALERT_KINDS:
+            continue
+        k = (symbol, e["ma"], e["kind"], e["above"])      # per direction: a break back the other way still pushes
+        last = _MA_ALERT_LAST.get(k)
+        always = e["ma"] == _macpr.MA_SLOW and e["kind"] in ("break", "confirm")   # the trade signal line
+        if not always and last is not None and t is not None and (t - last).total_seconds() < MA_ALERT_GAP_MIN * 60:
+            continue
+        _MA_ALERT_LAST[k] = t
+        keep.append(e)
+    if not keep:
+        return
+    close = res.get("close") or 0
+    lines = [f"• {e['text']} — MA{e['ma']} {e['level']:,.1f} ({close - e['level']:+.1f})" for e in keep]
+    print(f"  [MA ALERT] {symbol} {t:%H:%M}: " + " · ".join(e["text"] for e in keep))
+    topic = _env_setting("CHART_MA_ALERT_TOPIC") or ntfy_topic
+    if not topic:
+        return
+    head = keep[0]["text"] + (f" +{len(keep) - 1}" if len(keep) > 1 else "")
+    body = (f"{t:%H:%M} close {close:,.1f}\n" + "\n".join(lines)
+            + f"\nMA10 {res.get('ma10', 0):,.0f} · MA20 {res.get('ma20', 0):,.0f} · MA50 {res.get('ma50', 0):,.0f}"
+            + (f"\n{res['smc']}" if res.get("smc") else ""))
+    send_ntfy(f"{symbol} {head}", body, topic, priority=MA_ALERT_PRIORITY)
+
+
 def _macpr_trade_status(symbol: str, state: dict, trade_key: str, direction: str, cres: dict) -> None:
     """One line per closed candle for an open MA + CPR trade: index move, best so far, exit line, liquidity."""
     lc_t = cres.get("lc_time")
@@ -1253,6 +1298,7 @@ def _scan_candles(symbols: list[str], state: dict, api_key: str, access_token: s
             _DETAIL_SEEN[symbol] = res.get("lc_time")
             print(f"  ┌─ [MACPR] {symbol} {CANDLE_TF} candle closed")
             print(res["detail"])
+            _ma_alert(symbol, res, ntfy_topic)
         elif res.get("smc") and (sig or log_tick):
             print(f"               {res['smc']}")
         view = {**res, "regime": f"{CANDLE_TF} candle", "setup": res.get("pattern"),
