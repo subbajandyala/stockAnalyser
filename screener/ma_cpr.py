@@ -5,7 +5,7 @@ Chart: the index on 3m, with simple MAs 10 / 20 / 50 and the previous day's CPR,
 the same lines as the Kite chart (Pivot = (H+L+C)/3, BC = (H+L)/2, TC = 2P − BC).
 
   Side      the 50 MA: above it CE, below it PE.
-  Entry     a candle closes across the 50 MA (the signal candle) and the NEXT candle
+  Entry     a candle closes across the 50, 20 or 10 MA (ENTRY_MAS; the signal candle) and the NEXT candle
             also closes on that side (the confirmation candle) → buy right after the
             confirmation candle closes.
   CPR       a break of the CPR needs 2 candles closing beyond it (one candle poking
@@ -46,6 +46,7 @@ THIN_CPR_PCT, WIDE_CPR_PCT = 0.20, 0.40
 # 3m candle closes beyond it.
 LEVEL_MIN = {"NIFTY": 10.0, "SENSEX": 30.0}
 STOP_ON = "close"        # backtest 23–30 Oct: close +240, touch +111 (MA50 wicks stopped the winners)
+ENTRY_MAS = (50, 20, 10)  # MAs whose confirmed cross is an entry; checked slowest first (50 wins a tie)
 SMC_INFO = True           # show Smart Money levels in the log / push (information only, never gates)
 SMC_BARS = 200            # candles the SMC read looks back over
 EQ_PTS = {"NIFTY": 6, "SENSEX": 20}   # swing highs / lows this close together = equal highs / lows
@@ -166,15 +167,24 @@ def _read_core(df: pd.DataFrame, eq_pts: float = 6) -> dict:
             out["liq_up"], out["liq_dn"] = sm.get("liq_up"), sm.get("liq_dn")
         except Exception as e:                      # information only — never blocks a trade
             out["smc"] = f"SMC: error {e}"
-    crossed = side.iloc[j] != side.iloc[j - 1]
-    if not crossed or side.iloc[i] != side.iloc[j]:
+    # a confirmed cross of any entry MA: candle j closed across it, candle i stayed on that side
+    hit = None
+    for n in sorted(ENTRY_MAS, reverse=True):
+        sd = (c > ma[n]).astype(int) * 2 - 1
+        if sd.iloc[j] != sd.iloc[j - 1] and sd.iloc[i] == sd.iloc[j]:
+            hit = (n, sd)
+            break
+    if not hit:
         where = "above" if side.iloc[i] > 0 else "below"
-        out["text"] = base + f" — {where} the 50 MA, no fresh confirmed cross"
+        out["text"] = base + f" — {where} the 50 MA, no fresh confirmed cross of MA " + "/".join(
+            str(n) for n in sorted(ENTRY_MAS))
         return out
-    sig = "CE" if side.iloc[j] > 0 else "PE"
-    out["pattern"] = "ma50_cross_up" if sig == "CE" else "ma50_cross_down"
-    out["stop"] = out["ma50"]
-    sig_txt = (f"{df.index[j]:%H:%M} crossed the 50 MA {'up' if sig == 'CE' else 'down'}, "
+    n, sd = hit
+    sig = "CE" if sd.iloc[j] > 0 else "PE"
+    out["entry_ma"] = n
+    out["pattern"] = f"ma{n}_cross_{'up' if sig == 'CE' else 'down'}"
+    out["stop"] = out[f"ma{n}"]
+    sig_txt = (f"{df.index[j]:%H:%M} crossed the {n} MA {'up' if sig == 'CE' else 'down'}, "
                f"{t:%H:%M} confirmed")
     if FLIPS:
         flips = int((side.iloc[max(1, j - FLIP_LOOKBACK):j] != side.shift().iloc[max(1, j - FLIP_LOOKBACK):j]).sum())
@@ -188,7 +198,7 @@ def _read_core(df: pd.DataFrame, eq_pts: float = 6) -> dict:
         out["text"] = base + f" — {sig_txt}, but 2 closes below the CPR: no CE"
         return out
     out["signal"] = sig
-    out["label"] = f"MA50 cross {'up' if sig == 'CE' else 'down'} (confirmed)"
+    out["label"] = f"MA{n} cross {'up' if sig == 'CE' else 'down'} (confirmed)"
     out["text"] = base + f" — {sig_txt} → BUY {sig}"
     return out
 
@@ -206,9 +216,10 @@ def trade_levels(res: dict, side: str, price: float, min_pts: float = 10.0) -> d
     lines = _lines(res)
     ahead = [(n, v) for n, v in lines if (v - price) * s >= min_pts]
     tp = min(ahead, key=lambda z: (z[1] - price) * s) if ahead else (None, None)
-    m50 = float(res["ma50"]) if res.get("ma50") is not None else None
+    en = res.get("entry_ma", MA_SLOW)               # the MA the entry crossed
+    m50 = float(res[f"ma{en}"]) if res.get(f"ma{en}") is not None else None
     if m50 is not None and (price - m50) * s > 0:
-        sl = (f"MA{MA_SLOW}", m50)
+        sl = (f"MA{en}", m50)
     else:                                          # price already back at / past the 50 MA: nearest line behind
         behind = [(n, v) for n, v in lines if (price - v) * s > 0]
         sl = max(behind, key=lambda z: z[1] * s) if behind else (None, None)

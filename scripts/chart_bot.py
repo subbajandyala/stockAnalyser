@@ -123,6 +123,9 @@ MACPR   = SIGNAL == "macpr"
 CANDLE_BOOK_PCT = float(_env_setting("CHART_BOOK_PCT") or (0.60 if MACPR else 0.10))   # macpr: far target, the 10 MA exits
 # macpr: no time exit (winners ran 30–80 min); 0 in .env also means off
 SCALP_MAX_MIN   = int(_env_setting("CHART_SCALP_MAX_MIN") or (0 if MACPR else 12)) or 10_000
+# Entry: a confirmed cross of any of these MAs (slowest wins a tie); the stop is the crossed MA
+_macpr.ENTRY_MAS = tuple(int(x) for x in (_env_setting("CHART_MACPR_ENTRY_MAS") or "50,20,10").split(",")
+                         if x.strip().isdigit()) or (50,)
 _macpr.FLIPS = int(_env_setting("CHART_MACPR_FLIPS") or 0)
 _macpr.EXIT_MA = int(_env_setting("CHART_MACPR_EXIT_MA") or 10)
 _macpr.CPR_RULE = (_env_setting("CHART_MACPR_CPR") or "1") != "0"
@@ -303,11 +306,11 @@ def _auto_trade_enabled() -> bool:
 
 _AUTO_TRADE = _auto_trade_enabled()
 print(f"[chart_bot] AUTO_TRADE={'ON' if _AUTO_TRADE else 'OFF (set KITE_AUTO_TRADE=1 in .env to enable)'}"
-      + (f" | signal MA50+CPR on {CANDLE_TF} index (confirmed 50 MA cross in, "
+      + (f" | signal MA50+CPR on {CANDLE_TF} index (confirmed MA {'/'.join(str(n) for n in sorted(_macpr.ENTRY_MAS))} cross in, "
          f"{'2 closes' if _macpr.EXIT_CONFIRM else '1 close'} past MA{_macpr.EXIT_MA} out"
          + (", CPR filter" if _macpr.CPR_RULE else "")
          + (f"; target = next MA/CPR line ahead (≥ {_macpr.LEVEL_MIN['NIFTY']:g}/{_macpr.LEVEL_MIN['SENSEX']:g} pts), "
-            f"stop = crossed 50 MA ({_macpr.STOP_ON}), 10 MA exit {MACPR_MA10}" if MACPR_LINES else "") + (f", skip after {_macpr.FLIPS} flips/30m" if _macpr.FLIPS else "")
+            f"stop = the crossed MA ({_macpr.STOP_ON}), 10 MA exit {MACPR_MA10}" if MACPR_LINES else "") + (f", skip after {_macpr.FLIPS} flips/30m" if _macpr.FLIPS else "")
          + ")" if MACPR else "")
       + (f" | engine candles on {CANDLE_TF}{' future chart' if _candles.SOURCE == 'future' else ''} "
          f"(≥ {_candles.MIN_RANGE_MULT:g}× avg range) | book at "
