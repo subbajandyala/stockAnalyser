@@ -695,7 +695,7 @@ def _clear_slot_gtts(kite, symbol: str, state: dict, trade_key: str, ts: str, nt
     if not _others_on(state, trade_key, ts):
         _clear_gtts(kite, symbol, ts, ntfy_topic)
         return
-    gid = state.get(f"{trade_key}:gtt_id")
+    gid = _gid(state.get(f"{trade_key}:gtt_id"))
     if gid:
         try:
             if kite.get_gtt(gid).get("status") == "active":
@@ -766,6 +766,11 @@ def _square_off_cleanup(kite, state: dict, today: str, ntfy_topic: str) -> None:
                       "Cancelled: " + ", ".join(done), ntfy_topic, priority="default")
 
 
+def _gid(v):
+    """A stored GTT id as Kite's integer trigger id (older state kept the whole {"trigger_id": N})."""
+    return _ko.gtt_trigger_id(v)
+
+
 def _exit_bot_position(kite, symbol: str, state: dict, trade_key: str, reason: str,
                        ntfy_topic: str) -> bool:
     """Sell the bot's position without ever selling more than is held.
@@ -778,7 +783,7 @@ def _exit_bot_position(kite, symbol: str, state: dict, trade_key: str, reason: s
       4. Sell at most what is held. If the sell doesn't fill, the GTT is placed again.
     """
     k = lambda name: f"{trade_key}:{name}"
-    ts, qty, gtt_id = state.get(k("ts")), int(state.get(k("qty")) or 0), state.get(k("gtt_id"))
+    ts, qty, gtt_id = state.get(k("ts")), int(state.get(k("qty")) or 0), _gid(state.get(k("gtt_id")))
     others = _others_on(state, trade_key, ts)
 
     def _mine(held: int) -> int:   # this trade's units: never more than it bought or than is held
@@ -858,7 +863,7 @@ def _restore_gtt(kite, symbol: str, state: dict, trade_key: str, qty: int, ntfy_
     """Put the stop / target GTT back on the units still held after a failed exit."""
     k = lambda name: f"{trade_key}:{name}"
     ts = state.get(k("ts"))
-    if qty <= 0 or state.get(k("gtt_id")):
+    if qty <= 0 or _gid(state.get(k("gtt_id"))):
         return
     entry = float(state.get(k("entry_price")) or 0)
     sl = float(state.get(k("sl")) or 0) or _tick(entry * 0.80)
@@ -881,7 +886,7 @@ def _manage_trade(kite, symbol: str, state: dict, trade_key: str,
     """Square-off at 15:15, book half at T1, then trail the stop on the rest."""
     k = lambda name: f"{trade_key}:{name}"
     ts      = state.get(k("ts"))
-    gtt_id  = state.get(k("gtt_id"))
+    gtt_id  = _gid(state.get(k("gtt_id")))
     entry   = float(state.get(k("entry_price")) or 0)
     qty     = int(state.get(k("qty")) or 0)
     t1      = float(state.get(k("t1")) or 0)
@@ -1040,7 +1045,7 @@ def _monitor_positions(
             # Another slot holds the same contract: this slot is closed once its own GTT
             # has fired, or once the bot's own exit has sold its units
             held = open_qty(kite, bot_ts)
-            gid = state.get(f"{trade_key}:gtt_id")
+            gid = _gid(state.get(f"{trade_key}:gtt_id"))
             if held is None:
                 position_open = None
             elif held <= others:
@@ -1422,7 +1427,7 @@ def _scan_candles(symbols: list[str], state: dict, api_key: str, access_token: s
         state.update({
             trade_key: trade["order_id"],
             f"{trade_key}:ts": trade["tradingsymbol"],
-            f"{trade_key}:gtt_id": trade.get("gtt_id") or "",
+            f"{trade_key}:gtt_id": _gid(trade.get("gtt_id")) or "",
             f"{trade_key}:entry_price": trade.get("entry_price", 0),
             f"{trade_key}:target_price": trade.get("target", 0),
             f"{trade_key}:qty": trade.get("qty", 0),
@@ -1595,7 +1600,7 @@ def _scan_setups(symbols: list[str], state: dict, api_key: str, access_token: st
         state.update({
             trade_key: trade["order_id"],
             f"{trade_key}:ts": trade["tradingsymbol"],
-            f"{trade_key}:gtt_id": trade.get("gtt_id") or "",
+            f"{trade_key}:gtt_id": _gid(trade.get("gtt_id")) or "",
             f"{trade_key}:entry_price": trade.get("entry_price", 0),
             f"{trade_key}:target_price": trade.get("target", 0),
             f"{trade_key}:qty": trade.get("qty", 0),
@@ -2063,7 +2068,7 @@ def scan_once(symbols: list[str], state_file: str, force: bool = False) -> None:
                     )
                 state[trade_key]                      = trade["order_id"]
                 state[f"{trade_key}:ts"]             = trade["tradingsymbol"]
-                state[f"{trade_key}:gtt_id"]         = trade.get("gtt_id") or ""
+                state[f"{trade_key}:gtt_id"]         = _gid(trade.get("gtt_id")) or ""
                 state[f"{trade_key}:entry_price"]    = trade.get("entry_price", 0)
                 state[f"{trade_key}:target_price"]   = trade.get("target", 0)
                 state[f"{trade_key}:qty"]            = trade.get("qty", 0)

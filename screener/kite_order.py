@@ -438,14 +438,32 @@ def delete_gtts_for(kite: KiteConnect, ts: str) -> tuple[list, list]:
     return deleted, failed
 
 
+def gtt_trigger_id(v):
+    """Kite's place_gtt returns {"trigger_id": N}; keep just N (a dict id made every
+    get_gtt / delete_gtt fail with "Invalid trigger_id" — 2 Nov, the bot could not exit)."""
+    if isinstance(v, dict):
+        v = v.get("trigger_id") or v.get("id")
+    if isinstance(v, str) and v.strip().startswith("{"):
+        import json as _json
+        try:
+            d = _json.loads(v.replace("'", '"'))
+            v = d.get("trigger_id") or d.get("id")
+        except Exception:
+            return None
+    try:
+        return int(v) if v not in (None, "") else None
+    except (TypeError, ValueError):
+        return None
+
+
 def place_oco_gtt(kite: KiteConnect, symbol: str, ts: str, qty: int,
                   sl: float, target: float, last_price: float):
     """Place a fresh OCO GTT (SL / target) for a long option position."""
-    return kite.place_gtt(
+    return gtt_trigger_id(kite.place_gtt(
         trigger_type=kite.GTT_TYPE_OCO, tradingsymbol=ts,
         exchange=_EXCHANGE.get(symbol, "NFO"), trigger_values=[sl, target],
         last_price=last_price, orders=_oco_orders(kite, qty, sl, target),
-    )
+    ))
 
 
 def sell_and_confirm(kite: KiteConnect, symbol: str, ts: str, qty: int,
@@ -732,14 +750,14 @@ def place_order_for_signal(
         gtt_target = _tick(max(entry_price * _TRAIL_FAR_TARGET_X, t1_price * 1.5))
     gtt_id = None
     try:
-        gtt_id = kite.place_gtt(
+        gtt_id = gtt_trigger_id(kite.place_gtt(
             trigger_type=kite.GTT_TYPE_OCO,
             tradingsymbol=ts,
             exchange=exchange,
             trigger_values=[sl_price, gtt_target],
             last_price=entry_price,
             orders=_oco_orders(kite, qty, sl_price, gtt_target),
-        )
+        ))
         _LOG.info(f"GTT placed: {gtt_id}  SL={sl_price}  Target={gtt_target}  T1={t1_price}")
     except Exception as e:
         _LOG.warning(f"GTT failed (order {order_id} is live, set SL manually): {e}")
