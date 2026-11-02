@@ -565,7 +565,8 @@ def exit_position(symbol: str, api_key: str, access_token: str,
 def book_levels(symbol: str, opt_type: str, spot: float, entry: float,
                 stop_spot: float | None, book_pct: float = BOOK_PROFIT_PCT,
                 book_pts: float | None = None, sl_pct: float | None = None,
-                sl_pts: float | None = None) -> tuple[float, float]:
+                sl_pts: float | None = None, sl_min_pct: float | None = None,
+                book_min_pct: float | None = None) -> tuple[float, float]:
     """(option SL, option target) for book mode.
 
     SL: premium where the index reaches the setup's stop (delta 0.5), kept 5–15%
@@ -573,10 +574,17 @@ def book_levels(symbol: str, opt_type: str, spot: float, entry: float,
     Target: entry + book_pts premium points when given, else entry × (1 + book_pct).
     sl_pct (e.g. 0.10): a fixed stop at entry × (1 − sl_pct) instead of the candle stop.
     sl_pts (e.g. 12): a fixed stop at entry − sl_pts premium points (scalping); wins over sl_pct.
+    sl_min_pct / book_min_pct (ma-cpr-scalp backstop GTT): the stop is at least this far below entry
+    and the target at least this far above — the GTT then can't fire on a few points of option noise.
     """
     target = _tick(entry + book_pts if book_pts else entry * (1 + book_pct))
+    if book_min_pct:
+        target = _tick(max(target, entry * (1 + book_min_pct)))
     if sl_pts:
-        return _tick(max(entry - sl_pts, entry * 0.5)), target
+        sl = max(entry - sl_pts, entry * 0.5)
+        if sl_min_pct:
+            sl = min(sl, entry * (1 - sl_min_pct))
+        return _tick(sl), target
     if sl_pct:
         return _tick(entry * (1 - sl_pct)), target
     dist = None
@@ -604,6 +612,8 @@ def place_order_for_signal(
     book_pts: float | None = None,
     sl_pct: float | None = None,
     sl_pts: float | None = None,
+    sl_min_pct: float | None = None,
+    book_min_pct: float | None = None,
 ) -> dict:
     """
     Place ATM option order + GTT for the given signal.
@@ -709,7 +719,7 @@ def place_order_for_signal(
     target_price = _tick(max(target_price, entry_price * (1 + T1_MIN_PCT)))
     if book_pct:
         sl_price, target_price = book_levels(symbol, opt_type, spot, entry_price, chart_sl, book_pct,
-                                             book_pts, sl_pct, sl_pts)
+                                             book_pts, sl_pct, sl_pts, sl_min_pct, book_min_pct)
         trailing = False
     _LOG.info(f"Option SL ₹{sl_price} ({(1 - sl_price / entry_price) * 100:.0f}% below entry), T1 ₹{target_price}")
 

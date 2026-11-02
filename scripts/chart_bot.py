@@ -150,8 +150,14 @@ for _sym in ("NIFTY", "SENSEX"):
 _macpr.STOP_ON = (_env_setting("CHART_MACPR_STOP_ON") or "close").lower()
 MACPR_GTT_MULT = float(_env_setting("CHART_MACPR_GTT_MULT") or 1.5)
 MACPR_DELTA = float(_env_setting("CHART_MACPR_DELTA") or 0.5)
-# 10 MA exit with line targets: "open" = only when no line ahead (default), "always", "off"
-MACPR_MA10 = (_env_setting("CHART_MACPR_MA10_EXIT") or "open").lower()
+# The GTT is only a safety net: stop at least 25% below entry, target at least 30% above
+# (2 Nov: a 2–5 pt GTT stop sold three trades on option noise within 3–46 s)
+MACPR_GTT_MIN_SL = float(_env_setting("CHART_MACPR_GTT_MIN_SL_PCT") or 0.25)
+MACPR_GTT_MIN_TP = float(_env_setting("CHART_MACPR_GTT_MIN_TP_PCT") or 0.30)
+# 10 MA exit with line targets: "always" (default) = also with a target, "open" = only when no line ahead, "off"
+# "always" since 2 Nov: with a target ahead the trade had no exit but the stop and sat losing
+# premium (expiry-eve theta); backtest 23–30 Oct: always +483 vs open-sky only +382
+MACPR_MA10 = (_env_setting("CHART_MACPR_MA10_EXIT") or "always").lower()
 MA_ALERTS = MACPR and (_env_setting("CHART_MA_ALERTS") or "1") != "0"
 MA_ALERT_MAS = {int(x) for x in (_env_setting("CHART_MA_ALERT_MAS") or "10,20,50").split(",") if x.strip().isdigit()}
 MA_ALERT_KINDS = {x.strip().lower() for x in
@@ -1359,6 +1365,8 @@ def _scan_candles(symbols: list[str], state: dict, api_key: str, access_token: s
         if any(state.get(f"{k}:candle") == candle for k in busy):
             continue       # this candle is already being traded
         trade_key = next(k for k in _slot_keys(today, symbol) if k not in busy)
+        if MACPR and candle == state.get(f"{today}:{symbol}:last_entry_candle"):
+            continue       # one trade per signal (2 Nov: re-bought the same signal 7 s after its target)
         if candle == state.get(f"{today}:{symbol}:lost_candle"):
             print(f"         [{symbol}] already lost on this candle — waiting for the next one")
             continue
@@ -1398,7 +1406,9 @@ def _scan_candles(symbols: list[str], state: dict, api_key: str, access_token: s
                   + " | stop " + (f"{lv['sl_name']} {lv['sl']:,.1f} (−{lv['sl_pts']:.0f} pts, {_macpr.STOP_ON})" if lv["sl"] else "none"))
         trade = _place_order(symbol, sig, spot, api_key, access_token,
                              chart_sl=res["stop"] - basis, book_pct=CANDLE_BOOK_PCT, ride=ride,
-                             book_pts=book_pts, sl_pct=CANDLE_SL_PCT, sl_pts=sl_pts)
+                             book_pts=book_pts, sl_pct=CANDLE_SL_PCT, sl_pts=sl_pts,
+                             sl_min_pct=MACPR_GTT_MIN_SL if MACPR_LINES else None,
+                             book_min_pct=MACPR_GTT_MIN_TP if MACPR_LINES and book_pts else None)
         if "error" in trade:
             print(f"  [AUTO-TRADE] NOT PLACED — {trade['error']}")
             if ntfy_topic and state.get(f"{today}:{symbol}:err_candle") != candle:
@@ -1435,6 +1445,7 @@ def _scan_candles(symbols: list[str], state: dict, api_key: str, access_token: s
             f"{trade_key}:sig_t": res["candle_time"].strftime("%H:%M") if res.get("candle_time") is not None else "",
         })
         state[f"{today}:{symbol}:n_trades"] = int(state.get(f"{today}:{symbol}:n_trades") or 0) + 1
+        state[f"{today}:{symbol}:last_entry_candle"] = candle
         state[symbol] = f"{today}:{symbol}:{sig}:{res['label']}"
         entry, sl, tgt = trade["entry_price"], trade["sl"], trade["target"]
         t1 = trade.get("t1", tgt)
