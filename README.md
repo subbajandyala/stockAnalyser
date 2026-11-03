@@ -30,5 +30,10 @@ KITE_AUTO_TRADE=0   # 1 = place real orders
 NTFY_TOPIC=...
 ```
 Cron (droplet clock is UTC; IST = UTC + 5:30):
-`5-55/10 3-10 * * 1-5 cd /root/chandu && /root/venv/bin/python scripts/chandu_bot.py --cron >> chandu_bot.log 2>&1` (IST :25 :35 … :15; the script keeps 09:25–15:35)
+market hours only, weekdays, 09:25 → 15:35 IST:
+```
+55 3 * * 1-5      cd /root/chandu && /root/venv/bin/python scripts/chandu_bot.py --cron >> chandu_bot.log 2>&1   # 09:25
+5-55/10 4-9 * * 1-5  (same command)   # 09:35 … 15:25
+5 10 * * 1-5      (same command)   # 15:35
+```
 Token: `30 2 * * * cd /root/stockAnalyser && /root/venv/bin/python auto_token.py >> token_refresh.log 2>&1`
