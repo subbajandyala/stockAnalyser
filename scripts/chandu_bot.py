@@ -31,6 +31,7 @@ import requests
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
+from core import kite_data as _kd  # noqa: E402
 from core.kite_data import fetch_ohlcv, get_token  # noqa: E402
 
 IST = datetime.timezone(datetime.timedelta(hours=5, minutes=30))
@@ -77,7 +78,7 @@ def check(symbol: str, now: datetime.datetime) -> dict:
     m10 = fetch_ohlcv(symbol, f"{TF_MIN}minute", days=HIST_DAYS, to_date=tomorrow)
     time.sleep(API_GAP_SEC)
     if m10.empty or len(m10) < EMA_SLOW + 5:
-        out["error"] = "no 10-min data"
+        out["error"] = f"no 10-min data — {_kd.LAST_ERROR or f'only {len(m10)} candles'}"
         return out
     # drop the candle still forming
     if (now - m10.index[-1].to_pydatetime()).total_seconds() < TF_MIN * 60:
@@ -87,7 +88,7 @@ def check(symbol: str, now: datetime.datetime) -> dict:
     time.sleep(API_GAP_SEC)
     prev = day[[d.date() < session for d in day.index]] if not day.empty else day
     if prev.empty:
-        out["error"] = "no previous day candle"
+        out["error"] = f"no previous day candle — {_kd.LAST_ERROR or 'none before ' + str(session)}"
         return out
     tc, cc, bc = cpr(prev.iloc[-1])
     close = float(m10["Close"].iloc[-1])
@@ -122,7 +123,13 @@ def fmt(x: float) -> str:
 def scan(symbols: list[str], do_push: bool) -> None:
     now = datetime.datetime.now(IST)
     print(f"\n[{now:%Y-%m-%d %H:%M:%S}] chandu scan — {len(symbols)} symbols, {TF_MIN}-min chart")
-    res = [check(s, now) for s in symbols]
+    res = []
+    for s in symbols:
+        res.append(check(s, now))
+        errs = [r.get("error", "") for r in res[-3:]]
+        if len(res) >= 3 and all(e and ("Kite 4" in e or "missing" in e) for e in errs) and len(set(errs)) == 1:
+            print(f"  same Kite error 3 times — stopping this scan: {errs[0]}")
+            break
     good = sorted((r for r in res if r["ok"]), key=lambda r: -r["vs_cpr_pct"])
     for r in res:
         if r.get("error"):

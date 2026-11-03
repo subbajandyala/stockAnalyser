@@ -100,6 +100,9 @@ def get_token(symbol: str) -> int | None:
 
 # ── main fetcher ──────────────────────────────────────────────────────────────
 
+LAST_ERROR = ""   # why the last fetch_ohlcv() came back empty (Kite's reply), for logs
+
+
 def fetch_ohlcv(
     symbol: str,
     interval: str = "day",
@@ -117,8 +120,15 @@ def fetch_ohlcv(
     Returns DataFrame[Open,High,Low,Close,Volume] with IST DatetimeIndex.
     Empty DataFrame on any failure.
     """
+    global LAST_ERROR
+    LAST_ERROR = ""
     token = get_token(symbol)
     if token is None:
+        LAST_ERROR = "symbol not found"
+        return pd.DataFrame()
+    api_key, access_token = _load_creds()
+    if not (api_key and access_token):
+        LAST_ERROR = "KITE_API_KEY / KITE_ACCESS_TOKEN missing (.env not found next to the code?)"
         return pd.DataFrame()
 
     to_d  = to_date   or datetime.date.today()
@@ -135,11 +145,14 @@ def fetch_ohlcv(
             timeout=30,
         )
         if not r.ok:
+            LAST_ERROR = f"Kite {r.status_code}: {r.text[:160]}"
             return pd.DataFrame()
         candles = r.json().get("data", {}).get("candles", [])
         if not candles:
+            LAST_ERROR = "Kite returned no candles"
             return pd.DataFrame()
-    except Exception:
+    except Exception as e:
+        LAST_ERROR = f"request failed: {e}"
         return pd.DataFrame()
 
     df = pd.DataFrame(

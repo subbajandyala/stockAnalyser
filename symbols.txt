@@ -48,7 +48,7 @@ SBIN
 SHRIRAMFIN
 SUNPHARMA
 TATACONSUM
-TATAMOTORS
+# TATAMOTORS was demerged in 2025 — add the new Kite symbol here if wanted
 TATASTEEL
 TCS
 TECHM
