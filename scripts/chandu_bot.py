@@ -5,6 +5,10 @@ Bullish when ALL of these hold on the last CLOSED 10-min candle:
   1. Close above the CPR — above TC, CC (pivot) and BC  (previous day's CPR)
   2. Close above the 20 EMA
   3. 20 EMA above the 50 EMA
+Bearish is the mirror:
+  1. Close below the CPR — below TC, CC and BC
+  2. Close below the 20 EMA
+  3. 20 EMA below the 50 EMA
 
 CPR from the previous trading day's daily candle:
   CC (pivot) = (H + L + C) / 3,  BC = (H + L) / 2,  TC = 2 × CC − BC
@@ -94,16 +98,15 @@ def check(symbol: str, now: datetime.datetime) -> dict:
     close = float(m10["Close"].iloc[-1])
     e20 = float(m10["Close"].ewm(span=EMA_FAST, adjust=False).mean().iloc[-1])
     e50 = float(m10["Close"].ewm(span=EMA_SLOW, adjust=False).mean().iloc[-1])
-    top = max(tc, cc, bc)
-    rules = {
-        "above CPR": close > top,
-        "above EMA20": close > e20,
-        "EMA20 > EMA50": e20 > e50,
-    }
+    top, bot = max(tc, cc, bc), min(tc, cc, bc)
+    bull = {"above CPR": close > top, "above EMA20": close > e20, "EMA20 > EMA50": e20 > e50}
+    bear = {"below CPR": close < bot, "below EMA20": close < e20, "EMA20 < EMA50": e20 < e50}
     out.update({"candle": m10.index[-1], "close": close, "tc": tc, "cc": cc, "bc": bc,
-                "cpr_top": top, "ema20": e20, "ema50": e50, "rules": rules,
-                "ok": all(rules.values()),
-                "vs_cpr_pct": (close / top - 1) * 100})
+                "cpr_top": top, "cpr_bot": bot, "ema20": e20, "ema50": e50,
+                "bull_rules": bull, "bear_rules": bear,
+                "ok": all(bull.values()), "bear": all(bear.values()),
+                "vs_cpr_pct": (close / top - 1) * 100,          # bullish: % above the CPR top
+                "below_cpr_pct": (1 - close / bot) * 100})       # bearish: % below the CPR bottom
     return out
 
 
@@ -131,25 +134,37 @@ def scan(symbols: list[str], do_push: bool) -> None:
             print(f"  same Kite error 3 times — stopping this scan: {errs[0]}")
             break
     good = sorted((r for r in res if r["ok"]), key=lambda r: -r["vs_cpr_pct"])
+    bad = sorted((r for r in res if r.get("bear")), key=lambda r: -r["below_cpr_pct"])
     for r in res:
         if r.get("error"):
             print(f"  {r['symbol']:12s} ERROR  {r['error']}")
             continue
-        fails = [k for k, v in r["rules"].items() if not v]
-        print(f"  {r['symbol']:12s} {'BULLISH' if r['ok'] else '   -   '} close {fmt(r['close']):>10} | "
+        tag = "BULLISH" if r["ok"] else "BEARISH" if r["bear"] else "   -   "
+        why = ""
+        if tag.strip() == "-":
+            nb = [k for k, v in r["bull_rules"].items() if not v]
+            ns = [k for k, v in r["bear_rules"].items() if not v]
+            why = f" | bull fails: {', '.join(nb)} | bear fails: {', '.join(ns)}"
+        print(f"  {r['symbol']:12s} {tag} close {fmt(r['close']):>10} | "
               f"CPR TC {fmt(r['tc'])} CC {fmt(r['cc'])} BC {fmt(r['bc'])} | EMA20 {fmt(r['ema20'])} "
-              f"EMA50 {fmt(r['ema50'])}" + (f" | fails: {', '.join(fails)}" if fails else ""))
+              f"EMA50 {fmt(r['ema50'])}{why}")
     cand = next((r["candle"] for r in res if r.get("candle") is not None), None)
     when = f"{cand:%d %b %H:%M}" if cand is not None else f"{now:%H:%M}"
     errs = [r["symbol"] for r in res if r.get("error")]
-    print(f"  → {len(good)} bullish of {len(res) - len(errs)}" + (f" ({len(errs)} errors: {', '.join(errs)})" if errs else ""))
+    n = len(res) - len(errs)
+    print(f"  → {len(good)} bullish, {len(bad)} bearish, {n - len(good) - len(bad)} neither, of {n}"
+          + (f" ({len(errs)} errors: {', '.join(errs)})" if errs else ""))
     if not do_push:
         return
-    title = f"Chandu bullish: {len(good)} of {len(res) - len(errs)} ({when} 10-min candle)"
-    lines = [f"{r['symbol']}  {fmt(r['close'])}  CPR+{r['vs_cpr_pct']:.2f}%  "
-             f"EMA20 {fmt(r['ema20'])} > 50 {fmt(r['ema50'])}" for r in good]
-    body = "\n".join(lines) or "No symbol meets all 3 rules."
-    body += "\n\nRules: close > CPR (TC, CC, BC) · close > EMA20 · EMA20 > EMA50"
+    title = f"Chandu: {len(good)} bullish · {len(bad)} bearish of {n} ({when} 10-min candle)"
+    up = [f"{r['symbol']}  {fmt(r['close'])}  CPR+{r['vs_cpr_pct']:.2f}%  "
+          f"EMA20 {fmt(r['ema20'])} > 50 {fmt(r['ema50'])}" for r in good]
+    dn = [f"{r['symbol']}  {fmt(r['close'])}  CPR−{r['below_cpr_pct']:.2f}%  "
+          f"EMA20 {fmt(r['ema20'])} < 50 {fmt(r['ema50'])}" for r in bad]
+    body = (f"🟢 BULLISH ({len(good)})\n" + ("\n".join(up) or "none")
+            + f"\n\n🔴 BEARISH ({len(bad)})\n" + ("\n".join(dn) or "none")
+            + "\n\nBull: close > CPR (TC, CC, BC) · close > EMA20 · EMA20 > EMA50"
+            + "\nBear: close < CPR (TC, CC, BC) · close < EMA20 · EMA20 < EMA50")
     if errs:
         body += f"\nNot found: {', '.join(errs)}"
     push(env("CHANDU_NTFY_TOPIC", "chandu-logic"), title, body)
