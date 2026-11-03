@@ -11,12 +11,13 @@ Bearish is the mirror:
   3. 20 EMA below the 50 EMA
 
 Retracements (step 4), one scenario per EMA (20 and 50), today's candles only:
-  Bullish: 20 EMA above 50 EMA. Touch candle — low within 0.1 % of the EMA (or under it), close
-  above it (20 EMA scenario: low stays above the 50 EMA). Next candle = bounce: green, closes
-  above the EMA and above the touch candle's close. Both close above the CPR. Listed in every
-  push until a candle closes below that EMA, at / below the CPR top, or 20 EMA < 50 EMA.
-  Bearish: the mirror (high within 0.1 % of the EMA, closes below it, red bounce candle, below
-  the CPR bottom, 20 EMA below 50 EMA).
+  Bullish: 20 EMA above 50 EMA. The touch candle itself is the signal — no confirmation
+  candle: its low comes within 0.1 % of the EMA (or under it) and it closes above the EMA or at
+  par (no more than 0.1 % below it), above the CPR (20 EMA scenario: low stays above the 50 EMA).
+  Listed in every push until a candle closes more than 0.1 % below that EMA, at / below the CPR
+  top, or 20 EMA < 50 EMA.
+  Bearish: the mirror (high within 0.1 % of the EMA or over it, close below or at par, below the
+  CPR bottom, 20 EMA below 50 EMA).
   The day's first candle (09:15) never counts as a touch — on gap days the EMAs still carry
   yesterday's prices (CHANDU_FIRST_TOUCH=1 to allow it).
 
@@ -87,37 +88,36 @@ def retracements(m10: pd.DataFrame, e20: pd.Series, e50: pd.Series, top: float, 
                  session: datetime.date, first_touch: bool = False) -> dict:
     """Walk today's closed candles; the retracements still valid at the last one.
 
-    Returns {("bull"|"bear", 20|50): {touch, bounce, touch_low/high, ema_at_touch, close}}.
+    The touch candle itself is the signal (no confirmation candle): its low reaches the EMA
+    (within 0.1 % or under it) and it closes above the EMA or at par with it (no more than
+    0.1 % below). Bearish is the mirror.
+    Returns {("bull"|"bear", 20|50): {touch, extreme, ema_at_touch}}.
     """
-    c, o, h, l = (m10[k].to_numpy(dtype=float) for k in ("Close", "Open", "High", "Low"))
+    c, h, l = (m10[k].to_numpy(dtype=float) for k in ("Close", "High", "Low"))
     a20, a50 = e20.to_numpy(dtype=float), e50.to_numpy(dtype=float)
     idx = m10.index
     day = [i for i in range(len(m10)) if idx[i].date() == session]
     active: dict = {}
     for i in day:
-        j = i - 1
-        if j < 0 or idx[j].date() != session or (not first_touch and j == day[0]):
-            continue
         for n, ema in ((20, a20), (50, a50)):
-            # end of an active retracement
             kb, ks = ("bull", n), ("bear", n)
-            if kb in active and (c[i] < ema[i] or c[i] <= top or a20[i] <= a50[i]):
+            par_lo, par_hi = ema[i] * (1 - TOUCH_PCT), ema[i] * (1 + TOUCH_PCT)
+            # end of an active retracement: a close clearly past the EMA, back at the CPR,
+            # or the EMAs crossed
+            if kb in active and (c[i] < par_lo or c[i] <= top or a20[i] <= a50[i]):
                 active.pop(kb)
-            if ks in active and (c[i] > ema[i] or c[i] >= bot or a20[i] >= a50[i]):
+            if ks in active and (c[i] > par_hi or c[i] >= bot or a20[i] >= a50[i]):
                 active.pop(ks)
-            # new bullish retracement: touch at j, bounce at i
-            if kb not in active:
-                touch = (l[j] <= ema[j] * (1 + TOUCH_PCT) and c[j] > ema[j] and c[j] > top
-                         and a20[j] > a50[j] and (n == 50 or l[j] > a50[j] * (1 + TOUCH_PCT)))
-                bounce = c[i] > o[i] and c[i] > ema[i] and c[i] > c[j] and c[i] > top and a20[i] > a50[i]
-                if touch and bounce:
-                    active[kb] = {"touch": idx[j], "bounce": idx[i], "extreme": l[j], "ema_at_touch": ema[j]}
-            if ks not in active:
-                touch = (h[j] >= ema[j] * (1 - TOUCH_PCT) and c[j] < ema[j] and c[j] < bot
-                         and a20[j] < a50[j] and (n == 50 or h[j] < a50[j] * (1 - TOUCH_PCT)))
-                bounce = c[i] < o[i] and c[i] < ema[i] and c[i] < c[j] and c[i] < bot and a20[i] < a50[i]
-                if touch and bounce:
-                    active[ks] = {"touch": idx[j], "bounce": idx[i], "extreme": h[j], "ema_at_touch": ema[j]}
+            if not first_touch and i == day[0]:
+                continue            # 09:15: the EMAs still carry yesterday's prices
+            # bullish touch: low at / under the EMA, close above or at par, above the CPR
+            if kb not in active and (l[i] <= par_hi and c[i] >= par_lo and c[i] > top and a20[i] > a50[i]
+                                     and (n == 50 or l[i] > a50[i] * (1 + TOUCH_PCT))):
+                active[kb] = {"touch": idx[i], "extreme": l[i], "ema_at_touch": ema[i]}
+            # bearish touch: high at / over the EMA, close below or at par, below the CPR
+            if ks not in active and (h[i] >= par_lo and c[i] <= par_hi and c[i] < bot and a20[i] < a50[i]
+                                     and (n == 50 or h[i] < a50[i] * (1 - TOUCH_PCT))):
+                active[ks] = {"touch": idx[i], "extreme": h[i], "ema_at_touch": ema[i]}
     return active
 
 
@@ -198,7 +198,7 @@ def scan(symbols: list[str], do_push: bool) -> None:
             nb = [k for k, v in r["bull_rules"].items() if not v]
             ns = [k for k, v in r["bear_rules"].items() if not v]
             why = f" | bull fails: {', '.join(nb)} | bear fails: {', '.join(ns)}"
-        rt = "".join(f" | {'BULL' if k[0] == 'bull' else 'BEAR'} RETR EMA{k[1]} (bounce {v['bounce']:%H:%M})"
+        rt = "".join(f" | {'BULL' if k[0] == 'bull' else 'BEAR'} RETR EMA{k[1]} (touch {v['touch']:%H:%M})"
                      for k, v in r.get("retr", {}).items())
         print(f"  {r['symbol']:12s} {tag} close {fmt(r['close']):>10} | "
               f"CPR TC {fmt(r['tc'])} CC {fmt(r['cc'])} BC {fmt(r['bc'])} | EMA20 {fmt(r['ema20'])} "
@@ -223,8 +223,8 @@ def scan(symbols: list[str], do_push: bool) -> None:
           f"EMA20 {fmt(r['ema20'])} < 50 {fmt(r['ema50'])}" for r in bad]
     def rlines(k):
         word = "low" if k[0] == "bull" else "high"
-        return "\n".join(f"{r['symbol']}  {fmt(r['close'])}  bounced {v['bounce']:%H:%M} (touch {v['touch']:%H:%M}, "
-                         f"{word} {fmt(v['extreme'])} vs EMA{k[1]} {fmt(v['ema_at_touch'])})"
+        return "\n".join(f"{r['symbol']}  {fmt(r['close'])}  touched {v['touch']:%H:%M} "
+                         f"({word} {fmt(v['extreme'])} vs EMA{k[1]} {fmt(v['ema_at_touch'])})"
                          for r, v in retr[k]) or "none"
     body = (f"🟢 BULLISH ({len(good)})\n" + ("\n".join(up) or "none")
             + f"\n\n🔴 BEARISH ({len(bad)})\n" + ("\n".join(dn) or "none")
