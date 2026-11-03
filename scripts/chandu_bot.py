@@ -243,10 +243,22 @@ def scan(symbols: list[str], do_push: bool) -> None:
 def main() -> None:
     ap = argparse.ArgumentParser(description="chandu-logic 10-min bullish scan")
     ap.add_argument("--loop", action="store_true", help="scan after every 10-min close, 09:25–15:35")
+    ap.add_argument("--cron", action="store_true",
+                    help="for a 10-min cron: one scan, only on weekdays 09:25–15:35 IST (else exit quietly)")
     ap.add_argument("--no-push", action="store_true", help="log only, no ntfy push")
     ap.add_argument("--symbols", help="comma list instead of symbols.txt")
     a = ap.parse_args()
     symbols = load_symbols(a.symbols)
+    if a.cron:
+        now = datetime.datetime.now(IST)
+        mins = now.hour * 60 + now.minute
+        # the 09:15 candle closes at 09:25 — earlier runs would read yesterday's candles
+        if now.weekday() >= 5 or not (9 * 60 + 25 <= mins <= 15 * 60 + 35):
+            return
+        if now.second < 15:
+            time.sleep(15 - now.second)    # let Kite finish the candle that just closed
+        scan(symbols, not a.no_push)
+        return
     if not a.loop:
         scan(symbols, not a.no_push)
         return
