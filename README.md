@@ -18,7 +18,7 @@ branches; the trading logic is written here step by step with the user.
 | `core/kite_data.py` | Historical OHLCV from Kite (`fetch_ohlcv`) | ma-cpr-scalp `screener/` |
 | `core/live_ticks.py` | Reads live ticks / 1m candles from Redis | ma-cpr-scalp `screener/` |
 | `core/kite_order.py` | ATM option LIMIT buy + OCO GTT, safe sells (GTT id fix of 2 Nov included) | ma-cpr-scalp `screener/` |
-| `scripts/chandu_bot.py` | Step 2: 10-min scan — bullish: close above CPR (TC, CC, BC) + close above EMA20 + EMA20 > EMA50; bearish (step 3): the mirror (below CPR, below EMA20, EMA20 < EMA50); both lists in one push → ntfy topic `chandu-logic` (`CHANDU_NTFY_TOPIC`). `--loop` = after every 10-min close 09:25–15:35, default = one scan | new |
+| `scripts/chandu_bot.py` | Step 2: 10-min scan — bullish: close above CPR (TC, CC, BC) + close above EMA20 + EMA20 > EMA50; bearish (step 3): the mirror (below CPR, below EMA20, EMA20 < EMA50); retracements (step 4): bull/bear × EMA20/EMA50 — touch within 0.1 % + bounce candle, above/below the CPR, listed in every push while valid, 09:15 candle never a touch (`CHANDU_FIRST_TOUCH=1` allows it); all in one push → ntfy topic `chandu-logic` (`CHANDU_NTFY_TOPIC`). `--loop` = after every 10-min close 09:25–15:35, default = one scan | new |
 | `symbols.txt` | Symbols to scan (indices + NIFTY 50), edit with nano | new |
 | `start_droplet.sh` / `stop_droplet.sh` | Start / stop the live feed and the bot | new |
 
