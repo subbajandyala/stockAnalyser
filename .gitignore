@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+.env
+.env.bak*
+.kite_creds.json
+kite_creds.json
+data/
+*.log
+state*.json
+.watchdog_off
