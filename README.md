@@ -1,31 +1,27 @@
-# CLAUDE.md — branch `chandu-logic`
+# CLAUDE.md — branch `srikanth-trendlyne-logic`
 
-A fresh, small trading bot. Only proven plumbing was copied in from the other
-branches; the trading logic is written here step by step with the user.
+Srikanth's Trendlyne screener rebuilt on Kite daily data. Fresh branch: only proven
+plumbing (from `chandu-logic`'s clean base) plus one screener script.
 
 ## Rules
-- Credentials live ONLY in `/root/stockAnalyser/.env` on the droplet. Never commit
-  KITE_* keys, tokens, passwords, TOTP secrets or any other secret.
+- Credentials live ONLY in `.env` on the droplet (here a symlink to
+  `/root/stockAnalyser/.env`). Never commit keys, tokens, passwords or TOTP secrets.
 - The user works from a phone over SSH: give single-line commands.
-- Confirm each rule with the user (and check it on data) before coding it.
-- No model identifiers in commits.
+- Confirm rules with the user before coding them. No model identifiers in commits.
 
-## Layout
-| Path | What | Copied from |
-|---|---|---|
-| `auto_token.py` | 08:00 cron: Kite login + TOTP → new access token in `.env`, then restarts | ma-cpr-scalp |
-| `ticker_daemon.py` | KiteTicker WebSocket → Redis (`tick:{token}`, `candles:1m:{token}`) | ma-cpr-scalp |
-| `core/kite_data.py` | Historical OHLCV from Kite (`fetch_ohlcv`) | ma-cpr-scalp `screener/` |
-| `core/live_ticks.py` | Reads live ticks / 1m candles from Redis | ma-cpr-scalp `screener/` |
-| `core/kite_order.py` | ATM option LIMIT buy + OCO GTT, safe sells (GTT id fix of 2 Nov included) | ma-cpr-scalp `screener/` |
-| `scripts/chandu_bot.py` | The bot — not written yet | new |
-| `start_droplet.sh` / `stop_droplet.sh` | Start / stop the live feed and the bot | new |
+## The screener — `scripts/trendlyne_screen.py`
+Nifty 500 (NSE list, cached a week in `data/nifty500.csv`), daily candles from Kite:
+- price within ±2 % of the daily 20 EMA
+- price 0–5 % below the 1-year high
+- price above the daily 50 EMA, 20 EMA above 50 EMA
+- market cap > ₹1,000 cr → met by the Nifty 500 universe
+- Trendlyne Momentum Score > 60 → OUR OWN 0–100 score > 60 (`TRENDLYNE_MIN_SCORE`):
+  25 1-month + 25 3-month + 20 6-month return percentile rank across the Nifty 500,
+  15 RSI(14) (40 → 0, 70+ → full), 15 nearness to the 1-year high (0 % → full, 20 % → 0)
 
-## .env (droplet)
-```
-KITE_API_KEY=...  KITE_API_SECRET=...  KITE_ACCESS_TOKEN=...
-KITE_USER_ID=...  KITE_PASSWORD=...    KITE_TOTP_SECRET=...
-KITE_AUTO_TRADE=0   # 1 = place real orders
-NTFY_TOPIC=...
-```
-Cron: `30 2 * * * cd /root/stockAnalyser && /root/venv/bin/python auto_token.py >> token_refresh.log 2>&1`
+Output: ntfy topic `srikanth-trendlyne` (`TRENDLYNE_NTFY_TOPIC`) and
+`data/trendlyne_<date>_<time>.csv` with every stock. Run time / schedule: not set yet.
+
+## Other files
+`auto_token.py`, `ticker_daemon.py`, `core/` (Kite data, live ticks, orders) — copied
+plumbing, not used by the screener except `core/kite_data.py`.
