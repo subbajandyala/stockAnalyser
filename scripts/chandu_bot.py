@@ -74,8 +74,8 @@ def check(symbol: str, now: datetime.datetime) -> dict:
     if get_token(symbol) is None:
         out["error"] = "symbol not found on Kite"
         return out
-    tomorrow = now.date() + datetime.timedelta(days=1)
-    m10 = fetch_ohlcv(symbol, f"{TF_MIN}minute", days=HIST_DAYS, to_date=tomorrow)
+    upto = now.replace(tzinfo=None, microsecond=0)      # "to" = now (IST), never a future date
+    m10 = fetch_ohlcv(symbol, f"{TF_MIN}minute", days=HIST_DAYS, to_date=upto)
     time.sleep(API_GAP_SEC)
     if m10.empty or len(m10) < EMA_SLOW + 5:
         out["error"] = f"no 10-min data — {_kd.LAST_ERROR or f'only {len(m10)} candles'}"
@@ -84,7 +84,7 @@ def check(symbol: str, now: datetime.datetime) -> dict:
     if (now - m10.index[-1].to_pydatetime()).total_seconds() < TF_MIN * 60:
         m10 = m10.iloc[:-1]
     session = m10.index[-1].date()
-    day = fetch_ohlcv(symbol, "day", days=15, to_date=tomorrow)
+    day = fetch_ohlcv(symbol, "day", days=15, to_date=upto)
     time.sleep(API_GAP_SEC)
     prev = day[[d.date() < session for d in day.index]] if not day.empty else day
     if prev.empty:
