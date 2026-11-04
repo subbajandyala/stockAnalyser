@@ -158,6 +158,17 @@ MACPR_GTT_MIN_TP = float(_env_setting("CHART_MACPR_GTT_MIN_TP_PCT") or 0.30)
 # "always" since 2 Nov: with a target ahead the trade had no exit but the stop and sat losing
 # premium (expiry-eve theta); backtest 23–30 Oct: always +483 vs open-sky only +382
 MACPR_MA10 = (_env_setting("CHART_MACPR_MA10_EXIT") or "always").lower()
+# Profit lock: once the option premium is up LOCK + BUFFER points, the GTT stop moves up to
+# entry + LOCK — the ride / target carry on, and a fall back to entry + LOCK books those points.
+# CHART_LOCK_PTS_NIFTY=10 / CHART_LOCK_PTS_SENSEX=30 (0 = off); CHART_LOCK_BUFFER_PTS=1 keeps the
+# new stop trigger clear of the live price when it is set.
+LOCK_PTS = {}
+for _sym, _dflt in (("NIFTY", 10.0), ("SENSEX", 30.0)):
+    _v = _env_setting(f"CHART_LOCK_PTS_{_sym}")
+    _v = float(_v) if _v.strip() else (_dflt if MACPR else 0.0)
+    if _v > 0:
+        LOCK_PTS[_sym] = _v
+LOCK_BUFFER = float(_env_setting("CHART_LOCK_BUFFER_PTS") or 1.0)
 MA_ALERTS = MACPR and (_env_setting("CHART_MA_ALERTS") or "1") != "0"
 MA_ALERT_MAS = {int(x) for x in (_env_setting("CHART_MA_ALERT_MAS") or "10,20,50").split(",") if x.strip().isdigit()}
 MA_ALERT_KINDS = {x.strip().lower() for x in
@@ -922,6 +933,28 @@ def _manage_trade(kite, symbol: str, state: dict, trade_key: str,
                           f"{ts}: GTT placement failed ({e}). Set a stop loss in Kite manually.",
                           ntfy_topic, priority="urgent")
             return
+    # Profit lock: premium reached entry + LOCK (+ buffer) → GTT stop to entry + LOCK, ride continues
+    lock = LOCK_PTS.get(symbol)
+    if lock and gtt_id and not state.get(k("locked")) and ltp >= entry + lock + LOCK_BUFFER:
+        new_sl = _tick(entry + lock)
+        if new_sl > sl:
+            try:
+                modify_oco_gtt(kite, symbol, ts, gtt_id, qty, new_sl, far, ltp)
+                state.update({k("sl"): new_sl, k("locked"): True})
+                sl = new_sl
+                print(f"  [LOCK] {symbol}: ₹{ltp:.2f} ≥ entry ₹{entry:.2f} + {lock:g} — GTT stop raised to "
+                      f"₹{new_sl} (locks +{lock:g} pts), target ₹{far} unchanged")
+                send_ntfy(f"Chart Bot: {symbol} +{lock:g} pts locked",
+                          f"{ts}: LTP ₹{ltp:.2f}, entry ₹{entry:.2f}\nStop moved to ₹{new_sl} "
+                          f"(+{lock:g} pts booked if it falls back)\nRide / target ₹{far} continue",
+                          ntfy_topic, priority="low")
+            except Exception as e:
+                print(f"  [LOCK] {symbol}: GTT stop move to ₹{new_sl} failed — {e}")
+    if state.get(k("locked")) and ltp <= sl:
+        # back to the lock level: Kite's GTT should already be selling; this is the bot's backup
+        _exit_bot_position(kite, symbol, state, trade_key,
+                           f"profit lock — premium ₹{ltp:.2f} back to ₹{sl} (entry +{(lock or 0):g})", ntfy_topic)
+        return
     if state.get(k("mode")) == "ride" and not state.get(k("trailing")):
         # Before +20% a ride trade is a normal scalp: cut it if it isn't working
         held_min = _minutes_between(state.get(k("entry_t"), ""), now_ist)
