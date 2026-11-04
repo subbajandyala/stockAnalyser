@@ -140,6 +140,67 @@ def retracements(m10: pd.DataFrame, e20: pd.Series, e50: pd.Series, top: float, 
     return active
 
 
+def trade_plan(k, m10: pd.DataFrame, e20: pd.Series, e50: pd.Series, i: int,
+               top: float, bot: float, r1: float, s1: float) -> dict:
+    """Stop / targets for a retracement signal on candle i, then what has happened since.
+
+    Bull 20 EMA : SL touch low − 0.1 % (and a close below the 50 EMA); T1 today's high so far
+                  (1.5 × risk if already at the high); then trail the 20 EMA
+    Bull 50 EMA : SL touch low − 0.1 %; T1 the 20 EMA (today's high if not ahead); T2 today's high
+    Bull CPR    : SL a close > 0.1 % back inside the CPR, hard SL CPR bottom − 0.1 %;
+                  T1 today's high so far, T2 R1 (2 × pivot − yesterday's low)
+    Bear        : the mirrors (touch high + 0.1 %, today's low, S1)
+    At T1: book half, stop to cost; the rest to T2 or a close back past the 20 EMA.
+    """
+    C, H, L = (m10[c].to_numpy(dtype=float) for c in ("Close", "High", "Low"))
+    E20, E50 = e20.to_numpy(dtype=float), e50.to_numpy(dtype=float)
+    side = 1 if k[0] == "bull" else -1
+    day = m10.index[i].date()
+    today = [q for q in range(max(0, i - 40), i + 1) if m10.index[q].date() == day]
+    hi, lo = max(H[q] for q in today), min(L[q] for q in today)
+    px = C[i]
+    close_stop = None
+    if k[1] == "cpr":
+        hard = bot * 0.999 if side > 0 else top * 1.001
+        close_stop = top * 0.999 if side > 0 else bot * 1.001
+    else:
+        hard = L[i] * 0.999 if side > 0 else H[i] * 1.001
+    risk = abs(px - (close_stop or hard))
+    lvl = hi if side > 0 else lo
+    if k[1] == 20:
+        t1, t2 = (lvl if (lvl - px) * side > 0 else px + side * 1.5 * risk), None
+    elif k[1] == 50:
+        t1, t2 = E20[i], lvl
+        if (t1 - px) * side <= 0:
+            t1, t2 = t2, None
+    else:
+        t1, t2 = lvl, (r1 if side > 0 else s1)
+    if (t1 - px) * side <= 0:
+        t1 = px + side * 1.5 * risk
+    if t2 is not None and (t2 - px) * side <= (t1 - px) * side:
+        t2 = None
+    # what has happened since the signal (closed candles only)
+    status, stop, half = "open", hard, False
+    for q in range(i + 1, len(m10)):
+        if m10.index[q].date() != day:
+            break
+        tag = f"{m10.index[q]:%H:%M}"
+        if (side > 0 and L[q] <= stop) or (side < 0 and H[q] >= stop):
+            status = f"SL hit {tag}" if not half else f"T1 done, rest out at cost {tag}"; break
+        if close_stop and not half and ((side > 0 and C[q] < close_stop) or (side < 0 and C[q] > close_stop)):
+            status = f"SL hit (back inside CPR) {tag}"; break
+        if k[1] == 20 and not half and ((side > 0 and C[q] < E50[q]) or (side < 0 and C[q] > E50[q])):
+            status = f"SL hit (close past 50 EMA) {tag}"; break
+        if not half and ((side > 0 and H[q] >= t1) or (side < 0 and L[q] <= t1)):
+            half, stop, status = True, px, f"T1 hit {tag} — stop to cost"
+        if half:
+            if t2 is not None and ((side > 0 and H[q] >= t2) or (side < 0 and L[q] <= t2)):
+                status = f"T2 hit {tag} ✅"; break
+            if (side > 0 and C[q] < E20[q]) or (side < 0 and C[q] > E20[q]):
+                status = f"T1 done, rest out on 20 EMA {tag}"; break
+    return {"entry": px, "sl": hard, "sl_close": close_stop, "t1": t1, "t2": t2, "status": status}
+
+
 def check(symbol: str, now: datetime.datetime) -> dict:
     """Read one symbol; returns its numbers and whether each rule passes."""
     out = {"symbol": symbol, "ok": False}
@@ -169,6 +230,13 @@ def check(symbol: str, now: datetime.datetime) -> dict:
     e20, e50 = float(s20.iloc[-1]), float(s50.iloc[-1])
     top, bot = max(tc, cc, bc), min(tc, cc, bc)
     out["retr"] = retracements(m10, s20, s50, top, bot, session, env("CHANDU_FIRST_TOUCH") == "1")
+    pv = prev.iloc[-1]
+    r1, s1 = 2 * cc - float(pv["Low"]), 2 * cc - float(pv["High"])
+    for k, v in out["retr"].items():
+        try:
+            v["plan"] = trade_plan(k, m10, s20, s50, m10.index.get_loc(v["touch"]), top, bot, r1, s1)
+        except Exception as e:                  # levels are extra information — never break the scan
+            v["plan"] = {"error": str(e)}
     bull = {"above CPR": close > top, "above EMA20": close > e20, "EMA20 > EMA50": e20 > e50}
     bear = {"below CPR": close < bot, "below EMA20": close < e20, "EMA20 < EMA50": e20 < e50}
     out.update({"candle": m10.index[-1], "close": close, "tc": tc, "cc": cc, "bc": bc,
@@ -272,8 +340,17 @@ def scan(symbols: list[str], do_push: bool) -> None:
           f"EMA20 {fmt(r['ema20'])} < 50 {fmt(r['ema50'])}" for r in bad]
     def rlines(k):
         word = "low" if k[0] == "bull" else "high"
+        def plan_txt(v):
+            p = v.get("plan") or {}
+            if "t1" not in p:
+                return ""
+            sl = (f"SL close {'<' if k[0] == 'bull' else '>'} {fmt(p['sl_close'])} / {fmt(p['sl'])}"
+                  if p.get("sl_close") else f"SL {fmt(p['sl'])}")
+            return (f"\n   entry {fmt(p['entry'])} · {sl} · T1 {fmt(p['t1'])}"
+                    + (f" · T2 {fmt(p['t2'])}" if p.get("t2") else " · then trail 20 EMA")
+                    + f" · {p['status']}")
         return "\n".join(f"{r['symbol']}  {fmt(r['close'])}  touched {v['touch']:%H:%M} "
-                         f"({word} {fmt(v['extreme'])} vs {line_name(k)} {fmt(v['ema_at_touch'])})"
+                         f"({word} {fmt(v['extreme'])} vs {line_name(k)} {fmt(v['ema_at_touch'])})" + plan_txt(v)
                          for r, v in retr[k]) or "none"
     body = (f"🟢 BULLISH ({len(good)})\n" + ("\n".join(up) or "none")
             + f"\n\n🔴 BEARISH ({len(bad)})\n" + ("\n".join(dn) or "none")
