@@ -222,6 +222,72 @@ Tap a ▲ / ▼ / × for the trade. Index points; ATM option ≈ half.</p>
     path.write_text(html, encoding="utf-8")
 
 
+SHORT = {("bull", 20): "B20", ("bull", 50): "B50", ("bull", "cpr"): "BCPR",
+         ("bear", 20): "S20", ("bear", 50): "S50", ("bear", "cpr"): "SCPR"}
+
+
+def plot_weeks(sym: str, m10, e20, e50, daily, T, weeks: int) -> list[tuple[pathlib.Path, str]]:
+    """One PNG per week (newest last) — ntfy shows images inside the notification."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    from matplotlib.lines import Line2D
+    out = []
+    wk = pd.Series(m10.index.to_period("W-SUN").astype(str), index=m10.index)
+    for w in list(dict.fromkeys(wk))[-weeks:]:
+        sel = m10[wk == w]
+        if len(sel) < 10:
+            continue
+        x0 = m10.index.get_loc(sel.index[0])
+        n = len(sel)
+        fig, ax = plt.subplots(figsize=(13, 6.2), dpi=110)
+        for j, (t, r) in enumerate(sel.iterrows()):
+            col = "#26a69a" if r.Close >= r.Open else "#ef5350"
+            ax.vlines(j, r.Low, r.High, color=col, lw=0.8)
+            ax.add_patch(plt.Rectangle((j - 0.32, min(r.Open, r.Close)), 0.64,
+                                       max(abs(r.Close - r.Open), 1e-6), color=col))
+        ax.plot(range(n), e20.iloc[x0:x0 + n].to_numpy(), color="#ffb300", lw=1.3)
+        ax.plot(range(n), e50.iloc[x0:x0 + n].to_numpy(), color="#7e57c2", lw=1.3)
+        ticks, labels = [], []
+        for day in sorted(set(sel.index.date)):
+            js = [j for j, t in enumerate(sel.index) if t.date() == day]
+            ticks.append(js[0]); labels.append(f"{day:%a %d %b}")
+            ax.axvline(js[0] - 0.5, color="#cfd8dc", lw=0.8)
+            prev = daily[[d.date() < day for d in daily.index]]
+            if not prev.empty:
+                tc, cc, bc = cb.cpr(prev.iloc[-1])
+                ax.hlines([max(tc, cc, bc), min(tc, cc, bc)], js[0], js[-1], colors="#90a4ae", linestyles=":", lw=1.1)
+        g = T[(T.t >= sel.index[0]) & (T.t <= sel.index[-1])] if not T.empty else T
+        lines = []
+        for r in (g.itertuples() if not g.empty else []):
+            je = sel.index.get_loc(r.t)
+            jx = sel.index.get_loc(r.xt) if r.xt in sel.index else je
+            col = COLORS[r.k]
+            ax.hlines(r.stop, je, jx, colors="#c62828", linestyles="--", lw=0.9)
+            ax.hlines(r.t1, je, jx, colors="#2e7d32", linestyles="--", lw=0.9)
+            ax.scatter(je, r.entry, marker="^" if r.side > 0 else "v", s=90, color=col, edgecolor="k", zorder=5)
+            ax.scatter(jx, r.xp, marker="X", s=70, color="#2e7d32" if r.pts > 0 else "#c62828", edgecolor="k", zorder=5)
+            ax.annotate(f"{SHORT[r.k]} {r.pts:+.0f}", (je, r.entry), xytext=(0, 12 if r.side > 0 else -16),
+                        textcoords="offset points", ha="center", fontsize=8, color=col, fontweight="bold")
+            lines.append(r.pts)
+        ax.set_xticks(ticks); ax.set_xticklabels(labels, fontsize=9)
+        ax.set_xlim(-1, n); ax.grid(alpha=0.25); ax.tick_params(axis="y", labelsize=9)
+        tot = sum(lines)
+        ax.set_title(f"{sym} 10-min — week of {sel.index[0]:%d %b}: {len(lines)} trades, "
+                     f"{sum(1 for v in lines if v > 0)} won, {tot:+.0f} pts", loc="left", fontsize=12, fontweight="bold")
+        handles = [Line2D([], [], color="#ffb300", lw=1.3, label="EMA20"), Line2D([], [], color="#7e57c2", lw=1.3, label="EMA50"),
+                   Line2D([], [], color="#90a4ae", ls=":", label="CPR"), Line2D([], [], color="#c62828", ls="--", label="stop"),
+                   Line2D([], [], color="#2e7d32", ls="--", label="T1")] + \
+                  [Line2D([], [], marker="^" if k[0] == "bull" else "v", ls="", color=COLORS[k], markeredgecolor="k",
+                          label=f"{SHORT[k]} {NAMES[k][2:]}") for k in NAMES]
+        ax.legend(handles=handles, fontsize=7.5, ncol=6, loc="upper left", framealpha=0.85)
+        fig.tight_layout()
+        path = ROOT / "data" / f"bt_{sym}_week_{sel.index[0]:%Y%m%d}.png"
+        fig.savefig(path); plt.close(fig)
+        out.append((path, f"{sym} week of {sel.index[0]:%d %b}: {len(lines)} trades, {tot:+.0f} pts"))
+    return out
+
+
 def push_file(path: pathlib.Path, title: str) -> None:
     import requests
     topic = cb.env("CHANDU_NTFY_TOPIC", "chandu-logic")
@@ -239,7 +305,8 @@ def main() -> None:
     ap.add_argument("--days", type=int, default=120)
     ap.add_argument("--trades", action="store_true", help="also list every trade")
     ap.add_argument("--plot", action="store_true", help="write an interactive chart to data/")
-    ap.add_argument("--push", action="store_true", help="with --plot: send the chart file to ntfy")
+    ap.add_argument("--push", action="store_true", help="send weekly PNG charts to ntfy (shown in the notification)")
+    ap.add_argument("--weeks", type=int, default=4, help="with --push: how many recent weeks to send (default 4)")
     a = ap.parse_args()
     sym = a.symbol.upper()
     m10 = fetch(sym, "10minute", a.days + 10, 95)
@@ -270,13 +337,20 @@ def main() -> None:
         print("\n" + T.assign(t=T.t.dt.strftime("%d %b %H:%M"), k=T.k.map(NAMES))[
             ["k", "t", "entry", "risk", "pts", "why"]].round(1).to_string(index=False))
     print("\nIndex points; ATM option ≈ half. No slippage, theta or charges.")
+    (ROOT / "data").mkdir(exist_ok=True)
     if a.plot:
-        (ROOT / "data").mkdir(exist_ok=True)
         path = ROOT / "data" / f"bt_{sym}_{dates[-1]:%Y%m%d}.html"
         plot(sym, m10, e20, e50, daily, T, path)
         print(f"  chart saved: {path} ({path.stat().st_size // 1024} KB)")
-        if a.push:
-            push_file(path, f"{sym} retracement backtest chart ({dates[0]:%d %b} → {dates[-1]:%d %b})")
+    if a.push:
+        try:
+            imgs = plot_weeks(sym, m10, e20, e50, daily, T, a.weeks)
+        except ImportError:
+            raise SystemExit("matplotlib missing — run: /root/venv/bin/pip install matplotlib")
+        for path, title in imgs:
+            print(f"  {path.name}")
+            push_file(path, title)
+            cb.time.sleep(1)
 
 
 if __name__ == "__main__":
