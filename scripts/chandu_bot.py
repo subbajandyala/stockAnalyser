@@ -55,6 +55,7 @@ EMA_FAST, EMA_SLOW = 20, 50
 HIST_DAYS = 12                 # 10-min history for the 50 EMA (≈ 37 candles a day)
 API_GAP_SEC = 0.35             # Kite historical API allows ~3 requests a second
 TOUCH_PCT = 0.001              # a "touch" = within 0.1 % of the EMA
+AWAY_PCT = 0.002               # CPR retracement: must first close this far beyond the CPR today
 
 
 def env(name: str, default: str = "") -> str:
@@ -98,6 +99,7 @@ def retracements(m10: pd.DataFrame, e20: pd.Series, e50: pd.Series, top: float, 
     idx = m10.index
     day = [i for i in range(len(m10)) if idx[i].date() == session]
     active: dict = {}
+    was_above = was_below = False   # closed clearly beyond the CPR earlier today
     for i in day:
         for n, ema in ((20, a20), (50, a50)):
             kb, ks = ("bull", n), ("bear", n)
@@ -118,6 +120,21 @@ def retracements(m10: pd.DataFrame, e20: pd.Series, e50: pd.Series, top: float, 
             if ks not in active and (h[i] >= par_lo and c[i] <= par_hi and c[i] < bot and a20[i] < a50[i]
                                      and (n == 50 or h[i] < a50[i] * (1 - TOUCH_PCT))):
                 active[ks] = {"touch": idx[i], "extreme": h[i], "ema_at_touch": ema[i]}
+        # CPR retracement — a pullback to the CPR after closing clearly beyond it earlier today
+        kb, ks = ("bull", "cpr"), ("bear", "cpr")
+        if kb in active and c[i] < top * (1 - TOUCH_PCT):
+            active.pop(kb)                              # closed back inside the CPR
+        if ks in active and c[i] > bot * (1 + TOUCH_PCT):
+            active.pop(ks)
+        if first_touch or i != day[0]:
+            if (kb not in active and was_above and l[i] <= top * (1 + TOUCH_PCT)
+                    and c[i] >= top * (1 - TOUCH_PCT) and a20[i] > a50[i]):
+                active[kb] = {"touch": idx[i], "extreme": l[i], "ema_at_touch": top}
+            if (ks not in active and was_below and h[i] >= bot * (1 - TOUCH_PCT)
+                    and c[i] <= bot * (1 + TOUCH_PCT) and a20[i] < a50[i]):
+                active[ks] = {"touch": idx[i], "extreme": h[i], "ema_at_touch": bot}
+        was_above = was_above or c[i] > top * (1 + AWAY_PCT)
+        was_below = was_below or c[i] < bot * (1 - AWAY_PCT)
     return active
 
 
@@ -161,6 +178,13 @@ def check(symbol: str, now: datetime.datetime) -> dict:
     return out
 
 
+def line_name(k) -> str:
+    """Name of the retracement line: EMA20 / EMA50 / CPR top / CPR bottom."""
+    if k[1] == "cpr":
+        return "CPR top" if k[0] == "bull" else "CPR bottom"
+    return f"EMA{k[1]}"
+
+
 def push(topic: str, title: str, body: str) -> None:
     try:
         requests.post(f"https://ntfy.sh/{topic}", data=body.encode("utf-8")[:3900],
@@ -186,7 +210,7 @@ def scan(symbols: list[str], do_push: bool) -> None:
             break
     good = sorted((r for r in res if r["ok"]), key=lambda r: -r["vs_cpr_pct"])
     retr = {k: [(r, r["retr"][k]) for r in res if not r.get("error") and k in r.get("retr", {})]
-            for k in (("bull", 20), ("bull", 50), ("bear", 20), ("bear", 50))}
+            for k in (("bull", 20), ("bull", 50), ("bull", "cpr"), ("bear", 20), ("bear", 50), ("bear", "cpr"))}
     bad = sorted((r for r in res if r.get("bear")), key=lambda r: -r["below_cpr_pct"])
     for r in res:
         if r.get("error"):
@@ -198,7 +222,7 @@ def scan(symbols: list[str], do_push: bool) -> None:
             nb = [k for k, v in r["bull_rules"].items() if not v]
             ns = [k for k, v in r["bear_rules"].items() if not v]
             why = f" | bull fails: {', '.join(nb)} | bear fails: {', '.join(ns)}"
-        rt = "".join(f" | {'BULL' if k[0] == 'bull' else 'BEAR'} RETR EMA{k[1]} (touch {v['touch']:%H:%M})"
+        rt = "".join(f" | {'BULL' if k[0] == 'bull' else 'BEAR'} RETR {line_name(k)} (touch {v['touch']:%H:%M})"
                      for k, v in r.get("retr", {}).items())
         print(f"  {r['symbol']:12s} {tag} close {fmt(r['close']):>10} | "
               f"CPR TC {fmt(r['tc'])} CC {fmt(r['cc'])} BC {fmt(r['bc'])} | EMA20 {fmt(r['ema20'])} "
@@ -207,14 +231,13 @@ def scan(symbols: list[str], do_push: bool) -> None:
     when = f"{cand:%d %b %H:%M}" if cand is not None else f"{now:%H:%M}"
     errs = [r["symbol"] for r in res if r.get("error")]
     n = len(res) - len(errs)
-    print(f"  → retracements: bull EMA20 {len(retr[('bull', 20)])}, bull EMA50 {len(retr[('bull', 50)])}, "
-          f"bear EMA20 {len(retr[('bear', 20)])}, bear EMA50 {len(retr[('bear', 50)])}")
+    print("  → retracements: " + ", ".join(f"{k[0]} {line_name(k)} {len(v)}" for k, v in retr.items()))
     print(f"  → {len(good)} bullish, {len(bad)} bearish, {n - len(good) - len(bad)} neither, of {n}"
           + (f" ({len(errs)} errors: {', '.join(errs)})" if errs else ""))
     if not do_push:
         return
-    nr_b = len(retr[("bull", 20)]) + len(retr[("bull", 50)])
-    nr_s = len(retr[("bear", 20)]) + len(retr[("bear", 50)])
+    nr_b = sum(len(v) for k, v in retr.items() if k[0] == "bull")
+    nr_s = sum(len(v) for k, v in retr.items() if k[0] == "bear")
     title = (f"Chandu: {len(good)} bull · {len(bad)} bear · retr {nr_b}↑ {nr_s}↓ of {n} "
              f"({when} 10-min candle)")
     up = [f"{r['symbol']}  {fmt(r['close'])}  CPR+{r['vs_cpr_pct']:.2f}%  "
@@ -224,14 +247,16 @@ def scan(symbols: list[str], do_push: bool) -> None:
     def rlines(k):
         word = "low" if k[0] == "bull" else "high"
         return "\n".join(f"{r['symbol']}  {fmt(r['close'])}  touched {v['touch']:%H:%M} "
-                         f"({word} {fmt(v['extreme'])} vs EMA{k[1]} {fmt(v['ema_at_touch'])})"
+                         f"({word} {fmt(v['extreme'])} vs {line_name(k)} {fmt(v['ema_at_touch'])})"
                          for r, v in retr[k]) or "none"
     body = (f"🟢 BULLISH ({len(good)})\n" + ("\n".join(up) or "none")
             + f"\n\n🔴 BEARISH ({len(bad)})\n" + ("\n".join(dn) or "none")
             + f"\n\n🟡 BULL RETRACEMENT — 20 EMA ({len(retr[('bull', 20)])})\n" + rlines(("bull", 20))
             + f"\n🟡 BULL RETRACEMENT — 50 EMA ({len(retr[('bull', 50)])})\n" + rlines(("bull", 50))
+            + f"\n🟣 BULL RETRACEMENT — CPR ({len(retr[('bull', 'cpr')])})\n" + rlines(("bull", "cpr"))
             + f"\n\n🟠 BEAR RETRACEMENT — 20 EMA ({len(retr[('bear', 20)])})\n" + rlines(("bear", 20))
             + f"\n🟠 BEAR RETRACEMENT — 50 EMA ({len(retr[('bear', 50)])})\n" + rlines(("bear", 50))
+            + f"\n🟤 BEAR RETRACEMENT — CPR ({len(retr[('bear', 'cpr')])})\n" + rlines(("bear", "cpr"))
             + "\n\nBull: close > CPR (TC, CC, BC) · close > EMA20 · EMA20 > EMA50"
             + "\nBear: close < CPR (TC, CC, BC) · close < EMA20 · EMA20 < EMA50")
     if errs:
