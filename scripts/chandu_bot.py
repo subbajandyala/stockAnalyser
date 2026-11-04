@@ -185,13 +185,37 @@ def line_name(k) -> str:
     return f"EMA{k[1]}"
 
 
+PUSH_MAX_BYTES = 3500   # ntfy turns messages over ~4 KB into attachments / cuts them
+
+
+def _chunks(body: str, limit: int = PUSH_MAX_BYTES) -> list[str]:
+    """Split at line breaks so every part stays under the ntfy size limit (never mid-line)."""
+    parts, cur = [], ""
+    for line in body.split("\n"):
+        cand = f"{cur}\n{line}" if cur else line
+        if cur and len(cand.encode("utf-8")) > limit:
+            parts.append(cur)
+            cur = line
+        else:
+            cur = cand
+    if cur:
+        parts.append(cur)
+    return parts
+
+
 def push(topic: str, title: str, body: str) -> None:
-    try:
-        requests.post(f"https://ntfy.sh/{topic}", data=body.encode("utf-8")[:3900],
-                      headers={"Title": title.encode("utf-8"), "Tags": "chart_with_upwards_trend"},
-                      timeout=10)
-    except Exception as e:
-        print(f"  ntfy error: {e}")
+    """One push, or several numbered pushes (1/3, 2/3 …) when the scan is too long for one."""
+    parts = _chunks(body)
+    for n, part in enumerate(parts, 1):
+        t = title if len(parts) == 1 else f"({n}/{len(parts)}) {title}"
+        try:
+            requests.post(f"https://ntfy.sh/{topic}", data=part.encode("utf-8"),
+                          headers={"Title": t.encode("utf-8"), "Tags": "chart_with_upwards_trend"},
+                          timeout=10)
+        except Exception as e:
+            print(f"  ntfy error: {e}")
+        if n < len(parts):
+            time.sleep(1)       # keep the parts in order on the phone
 
 
 def fmt(x: float) -> str:
