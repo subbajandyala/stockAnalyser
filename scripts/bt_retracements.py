@@ -115,6 +115,7 @@ def simulate(m10, e20, e50, sig) -> pd.DataFrame:
         if (t1 - px) * side <= 0:
             t1 = px + side * 1.5 * R
         half, stop, out, why, q = False, hard, [], "", i
+        t1_first = t1
         for q in range(i + 1, len(m10)):
             if days[q] != s["day"]:
                 q -= 1
@@ -142,8 +143,94 @@ def simulate(m10, e20, e50, sig) -> pd.DataFrame:
             continue
         busy_until[k] = q
         pts = out[0] if len(out) == 1 else (out[0] + out[1]) / 2
-        rows.append(dict(k=k, day=s["day"], t=m10.index[i], entry=px, risk=R, pts=pts, why=why))
+        rows.append(dict(k=k, day=s["day"], t=m10.index[i], entry=px, risk=R, pts=pts, why=why,
+                         xt=m10.index[q], xp=px + side * out[-1], stop=hard, t1=t1_first, side=side))
     return pd.DataFrame(rows)
+
+
+COLORS = {("bull", 20): "#2e7d32", ("bull", 50): "#1565c0", ("bull", "cpr"): "#8e24aa",
+          ("bear", 20): "#c62828", ("bear", 50): "#ef6c00", ("bear", "cpr"): "#6d4c41"}
+
+
+def plot(sym: str, m10, e20, e50, daily, T, path: pathlib.Path) -> None:
+    """Interactive chart (plotly.js from its CDN — no extra Python package needed)."""
+    import json
+    ts = [t.strftime("%Y-%m-%d %H:%M") for t in m10.index]
+    tr = [dict(type="candlestick", x=ts, open=m10.Open.round(2).tolist(), high=m10.High.round(2).tolist(),
+               low=m10.Low.round(2).tolist(), close=m10.Close.round(2).tolist(), name=sym,
+               increasing=dict(line=dict(color="#26a69a")), decreasing=dict(line=dict(color="#ef5350"))),
+          dict(type="scatter", mode="lines", x=ts, y=e20.round(2).tolist(), name="EMA20",
+               line=dict(color="#ffb300", width=1.3)),
+          dict(type="scatter", mode="lines", x=ts, y=e50.round(2).tolist(), name="EMA50",
+               line=dict(color="#7e57c2", width=1.3))]
+    # CPR top / bottom per day (gaps between days)
+    cx, ctop, cbot = [], [], []
+    for day in sorted(set(m10.index.date)):
+        prev = daily[[d.date() < day for d in daily.index]]
+        if prev.empty:
+            continue
+        tc, cc, bc = cb.cpr(prev.iloc[-1])
+        dts = [t for t in ts if t.startswith(str(day))]
+        cx += [dts[0], dts[-1], None]
+        ctop += [max(tc, cc, bc)] * 2 + [None]
+        cbot += [min(tc, cc, bc)] * 2 + [None]
+    tr += [dict(type="scatter", mode="lines", x=cx, y=ctop, name="CPR top", line=dict(color="#90a4ae", width=1, dash="dot")),
+           dict(type="scatter", mode="lines", x=cx, y=cbot, name="CPR bottom", line=dict(color="#90a4ae", width=1, dash="dot"))]
+    for k, nm in NAMES.items():
+        g = T[T.k == k] if not T.empty else T
+        if g.empty:
+            continue
+        col = COLORS[k]
+        txt = [f"{nm}<br>entry {r.entry:,.1f} · stop {r.stop:,.1f} · T1 {r.t1:,.1f}<br>"
+               f"exit {r.xp:,.1f} ({r.why}) · <b>{r.pts:+.1f} pts</b>" for r in g.itertuples()]
+        tr.append(dict(type="scatter", mode="markers", name=nm, legendgroup=nm, text=txt, hoverinfo="text",
+                       x=[t.strftime("%Y-%m-%d %H:%M") for t in g.t], y=g.entry.round(2).tolist(),
+                       marker=dict(color=col, size=11, symbol="triangle-up" if k[0] == "bull" else "triangle-down",
+                                   line=dict(color="#000", width=1))))
+        tr.append(dict(type="scatter", mode="markers", name=nm + " exit", legendgroup=nm, showlegend=False,
+                       x=[t.strftime("%Y-%m-%d %H:%M") for t in g.xt], y=g.xp.round(2).tolist(), text=txt,
+                       hoverinfo="text", marker=dict(color=["#2e7d32" if v > 0 else "#c62828" for v in g.pts],
+                                                     size=9, symbol="x")))
+        sx, sy, tx, ty = [], [], [], []
+        for r in g.itertuples():
+            a, b = r.t.strftime("%Y-%m-%d %H:%M"), r.xt.strftime("%Y-%m-%d %H:%M")
+            sx += [a, b, None]; sy += [r.stop, r.stop, None]
+            tx += [a, b, None]; ty += [r.t1, r.t1, None]
+        tr.append(dict(type="scatter", mode="lines", x=sx, y=sy, legendgroup=nm, showlegend=False, hoverinfo="skip",
+                       line=dict(color="#c62828", width=1, dash="dash")))
+        tr.append(dict(type="scatter", mode="lines", x=tx, y=ty, legendgroup=nm, showlegend=False, hoverinfo="skip",
+                       line=dict(color="#2e7d32", width=1, dash="dash")))
+    last = m10.index[-1]
+    first = m10.index[m10.index >= last - pd.Timedelta(days=6)][0]
+    layout = dict(title=dict(text=f"{sym} 10-min — retracement backtest<br><sup>▲ bull entry · ▼ bear entry · "
+                                  f"× exit (green profit / red loss) · red dash = stop · green dash = T1</sup>",
+                             x=0.01, y=0.985, yanchor="top", font=dict(size=15)),
+                  dragmode="pan", hovermode="closest", height=760, margin=dict(l=45, r=10, t=120, b=30),
+                  legend=dict(orientation="h", x=0, y=1.0, yanchor="bottom", font=dict(size=11)),
+                  xaxis=dict(rangeslider=dict(visible=True), type="date",
+                             range=[first.strftime("%Y-%m-%d %H:%M"), last.strftime("%Y-%m-%d %H:%M")],
+                             rangebreaks=[dict(bounds=["sat", "mon"]), dict(bounds=[15.5, 9.25], pattern="hour")]),
+                  yaxis=dict(fixedrange=False))
+    html = f"""<!doctype html><html><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1"><title>{sym} retracement backtest</title>
+<script src="https://cdn.plot.ly/plotly-2.27.0.min.js"></script></head>
+<body style="margin:0;font-family:sans-serif"><div id="c"></div>
+<p style="padding:6px 10px;font-size:13px">Drag to move, pinch / scroll to zoom, the slider below picks the period.
+Tap a ▲ / ▼ / × for the trade. Index points; ATM option ≈ half.</p>
+<script>Plotly.newPlot('c',{json.dumps(tr)},{json.dumps(layout)},{{responsive:true,scrollZoom:true}});</script>
+</body></html>"""
+    path.write_text(html, encoding="utf-8")
+
+
+def push_file(path: pathlib.Path, title: str) -> None:
+    import requests
+    topic = cb.env("CHANDU_NTFY_TOPIC", "chandu-logic")
+    try:
+        r = requests.put(f"https://ntfy.sh/{topic}", data=path.read_bytes(),
+                         headers={"Filename": path.name, "Title": title.encode("utf-8")}, timeout=60)
+        print(f"  chart sent to ntfy topic {topic}" if r.ok else f"  ntfy upload failed: {r.status_code} {r.text[:120]}")
+    except Exception as e:
+        print(f"  ntfy upload failed: {e}")
 
 
 def main() -> None:
@@ -151,6 +238,8 @@ def main() -> None:
     ap.add_argument("--symbol", default="NIFTY")
     ap.add_argument("--days", type=int, default=120)
     ap.add_argument("--trades", action="store_true", help="also list every trade")
+    ap.add_argument("--plot", action="store_true", help="write an interactive chart to data/")
+    ap.add_argument("--push", action="store_true", help="with --plot: send the chart file to ntfy")
     a = ap.parse_args()
     sym = a.symbol.upper()
     m10 = fetch(sym, "10minute", a.days + 10, 95)
@@ -181,6 +270,13 @@ def main() -> None:
         print("\n" + T.assign(t=T.t.dt.strftime("%d %b %H:%M"), k=T.k.map(NAMES))[
             ["k", "t", "entry", "risk", "pts", "why"]].round(1).to_string(index=False))
     print("\nIndex points; ATM option ≈ half. No slippage, theta or charges.")
+    if a.plot:
+        (ROOT / "data").mkdir(exist_ok=True)
+        path = ROOT / "data" / f"bt_{sym}_{dates[-1]:%Y%m%d}.html"
+        plot(sym, m10, e20, e50, daily, T, path)
+        print(f"  chart saved: {path} ({path.stat().st_size // 1024} KB)")
+        if a.push:
+            push_file(path, f"{sym} retracement backtest chart ({dates[0]:%d %b} → {dates[-1]:%d %b})")
 
 
 if __name__ == "__main__":
