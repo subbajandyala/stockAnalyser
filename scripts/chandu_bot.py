@@ -56,6 +56,8 @@ HIST_DAYS = 12                 # 10-min history for the 50 EMA (≈ 37 candles a
 API_GAP_SEC = 0.35             # Kite historical API allows ~3 requests a second
 TOUCH_PCT = 0.001              # a "touch" = within 0.1 % of the EMA
 AWAY_PCT = 0.002               # CPR retracement: must first close this far beyond the CPR today
+MIN_CPR_PCT = 0.0005           # CPR retracement only when the CPR is at least 0.05 % of the price wide
+                               # (CHANDU_MIN_CPR_PCT, in %) — a razor-thin CPR is "touched" by any wiggle
 
 
 def env(name: str, default: str = "") -> str:
@@ -126,7 +128,7 @@ def retracements(m10: pd.DataFrame, e20: pd.Series, e50: pd.Series, top: float, 
             active.pop(kb)                              # closed back inside the CPR
         if ks in active and c[i] > bot * (1 + TOUCH_PCT):
             active.pop(ks)
-        if first_touch or i != day[0]:
+        if (first_touch or i != day[0]) and (top - bot) >= c[i] * MIN_CPR_PCT:
             if (kb not in active and was_above and l[i] <= top * (1 + TOUCH_PCT)
                     and c[i] >= top * (1 - TOUCH_PCT) and a20[i] > a50[i]):
                 active[kb] = {"touch": idx[i], "extreme": l[i], "ema_at_touch": top}
@@ -290,6 +292,11 @@ def scan(symbols: list[str], do_push: bool) -> None:
 
 
 def main() -> None:
+    global MIN_CPR_PCT
+    try:
+        MIN_CPR_PCT = float(env("CHANDU_MIN_CPR_PCT") or MIN_CPR_PCT * 100) / 100
+    except ValueError:
+        pass
     ap = argparse.ArgumentParser(description="chandu-logic 10-min bullish scan")
     ap.add_argument("--loop", action="store_true", help="scan after every 10-min close, 09:25–15:35")
     ap.add_argument("--cron", action="store_true",
