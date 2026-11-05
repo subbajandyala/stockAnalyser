@@ -38,6 +38,8 @@ def _near(df: pd.DataFrame, atm_i: int, lo: int, hi: int) -> pd.DataFrame:
 
 
 def fut_label(price_chg: float, oi_chg: float) -> str:
+    if oi_chg == 0:
+        return "no OI base"        # first snapshot: nothing to compare the futures OI with
     if price_chg >= 0:
         return "long buildup" if oi_chg > 0 else "short covering"
     return "short buildup" if oi_chg > 0 else "long unwinding"
