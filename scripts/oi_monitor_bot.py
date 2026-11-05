@@ -288,6 +288,24 @@ def test_order(kite: KiteConnect, e: dict, name: str, side: str, fill: bool, tod
         print("pushed to ntfy")
 
 
+def write_latest(day_dir: pathlib.Path, hm: str, res: list[dict]) -> None:
+    """The latest read of every stock, for the OI + MA scalp bot (scripts/oi_scalp_bot.py)."""
+    out = {}
+    for r in res:
+        if "error" in r:
+            continue
+        out[r["name"]] = {
+            "signal": r["signal"], "spot": float(r["spot"]),
+            "ce_score": int(r["ce_score"]), "pe_score": int(r["pe_score"]),
+            "ce_core": [bool(v) for v in list(r["ce_checks"].values())[:3]],
+            "pe_core": [bool(v) for v in list(r["pe_checks"].values())[:3]],
+            "call_wall": float(r["call_wall"]) if r["call_wall"] else None,
+            "put_wall": float(r["put_wall"]) if r["put_wall"] else None,
+            "call_pct": float(r["call_pct"]), "put_pct": float(r["put_pct"]), "fut": r["fut"],
+        }
+    (day_dir / "latest.json").write_text(json.dumps({"time": hm, "stocks": out}))
+
+
 def push(topic: str, title: str, body: str) -> None:
     parts, cur = [], ""
     for line in body.split("\n\n"):
@@ -370,6 +388,7 @@ def main() -> None:
 
     res = om.analyse_all(snap, base, recent)
     strong = [r for r in res if r.get("signal")]
+    write_latest(day_dir, hm, res)
     print(f"[{now:%H:%M}] {snap['name'].nunique()} stocks, {len(snap)} contracts in {time.time() - t0:.0f}s · "
           f"base {base_p.parent.name + '/' + base_p.name if base_p else 'none (first snapshot)'} · "
           f"recent {recent_p.name if recent_p else 'none'} · strong CE {sum(r['signal'] == 'CE' for r in strong)}"
@@ -398,7 +417,8 @@ def main() -> None:
     sent = json.loads(state_p.read_text()) if state_p.exists() else {}
     new = [r for r in strong if sent.get(r["name"]) != r["signal"]]
     lines = {r["name"]: om.signal_line(r) for r in new}
-    auto = e.get("OI_AUTO_TRADE", "0") == "1" and not a.dry_run
+    # the OI + MA scalp bot takes the orders when it trades (no double buying)
+    auto = e.get("OI_AUTO_TRADE", "0") == "1" and e.get("OIS_AUTO_TRADE", "0") != "1" and not a.dry_run
     max_orders = int(e.get("OI_MAX_ORDERS") or 5)
     lots = max(1, int(e.get("OI_LOTS") or 1))
     n_orders = int(sent.get("_orders", 0))
