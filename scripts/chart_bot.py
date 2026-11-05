@@ -651,6 +651,101 @@ def _restore_gtt(kite, symbol: str, state: dict, trade_key: str, qty: int, ntfy_
                       f"Set a stop loss in Kite or sell manually.", ntfy_topic, priority="urgent")
 
 
+_OPEN_ORDER = ("OPEN", "TRIGGER PENDING", "OPEN PENDING", "PUT ORDER REQ RECEIVED",
+               "VALIDATION PENDING", "MODIFY PENDING", "MODIFY VALIDATION PENDING")
+STUCK_SELL_GAP = 0.05   # an open SELL priced > 5% above LTP will not fill
+
+
+def _gtt_safety_net(kite, symbol: str, state: dict, trade_key: str, ltp: float,
+                    ntfy_topic: str) -> bool:
+    """Make sure the open trade still has a working way out. True = it acted this scan.
+
+    The GTT is the trade's stop loss. When it is no longer active:
+      - fired and its SELL sits far above the price (e.g. trigger edited in the Kite app,
+        price left at the old far target; or a stop that gapped below its limit) →
+        the order is modified to LTP −1% so it fills now;
+      - fired, no SELL open, units still held (its order was rejected) → bot sells;
+      - deleted / cancelled while units are still held → a fresh stop-loss GTT is placed.
+    An active GTT, or a GTT order about to fill, is left alone.
+    """
+    k = lambda name: f"{trade_key}:{name}"
+    ts, gtt_id = state.get(k("ts")), _gid(state.get(k("gtt_id")))
+    try:
+        status = kite.get_gtt(gtt_id).get("status")
+    except Exception as e:
+        _LOG.warning(f"[SAFETY] {symbol}: GTT {gtt_id} check failed ({e})")
+        return False
+    if status == "active":
+        return False
+    try:
+        sells = [o for o in kite.orders() if o.get("tradingsymbol") == ts
+                 and o.get("transaction_type") == "SELL" and o.get("status") in _OPEN_ORDER]
+    except Exception as e:
+        _LOG.warning(f"[SAFETY] {symbol}: order check failed ({e})")
+        return False
+
+    stuck = [o for o in sells if float(o.get("price") or 0) > ltp * (1 + STUCK_SELL_GAP)]
+    if stuck:
+        o = stuck[0]
+        old_px, new_px = float(o.get("price") or 0), _tick(ltp * 0.99)
+        print(f"  [SAFETY] {symbol}: GTT {status}, SELL {o['order_id']} stuck at ₹{old_px:.2f} "
+              f"(LTP ₹{ltp:.2f}) — moving it to ₹{new_px:.2f}")
+        try:
+            kite.modify_order(variety=o.get("variety") or kite.VARIETY_REGULAR,
+                              order_id=o["order_id"], order_type=kite.ORDER_TYPE_LIMIT, price=new_px)
+        except Exception as e:
+            print(f"  [SAFETY] {symbol}: modify failed — {e}")
+            if ntfy_topic and not state.get(k("safety_alerted")):
+                state[k("safety_alerted")] = True
+                send_ntfy(f"⚠️ Chart Bot: {symbol} SELL stuck — exit manually",
+                          f"{ts}: GTT {status}, its SELL is at ₹{old_px:.2f} with LTP ₹{ltp:.2f} "
+                          f"and the bot could not move it ({e}). Modify or exit it in Kite.",
+                          ntfy_topic, priority="urgent")
+            return True
+        price, why = _ko._fill_price(kite, o["order_id"], _EXCHANGE_MAP.get(symbol, "NFO"), ts)
+        if price:
+            state[k("gtt_id")] = ""
+            state[k("exit_reason")] = f"safety net — stuck sell moved, sold @ ₹{price:.2f}"
+            _clear_gtts(kite, symbol, ts, ntfy_topic)
+            print(f"  [SAFETY] {symbol}: sold @ ₹{price:.2f}")
+        else:
+            print(f"  [SAFETY] {symbol}: moved sell not filled ({why}) — retrying next scan")
+        if ntfy_topic:
+            send_ntfy(f"⚠️ Chart Bot: {symbol} stuck sell fixed" if price else
+                      f"⚠️ Chart Bot: {symbol} stuck sell — retrying",
+                      f"{ts}: the GTT had {status} and its SELL was at ₹{old_px:.2f} "
+                      f"with LTP ₹{ltp:.2f}.\n"
+                      + (f"Bot moved it and sold @ ₹{price:.2f}." if price
+                         else f"Moved to ₹{new_px:.2f} but not filled ({why}); retrying every scan."),
+                      ntfy_topic, priority="urgent")
+        return True
+    if sells:
+        return True        # the GTT's sell is near the price and about to fill — leave it
+
+    held = open_qty(kite, ts)
+    if held is None:
+        return False
+    if held <= 0:
+        return True        # flat — the monitor closes the trade next scan
+    if status == "triggered":
+        # Fired, but its order did not go through (rejected) — the bot sells what is held
+        print(f"  [SAFETY] {symbol}: GTT fired but its order didn't go through — bot sells {held}")
+        if ntfy_topic:
+            send_ntfy(f"⚠️ Chart Bot: {symbol} GTT order failed — bot exiting",
+                      f"{ts}: the GTT fired but its SELL didn't go through; the bot sells now.",
+                      ntfy_topic, priority="urgent")
+        _exit_bot_position(kite, symbol, state, trade_key, "safety net — GTT order failed", ntfy_topic)
+        return True
+    # Deleted / cancelled / expired while still held → no stop loss: let the caller place a new GTT
+    print(f"  [SAFETY] {symbol}: GTT {gtt_id} is {status} but {held} still held — placing a new stop loss")
+    state[k("gtt_id")] = ""
+    if ntfy_topic:
+        send_ntfy(f"⚠️ Chart Bot: {symbol} GTT was {status}",
+                  f"{ts}: the stop-loss GTT was {status} while the position is open; "
+                  f"the bot is placing a new one.", ntfy_topic, priority="high")
+    return False
+
+
 def _manage_trade(kite, symbol: str, state: dict, trade_key: str,
                   now_ist: datetime.datetime, api_key: str, access_token: str,
                   ntfy_topic: str) -> None:
@@ -669,12 +764,19 @@ def _manage_trade(kite, symbol: str, state: dict, trade_key: str,
     if state.get(k("exit_reason")):
         return  # sold; the close-out runs once Kite shows the position flat
 
+    ltp = _bot_ltp(kite, symbol, ts)
+
+    # 0. Safety net — the GTT no longer guards the trade (fired with a sell that can't
+    #    fill, or deleted). Runs before the square-off: a stuck sell would block that too.
+    if ltp is not None and gtt_id and _gtt_safety_net(kite, symbol, state, trade_key, ltp, ntfy_topic):
+        return
+    gtt_id = _gid(state.get(k("gtt_id")))
+
     # 1. End-of-day square-off — NRML positions would otherwise be carried overnight
     if now_ist.time() >= SQUARE_OFF_TIME:
         _exit_bot_position(kite, symbol, state, trade_key, "15:15 square-off", ntfy_topic)
         return
 
-    ltp = _bot_ltp(kite, symbol, ts)
     if ltp is None:
         return
 
