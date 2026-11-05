@@ -1,6 +1,10 @@
 """
 OI monitor — all F&O stocks, every 10 minutes, ntfy push for NEW strong CE / PE signals.
-Alerts only: places no orders.
+Orders: with OI_AUTO_TRADE=1 in .env each NEW signal also BUYs the ATM CE / PE —
+OI_LOTS lots (default 1), LIMIT just above the ask, product MIS (Zerodha squares MIS off
+~15:20), tag "oimon", at most OI_MAX_ORDERS (default 5) a day, none after 15:00.
+No stop loss / target is placed — exit manually or let MIS square-off close it.
+The result (filled / open / Kite's rejection reason) is added to the push.
 
 Each run:
   1. F&O stock list + nearest-expiry options / futures from Kite (cached per day)
@@ -44,6 +48,7 @@ INDEXES = {"NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "NIFTYNXT50"}
 RUN_FROM, RUN_TO = datetime.time(9, 20), datetime.time(15, 31)
 RECENT_MIN = 18          # "recent" = the snapshot at least this many minutes old
 KEEP_DAYS = 30
+ORDER_UNTIL = datetime.time(15, 0)   # no new orders after this (MIS is squared off ~15:20)
 PUSH_MAX_BYTES = 3500
 
 
@@ -78,7 +83,9 @@ def universe(kite: KiteConnect, today: datetime.date) -> dict:
     """{name: {"fut": ts, "expiry": "YYYY-MM-DD", "opts": [[strike, CE ts, PE ts], ...]}}"""
     cache = DATA / f"universe_{today}.json"
     if cache.exists():
-        return json.loads(cache.read_text())
+        uni = json.loads(cache.read_text())
+        if all("lot" in v for v in uni.values()):
+            return uni
     rows = [r for r in kite.instruments("NFO") if r["name"] not in INDEXES and r["expiry"] >= today]
     uni: dict = {}
     by_name: dict = {}
@@ -96,7 +103,8 @@ def universe(kite: KiteConnect, today: datetime.date) -> dict:
                 legs.setdefault(float(r["strike"]), {})[r["instrument_type"]] = r["tradingsymbol"]
         opts = [[k, v["CE"], v["PE"]] for k, v in sorted(legs.items()) if "CE" in v and "PE" in v]
         if len(opts) >= 2 * om.NEAR + 1:
-            uni[name] = {"fut": fut[0]["tradingsymbol"], "expiry": str(exp), "opts": opts}
+            uni[name] = {"fut": fut[0]["tradingsymbol"], "expiry": str(exp), "opts": opts,
+                         "lot": int(fut[0].get("lot_size") or 1)}
     DATA.mkdir(parents=True, exist_ok=True)
     cache.write_text(json.dumps(uni))
     for old in DATA.glob("universe_*.json"):
@@ -165,6 +173,41 @@ def base_and_recent(today: datetime.date, now_hm: str) -> tuple[pathlib.Path | N
     old = [f for f in todays if f.name[:4] <= cut.strftime("%H%M")]
     recent = old[-1] if old else (todays[0] if todays else None)
     return base, recent
+
+
+def tick(x: float) -> float:
+    return round(round(x / 0.05) * 0.05, 2)
+
+
+def buy_atm(kite: KiteConnect, r: dict, snap: pd.DataFrame, lot: int, lots: int) -> str:
+    """BUY lots × lot of the signal's ATM option: LIMIT just above the ask, MIS (intraday).
+    Returns a one-line result for the push (order id + status, or Kite's rejection reason)."""
+    row = snap[(snap["name"] == r["name"]) & (snap["strike"] == r["option"]["strike"])
+               & (snap["type"] == r["signal"])]
+    if not len(row):
+        return "order: contract not found"
+    o = row.iloc[0]
+    ref = max(float(o["ask"] or 0), float(o["ltp"] or 0))
+    price, qty = tick(ref * 1.005), lot * lots
+    try:
+        oid = kite.place_order(variety=kite.VARIETY_REGULAR, exchange=kite.EXCHANGE_NFO,
+                               tradingsymbol=o["ts"], transaction_type=kite.TRANSACTION_TYPE_BUY,
+                               quantity=qty, product=kite.PRODUCT_MIS, order_type=kite.ORDER_TYPE_LIMIT,
+                               price=price, tag="oimon")
+    except Exception as ex:
+        return f"order ✗ {o['ts']} {qty} @ ₹{price:g} — {ex}"
+    status, why = "PLACED", ""
+    for _ in range(3):
+        time.sleep(1.5)
+        try:
+            h = kite.order_history(oid)[-1]
+            status, why = h.get("status", status), h.get("status_message") or ""
+            if status in ("COMPLETE", "REJECTED", "CANCELLED"):
+                break
+        except Exception:
+            pass
+    mark = "✓" if status == "COMPLETE" else "✗" if status in ("REJECTED", "CANCELLED") else "…"
+    return f"order {mark} {o['ts']} {qty} @ ₹{price:g} — {status}" + (f": {why}" if why else "")
 
 
 def push(topic: str, title: str, body: str) -> None:
@@ -269,15 +312,30 @@ def main() -> None:
     state_p = day_dir / "sent.json"
     sent = json.loads(state_p.read_text()) if state_p.exists() else {}
     new = [r for r in strong if sent.get(r["name"]) != r["signal"]]
+    lines = {r["name"]: om.signal_line(r) for r in new}
+    auto = e.get("OI_AUTO_TRADE", "0") == "1" and not a.dry_run
+    max_orders = int(e.get("OI_MAX_ORDERS") or 5)
+    lots = max(1, int(e.get("OI_LOTS") or 1))
+    n_orders = int(sent.get("_orders", 0))
     for r in new:
-        print(om.signal_line(r))
+        if auto:
+            if now.time() > ORDER_UNTIL:
+                lines[r["name"]] += f"\n   no order — after {ORDER_UNTIL:%H:%M}"
+            elif n_orders >= max_orders:
+                lines[r["name"]] += f"\n   no order — {max_orders} orders already today (OI_MAX_ORDERS)"
+            else:
+                res_txt = buy_atm(kite, r, snap, int(uni[r["name"]].get("lot") or 1), lots)
+                n_orders += 1
+                lines[r["name"]] += f"\n   {res_txt}"
+        print(lines[r["name"]])
     if new and not a.dry_run:
         topic = e.get("OI_NTFY_TOPIC") or e.get("NTFY_TOPIC", "")
         if topic:
             push(topic, f"OI monitor {now:%H:%M}: {len(new)} new signal(s)",
-                 "\n\n".join(om.signal_line(r) for r in new))
+                 "\n\n".join(lines[r["name"]] for r in new))
         for r in new:
             sent[r["name"]] = r["signal"]
+        sent["_orders"] = n_orders
         state_p.write_text(json.dumps(sent))
 
     for d in DATA.iterdir():   # keep the last KEEP_DAYS days of snapshots
