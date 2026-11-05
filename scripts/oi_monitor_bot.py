@@ -16,6 +16,7 @@ Cron (Subba's machine, separate worktree /root/oimon — the trading bot is unto
 Manual:
   python scripts/oi_monitor_bot.py --force --dry-run      # scan now, print, no push
   python scripts/oi_monitor_bot.py --force --show SBIN    # one stock's strike table and checks
+  python scripts/oi_monitor_bot.py --force --dry-run --all  # every F&O stock: OI change, scores, walls
 """
 
 import argparse
@@ -212,6 +213,7 @@ def main() -> None:
     ap.add_argument("--force", action="store_true", help="run outside 09:20–15:30 IST")
     ap.add_argument("--dry-run", action="store_true", help="print only: no push, no signal state")
     ap.add_argument("--show", metavar="NAME", help="print one stock's strike table and checks")
+    ap.add_argument("--all", action="store_true", help="print a summary line for every F&O stock")
     a = ap.parse_args()
 
     now = datetime.datetime.now(IST)
@@ -244,6 +246,18 @@ def main() -> None:
           f"base {base_p.parent.name + '/' + base_p.name if base_p else 'none (first snapshot)'} · "
           f"recent {recent_p.name if recent_p else 'none'} · strong CE {sum(r['signal'] == 'CE' for r in strong)}"
           f" PE {sum(r['signal'] == 'PE' for r in strong)}")
+
+    if a.all:
+        ok = sorted((r for r in res if "error" not in r), key=lambda r: -max(r["ce_score"], r["pe_score"]))
+        print(f"\n{'stock':<12}{'price':>9}{'chg%':>7}{'calls ATM':>11}{'puts ATM':>10}  {'futures':<15}"
+              f"{'CE':>3}{'PE':>4}  {'call wall':>9}{'put wall':>9}  signal")
+        for r in ok:
+            print(f"{r['name']:<12}{r['spot']:>9g}{r['price_pct']:>+7.2f}{r['call_pct']:>+10.1f}%{r['put_pct']:>+9.1f}%"
+                  f"  {r['fut']:<15}{r['ce_score']:>3}{r['pe_score']:>4}  {r['call_wall'] or 0:>9g}"
+                  f"{r['put_wall'] or 0:>9g}  {('STRONG ' + r['signal']) if r['signal'] else ''}")
+        bad = [r["name"] for r in res if "error" in r]
+        if bad:
+            print(f"errors: {', '.join(bad)}")
 
     if a.show:
         hit = [r for r in res if r["name"] == a.show.upper() and "error" not in r]
