@@ -286,4 +286,8 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except BrokenPipeError:          # output piped into head / less that closed early
+        import os
+        os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stdout.fileno())
