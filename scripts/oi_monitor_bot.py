@@ -1,10 +1,14 @@
 """
 OI monitor — all F&O stocks, every 10 minutes, ntfy push for NEW strong CE / PE signals.
-Orders: with OI_AUTO_TRADE=1 in .env each NEW signal also BUYs the ATM CE / PE —
-OI_LOTS lots (default 1), LIMIT just above the ask, product MIS (Zerodha squares MIS off
-~15:20), tag "oimon", at most OI_MAX_ORDERS (default 5) a day, none after 15:00.
-No stop loss / target is placed — exit manually or let MIS square-off close it.
-The result (filled / open / Kite's rejection reason) is added to the push.
+Orders: with OI_AUTO_TRADE=1 in .env each NEW signal also BUYs the ATM CE / PE of the
+current monthly expiry — OI_LOTS lots (default 1), LIMIT just above the ask, tag "oimon",
+at most OI_MAX_ORDERS (default 5) a day, none after 15:00; unfilled after 8 s → cancelled.
+  OI_PRODUCT=NRML (default): carried overnight. No stop / target is placed — set them in
+      Kite by hand. OI_GTT=1 adds an OCO GTT on each fill instead: stop OI_SL_PCT (20) %
+      below the fill, target OI_TARGET_PCT (40) % above.
+      No order within 4 days of expiry (stock options are physically settled).
+  OI_PRODUCT=MIS: intraday, no GTT; Zerodha squares it off ~15:20.
+The result (filled + GTT / Kite's rejection reason) is added to the push.
 
 Each run:
   1. F&O stock list + nearest-expiry options / futures from Kite (cached per day)
@@ -48,7 +52,8 @@ INDEXES = {"NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "NIFTYNXT50"}
 RUN_FROM, RUN_TO = datetime.time(9, 20), datetime.time(15, 31)
 RECENT_MIN = 18          # "recent" = the snapshot at least this many minutes old
 KEEP_DAYS = 30
-ORDER_UNTIL = datetime.time(15, 0)   # no new orders after this (MIS is squared off ~15:20)
+ORDER_UNTIL = datetime.time(15, 0)   # no new orders after this
+MIN_DAYS_TO_EXPIRY = 4               # NRML: no order this close to expiry (physical settlement)
 PUSH_MAX_BYTES = 3500
 
 
@@ -179,35 +184,67 @@ def tick(x: float) -> float:
     return round(round(x / 0.05) * 0.05, 2)
 
 
-def buy_atm(kite: KiteConnect, r: dict, snap: pd.DataFrame, lot: int, lots: int) -> str:
-    """BUY lots × lot of the signal's ATM option: LIMIT just above the ask, MIS (intraday).
-    Returns a one-line result for the push (order id + status, or Kite's rejection reason)."""
+def buy_atm(kite: KiteConnect, r: dict, snap: pd.DataFrame, lot: int, lots: int,
+            product: str = "NRML", sl_pct: float = 20.0, tgt_pct: float = 40.0,
+            gtt: bool = False) -> str:
+    """BUY lots × lot of the signal's ATM option: LIMIT just above the ask.
+
+    NRML (default): held overnight. gtt=True adds an OCO GTT once filled — stop sl_pct
+    below the fill, target tgt_pct above; off by default (stop / target managed by hand).
+    MIS: intraday, Zerodha squares it off ~15:20.
+    An order not filled within ~8 s is cancelled. Returns a result line for the push."""
     row = snap[(snap["name"] == r["name"]) & (snap["strike"] == r["option"]["strike"])
                & (snap["type"] == r["signal"])]
     if not len(row):
         return "order: contract not found"
     o = row.iloc[0]
+    ts = o["ts"]
     ref = max(float(o["ask"] or 0), float(o["ltp"] or 0))
     price, qty = tick(ref * 1.005), lot * lots
+    prod = kite.PRODUCT_MIS if product == "MIS" else kite.PRODUCT_NRML
     try:
         oid = kite.place_order(variety=kite.VARIETY_REGULAR, exchange=kite.EXCHANGE_NFO,
-                               tradingsymbol=o["ts"], transaction_type=kite.TRANSACTION_TYPE_BUY,
-                               quantity=qty, product=kite.PRODUCT_MIS, order_type=kite.ORDER_TYPE_LIMIT,
+                               tradingsymbol=ts, transaction_type=kite.TRANSACTION_TYPE_BUY,
+                               quantity=qty, product=prod, order_type=kite.ORDER_TYPE_LIMIT,
                                price=price, tag="oimon")
     except Exception as ex:
-        return f"order ✗ {o['ts']} {qty} @ ₹{price:g} — {ex}"
-    status, why = "PLACED", ""
-    for _ in range(3):
-        time.sleep(1.5)
+        return f"order ✗ {ts} {qty} @ ₹{price:g} {product} — {ex}"
+    status, why, fill = "PLACED", "", 0.0
+    for _ in range(4):
+        time.sleep(2)
         try:
             h = kite.order_history(oid)[-1]
             status, why = h.get("status", status), h.get("status_message") or ""
+            fill = float(h.get("average_price") or 0)
             if status in ("COMPLETE", "REJECTED", "CANCELLED"):
                 break
         except Exception:
             pass
-    mark = "✓" if status == "COMPLETE" else "✗" if status in ("REJECTED", "CANCELLED") else "…"
-    return f"order {mark} {o['ts']} {qty} @ ₹{price:g} — {status}" + (f": {why}" if why else "")
+    if status not in ("COMPLETE", "REJECTED", "CANCELLED"):
+        try:
+            kite.cancel_order(variety=kite.VARIETY_REGULAR, order_id=oid)
+            status, why = "CANCELLED", "not filled in 8 s"
+        except Exception as ex:
+            why = f"still open, cancel failed: {ex}"
+    if status != "COMPLETE":
+        return f"order ✗ {ts} {qty} @ ₹{price:g} {product} — {status}" + (f": {why}" if why else "")
+    fill = fill or price
+    txt = f"order ✓ {ts} {qty} @ ₹{fill:g} {product} — COMPLETE"
+    if product == "MIS":
+        return txt + " (no stop: MIS square-off ~15:20)"
+    if not gtt:
+        return txt + " — set your stop loss / target in Kite"
+    sl, tgt = tick(fill * (1 - sl_pct / 100)), tick(fill * (1 + tgt_pct / 100))
+    leg = lambda px: {"transaction_type": kite.TRANSACTION_TYPE_SELL, "quantity": qty,
+                      "product": kite.PRODUCT_NRML, "order_type": kite.ORDER_TYPE_LIMIT, "price": px}
+    try:
+        g = kite.place_gtt(trigger_type=kite.GTT_TYPE_OCO, tradingsymbol=ts, exchange=kite.EXCHANGE_NFO,
+                           trigger_values=[sl, tgt], last_price=fill,
+                           orders=[leg(max(0.05, tick(sl * 0.95))), leg(tick(tgt * 0.99))])
+        gid = g.get("trigger_id") if isinstance(g, dict) else g
+        return txt + f"\n   GTT {gid}: stop ₹{sl:g} (−{sl_pct:g}%) · target ₹{tgt:g} (+{tgt_pct:g}%)"
+    except Exception as ex:
+        return txt + f"\n   ⚠️ GTT FAILED ({ex}) — SET A STOP LOSS IN KITE NOW"
 
 
 def push(topic: str, title: str, body: str) -> None:
@@ -317,14 +354,23 @@ def main() -> None:
     max_orders = int(e.get("OI_MAX_ORDERS") or 5)
     lots = max(1, int(e.get("OI_LOTS") or 1))
     n_orders = int(sent.get("_orders", 0))
+    product = "MIS" if e.get("OI_PRODUCT", "NRML").upper() == "MIS" else "NRML"
+    sl_pct = float(e.get("OI_SL_PCT") or 20)
+    tgt_pct = float(e.get("OI_TARGET_PCT") or 40)
+    use_gtt = e.get("OI_GTT", "0") == "1"
+    days_left = lambda u: (datetime.date.fromisoformat(u["expiry"]) - today).days
     for r in new:
         if auto:
             if now.time() > ORDER_UNTIL:
                 lines[r["name"]] += f"\n   no order — after {ORDER_UNTIL:%H:%M}"
+            elif product == "NRML" and days_left(uni[r["name"]]) < MIN_DAYS_TO_EXPIRY:
+                lines[r["name"]] += (f"\n   no order — expiry {uni[r['name']]['expiry']} is under "
+                                     f"{MIN_DAYS_TO_EXPIRY} days away (stock options settle physically)")
             elif n_orders >= max_orders:
                 lines[r["name"]] += f"\n   no order — {max_orders} orders already today (OI_MAX_ORDERS)"
             else:
-                res_txt = buy_atm(kite, r, snap, int(uni[r["name"]].get("lot") or 1), lots)
+                res_txt = buy_atm(kite, r, snap, int(uni[r["name"]].get("lot") or 1), lots,
+                                  product, sl_pct, tgt_pct, use_gtt)
                 n_orders += 1
                 lines[r["name"]] += f"\n   {res_txt}"
         print(lines[r["name"]])
