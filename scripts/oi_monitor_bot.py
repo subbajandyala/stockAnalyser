@@ -25,6 +25,7 @@ Manual:
   python scripts/oi_monitor_bot.py --force --dry-run      # scan now, print, no push
   python scripts/oi_monitor_bot.py --force --show SBIN    # one stock's strike table and checks
   python scripts/oi_monitor_bot.py --force --dry-run --all  # every F&O stock: OI change, scores, walls
+  python scripts/oi_monitor_bot.py --test-order CRUDEOIL    # test ATM CE order (half price) + push
 """
 
 import argparse
@@ -180,13 +181,14 @@ def base_and_recent(today: datetime.date, now_hm: str) -> tuple[pathlib.Path | N
     return base, recent
 
 
-def tick(x: float) -> float:
-    return round(round(x / 0.05) * 0.05, 2)
+def tick(x: float, size: float = 0.05) -> float:
+    return round(round(x / size) * size, 2)
 
 
 def buy_atm(kite: KiteConnect, r: dict, snap: pd.DataFrame, lot: int, lots: int,
             product: str = "NRML", sl_pct: float = 20.0, tgt_pct: float = 40.0,
-            gtt: bool = False) -> str:
+            gtt: bool = False, exchange: str = "NFO", tick_size: float = 0.05,
+            price_factor: float = 1.005) -> str:
     """BUY lots × lot of the signal's ATM option: LIMIT just above the ask.
 
     NRML (default): held overnight. gtt=True adds an OCO GTT once filled — stop sl_pct
@@ -200,10 +202,10 @@ def buy_atm(kite: KiteConnect, r: dict, snap: pd.DataFrame, lot: int, lots: int,
     o = row.iloc[0]
     ts = o["ts"]
     ref = max(float(o["ask"] or 0), float(o["ltp"] or 0))
-    price, qty = tick(ref * 1.005), lot * lots
+    price, qty = max(tick_size, tick(ref * price_factor, tick_size)), lot * lots
     prod = kite.PRODUCT_MIS if product == "MIS" else kite.PRODUCT_NRML
     try:
-        oid = kite.place_order(variety=kite.VARIETY_REGULAR, exchange=kite.EXCHANGE_NFO,
+        oid = kite.place_order(variety=kite.VARIETY_REGULAR, exchange=exchange,
                                tradingsymbol=ts, transaction_type=kite.TRANSACTION_TYPE_BUY,
                                quantity=qty, product=prod, order_type=kite.ORDER_TYPE_LIMIT,
                                price=price, tag="oimon")
@@ -234,17 +236,56 @@ def buy_atm(kite: KiteConnect, r: dict, snap: pd.DataFrame, lot: int, lots: int,
         return txt + " (no stop: MIS square-off ~15:20)"
     if not gtt:
         return txt + " — set your stop loss / target in Kite"
-    sl, tgt = tick(fill * (1 - sl_pct / 100)), tick(fill * (1 + tgt_pct / 100))
+    sl, tgt = tick(fill * (1 - sl_pct / 100), tick_size), tick(fill * (1 + tgt_pct / 100), tick_size)
     leg = lambda px: {"transaction_type": kite.TRANSACTION_TYPE_SELL, "quantity": qty,
                       "product": kite.PRODUCT_NRML, "order_type": kite.ORDER_TYPE_LIMIT, "price": px}
     try:
-        g = kite.place_gtt(trigger_type=kite.GTT_TYPE_OCO, tradingsymbol=ts, exchange=kite.EXCHANGE_NFO,
+        g = kite.place_gtt(trigger_type=kite.GTT_TYPE_OCO, tradingsymbol=ts, exchange=exchange,
                            trigger_values=[sl, tgt], last_price=fill,
-                           orders=[leg(max(0.05, tick(sl * 0.95))), leg(tick(tgt * 0.99))])
+                           orders=[leg(max(tick_size, tick(sl * 0.95, tick_size))), leg(tick(tgt * 0.99, tick_size))])
         gid = g.get("trigger_id") if isinstance(g, dict) else g
         return txt + f"\n   GTT {gid}: stop ₹{sl:g} (−{sl_pct:g}%) · target ₹{tgt:g} (+{tgt_pct:g}%)"
     except Exception as ex:
         return txt + f"\n   ⚠️ GTT FAILED ({ex}) — SET A STOP LOSS IN KITE NOW"
+
+
+def test_order(kite: KiteConnect, e: dict, name: str, side: str, fill: bool, today: datetime.date) -> None:
+    """Run the real order + push path on one instrument's ATM option (CRUDEOIL → MCX, else NFO).
+    Default price is half the market so it never fills (it shows in Kite, then is cancelled
+    after 8 s); --fill places it at the real price."""
+    name = name.upper()
+    exch = "MCX" if name in ("CRUDEOIL", "CRUDEOILM", "NATURALGAS", "GOLD", "GOLDM", "SILVER", "SILVERM") else "NFO"
+    rows = [r for r in kite.instruments(exch) if r["name"] == name and r["expiry"] >= today]
+    opts = [r for r in rows if r["instrument_type"] in ("CE", "PE")]
+    futs = sorted((r for r in rows if r["instrument_type"] == "FUT"), key=lambda r: r["expiry"])
+    if not opts or not futs:
+        print(f"{name}: no options / futures on {exch}")
+        return
+    exp = min(r["expiry"] for r in opts)
+    opts = [r for r in opts if r["expiry"] == exp]
+    fq = kite.quote([f"{exch}:{futs[0]['tradingsymbol']}"])[f"{exch}:{futs[0]['tradingsymbol']}"]
+    spot = float(fq["last_price"])
+    atm = min({float(r["strike"]) for r in opts}, key=lambda k: abs(k - spot))
+    leg = next(r for r in opts if float(r["strike"]) == atm and r["instrument_type"] == side)
+    q = kite.quote([f"{exch}:{leg['tradingsymbol']}"])[f"{exch}:{leg['tradingsymbol']}"]
+    d = q.get("depth") or {}
+    snap = pd.DataFrame([{"name": name, "strike": atm, "type": side, "ts": leg["tradingsymbol"],
+                          "ltp": float(q.get("last_price") or 0),
+                          "ask": float((d.get("sell") or [{}])[0].get("price") or 0)}])
+    r = {"name": name, "signal": side, "option": {"strike": atm}}
+    lot = int(leg.get("lot_size") or 1)
+    print(f"TEST {name} fut {futs[0]['tradingsymbol']} {spot:g} → ATM {atm:g} {side} {leg['tradingsymbol']} "
+          f"LTP ₹{snap['ltp'][0]:g} ask ₹{snap['ask'][0]:g} lot {lot} ({exch}, expiry {exp})")
+    res = buy_atm(kite, r, snap, lot, 1, "NRML", exchange=exch,
+                  tick_size=float(leg.get("tick_size") or 0.05), price_factor=1.005 if fill else 0.5)
+    body = (f"🧪 TEST — {'🟢' if side == 'CE' else '🔴'} {name} {spot:g} — BUY {atm:g} {side} "
+            f"@ ₹{snap['ltp'][0]:g}\n   {res}"
+            + ("" if fill else "\n   (test price: half the market — not meant to fill)"))
+    print(body)
+    topic = e.get("OI_NTFY_TOPIC") or e.get("NTFY_TOPIC", "")
+    if topic:
+        push(topic, f"OI monitor TEST {name}", body)
+        print("pushed to ntfy")
 
 
 def push(topic: str, title: str, body: str) -> None:
@@ -294,15 +335,22 @@ def main() -> None:
     ap.add_argument("--dry-run", action="store_true", help="print only: no push, no signal state")
     ap.add_argument("--show", metavar="NAME", help="print one stock's strike table and checks")
     ap.add_argument("--all", action="store_true", help="print a summary line for every F&O stock")
+    ap.add_argument("--test-order", metavar="NAME", help="place a test ATM order + push (e.g. CRUDEOIL)")
+    ap.add_argument("--side", default="CE", choices=["CE", "PE"], help="--test-order side")
+    ap.add_argument("--fill", action="store_true", help="--test-order at the real price (it will fill)")
     a = ap.parse_args()
 
     now = datetime.datetime.now(IST)
     today, hm = now.date(), now.strftime("%H%M")
-    if not a.force and (now.weekday() >= 5 or not RUN_FROM <= now.time() <= RUN_TO):
+    if not (a.force or a.test_order) and (now.weekday() >= 5 or not RUN_FROM <= now.time() <= RUN_TO):
         return
     e = env()
     kite = KiteConnect(e.get("KITE_API_KEY", ""))
     kite.set_access_token(e.get("KITE_ACCESS_TOKEN", ""))
+
+    if a.test_order:
+        test_order(kite, e, a.test_order, a.side, a.fill, today)
+        return
 
     t0 = time.time()
     uni = universe(kite, today)
