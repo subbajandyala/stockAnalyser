@@ -269,8 +269,9 @@ def load(kite, n: str, nse_tok: int, futs: list, warm, end, cache: pathlib.Path)
         return pd.read_pickle(sp), pd.read_pickle(fp)
     st = hist(kite, nse_tok, warm, end)
     fu = futures_series(kite, futs, warm, end) if len(st) >= 200 else pd.DataFrame()
-    st.to_pickle(sp)
-    fu.to_pickle(fp)
+    if len(st) and len(fu):          # never cache a failed download (e.g. an expired token)
+        st.to_pickle(sp)
+        fu.to_pickle(fp)
     return st, fu
 
 
@@ -286,6 +287,10 @@ def main() -> None:
     e = mon.env()
     kite = KiteConnect(e.get("KITE_API_KEY", ""))
     kite.set_access_token(e.get("KITE_ACCESS_TOKEN", ""))
+    try:
+        kite.profile()
+    except Exception as ex:
+        sys.exit(f"Kite login failed ({ex}) — the token is refreshed at 08:00 IST by auto_token.py")
     end = datetime.date.today()
     start = end - datetime.timedelta(days=a.days)
     warm = start - datetime.timedelta(days=7)          # EMA 50 warm-up + yesterday's CPR
