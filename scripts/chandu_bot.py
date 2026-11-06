@@ -48,6 +48,7 @@ ROOT = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 from core import kite_data as _kd  # noqa: E402
 from core.kite_data import fetch_ohlcv, get_token  # noqa: E402
+from core import oi_pcr  # noqa: E402
 
 IST = datetime.timezone(datetime.timedelta(hours=5, minutes=30))
 TF_MIN = 10
@@ -306,6 +307,26 @@ def scan(symbols: list[str], do_push: bool) -> None:
     retr = {k: [(r, r["retr"][k]) for r in res if not r.get("error") and k in r.get("retr", {})]
             for k in (("bull", 20), ("bull", 50), ("bull", "cpr"), ("bear", 20), ("bear", 50), ("bear", "cpr"))}
     bad = sorted((r for r in res if r.get("bear")), key=lambda r: -r["below_cpr_pct"])
+
+    # Step 7: OI + PCR — keep a bullish / bearish entry only when OI agrees (no base yet → keep)
+    oi, oi_err = {}, ""
+    if env("CHANDU_OI", "1") != "0":
+        try:
+            oi = oi_pcr.read({r["symbol"]: r["close"] for r in res if not r.get("error")}, now)
+        except Exception as e:                 # OI is extra — never break the scan
+            oi_err = str(e)[:120]
+            print(f"  OI read failed: {oi_err}")
+    for r in res:
+        r["oi"] = oi.get(r["symbol"])
+    removed = {"bull": [], "bear": []}
+    def keep(r, side):
+        ok = oi_pcr.agrees(r.get("oi"), side) is not False
+        if not ok and r["symbol"] not in removed[side]:
+            removed[side].append(r["symbol"])
+        return ok
+    good = [r for r in good if keep(r, "bull")]
+    bad = [r for r in bad if keep(r, "bear")]
+    retr = {k: [(r, v) for r, v in lst if keep(r, k[0])] for k, lst in retr.items()}
     for r in res:
         if r.get("error"):
             print(f"  {r['symbol']:12s} ERROR  {r['error']}")
@@ -320,12 +341,16 @@ def scan(symbols: list[str], do_push: bool) -> None:
                      for k, v in r.get("retr", {}).items())
         print(f"  {r['symbol']:12s} {tag} close {fmt(r['close']):>10} | "
               f"CPR TC {fmt(r['tc'])} CC {fmt(r['cc'])} BC {fmt(r['bc'])} | EMA20 {fmt(r['ema20'])} "
-              f"EMA50 {fmt(r['ema50'])}{why}{rt}")
+              f"EMA50 {fmt(r['ema50'])}{why}{rt}"
+              + (f" | {oi_pcr.text(r.get('oi'))}" if r.get("oi") else ""))
     cand = next((r["candle"] for r in res if r.get("candle") is not None), None)
     when = f"{cand:%d %b %H:%M}" if cand is not None else f"{now:%H:%M}"
     errs = [r["symbol"] for r in res if r.get("error")]
     n = len(res) - len(errs)
     print("  → retracements: " + ", ".join(f"{k[0]} {line_name(k)} {len(v)}" for k, v in retr.items()))
+    print(f"  → OI: {sum(1 for v in oi.values() if not v.get('na'))} read vs yesterday, "
+          f"{sum(1 for v in oi.values() if v.get('na'))} no base · removed bull {removed['bull'] or '-'} "
+          f"bear {removed['bear'] or '-'}")
     print(f"  → {len(good)} bullish, {len(bad)} bearish, {n - len(good) - len(bad)} neither, of {n}"
           + (f" ({len(errs)} errors: {', '.join(errs)})" if errs else ""))
     if not do_push:
@@ -334,10 +359,11 @@ def scan(symbols: list[str], do_push: bool) -> None:
     nr_s = sum(len(v) for k, v in retr.items() if k[0] == "bear")
     title = (f"Chandu: {len(good)} bull · {len(bad)} bear · retr {nr_b}↑ {nr_s}↓ of {n} "
              f"({when} 10-min candle)")
+    oit = lambda r: (f"\n   {oi_pcr.text(r['oi'])}" if r.get("oi") else "")
     up = [f"{r['symbol']}  {fmt(r['close'])}  CPR+{r['vs_cpr_pct']:.2f}%  "
-          f"EMA20 {fmt(r['ema20'])} > 50 {fmt(r['ema50'])}" for r in good]
+          f"EMA20 {fmt(r['ema20'])} > 50 {fmt(r['ema50'])}" + oit(r) for r in good]
     dn = [f"{r['symbol']}  {fmt(r['close'])}  CPR−{r['below_cpr_pct']:.2f}%  "
-          f"EMA20 {fmt(r['ema20'])} < 50 {fmt(r['ema50'])}" for r in bad]
+          f"EMA20 {fmt(r['ema20'])} < 50 {fmt(r['ema50'])}" + oit(r) for r in bad]
     def rlines(k):
         word = "low" if k[0] == "bull" else "high"
         def plan_txt(v):
@@ -351,6 +377,7 @@ def scan(symbols: list[str], do_push: bool) -> None:
                     + f" · {p['status']}")
         return "\n".join(f"{r['symbol']}  {fmt(r['close'])}  touched {v['touch']:%H:%M} "
                          f"({word} {fmt(v['extreme'])} vs {line_name(k)} {fmt(v['ema_at_touch'])})" + plan_txt(v)
+                         + oit(r)
                          for r, v in retr[k]) or "none"
     body = (f"🟢 BULLISH ({len(good)})\n" + ("\n".join(up) or "none")
             + f"\n\n🔴 BEARISH ({len(bad)})\n" + ("\n".join(dn) or "none")
@@ -361,7 +388,12 @@ def scan(symbols: list[str], do_push: bool) -> None:
             + f"\n🟠 BEAR RETRACEMENT — 50 EMA ({len(retr[('bear', 50)])})\n" + rlines(("bear", 50))
             + f"\n🟤 BEAR RETRACEMENT — CPR ({len(retr[('bear', 'cpr')])})\n" + rlines(("bear", "cpr"))
             + "\n\nBull: close > CPR (TC, CC, BC) · close > EMA20 · EMA20 > EMA50"
-            + "\nBear: close < CPR (TC, CC, BC) · close < EMA20 · EMA20 < EMA50")
+            + "\nBear: close < CPR (TC, CC, BC) · close < EMA20 · EMA20 < EMA50"
+            + f"\nOI filter: bullish kept at OI ≥ +{oi_pcr.AGREE}, bearish at OI ≤ −{oi_pcr.AGREE} "
+              f"(PCR ATM ±10 vs yesterday, puts / calls near ATM, futures buildup)"
+            + (f"\nRemoved by OI — bull: {', '.join(removed['bull']) or 'none'} · "
+               f"bear: {', '.join(removed['bear']) or 'none'}")
+            + (f"\nOI read failed: {oi_err}" if oi_err else ""))
     if errs:
         body += f"\nNot found: {', '.join(errs)}"
     push(env("CHANDU_NTFY_TOPIC", "chandu-logic"), title, body)
