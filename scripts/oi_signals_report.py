@@ -313,6 +313,8 @@ def new_rules(sig: dict, kite: "Kite") -> dict:
     m15 = kite.candles(name, "15minute", day - datetime.timedelta(days=6), day)
     if daily.empty or len(daily) < 2:
         return {"new": "no daily candles"}
+    daily = daily.copy()
+    daily.index = [pd.Timestamp(d).date() for d in daily.index]     # Kite gives Timestamps
     lv = levels.build(daily, m15, day, upto, walls["call_wall"], walls["put_wall"])
     z = levels.check(side, opt["spot"], lv)
     if z is None:                                         # room → buy now
