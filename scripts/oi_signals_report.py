@@ -292,6 +292,8 @@ def new_rules(sig: dict, kite: "Kite") -> dict:
     """What the proposed rules would have done with this signal: decision + the entry they'd use."""
     day, side, name = sig["day"], sig["side"], sig["name"]
     t, fut = sig["time"].replace(":", ""), sig.get("fut")
+    if t > ORDER_UNTIL:
+        return {"new": "⏰ after 15:00 — no order"}
     walls = {"call_wall": sig.get("call_wall"), "put_wall": sig.get("put_wall")}
     note = ""
     if t < FIRST_ORDER:                                   # rule 4: early → must still be STRONG at 09:40+
@@ -389,6 +391,10 @@ def main() -> None:
         return
 
     df = pd.DataFrame(rows)
+    if "new" in df:
+        for c in ("new_time", "new_strike", "new_entry", "new_result", "new_close_pct"):
+            if c not in df:
+                df[c] = pd.NA
     out = mon.ROOT / "data" / f"oi_signals_report_{datetime.date.today()}.csv"
     df.to_csv(out, index=False)
     print(f"OI monitor signals · success = premium +{a.target:g}% before −{a.stop:g}%\n")
@@ -418,11 +424,17 @@ def main() -> None:
     for side, r in by.iterrows():
         lines.append(f"{side}: {int(r['count'])} signals, close {r['mean']:+.1f}% on average")
     if "new" in df:
-        nb = df[df.get("new_result").notna()] if "new_result" in df else df.iloc[0:0]
+        for c in ("new_result", "new_close_pct"):
+            if c not in df:
+                df[c] = pd.NA
+        ob = df[~df["order"].astype(str).str.startswith("no order")] if "order" in df else df
+        os_, of_ = int((ob["result"] == "SUCCESS").sum()), int((ob["result"] == "FAILURE").sum())
+        oc = ob["close_pct"].dropna().mean() if len(ob) else float("nan")
+        nb = df[df["new_result"].notna()]
         ns, nf = int((nb["new_result"] == "SUCCESS").sum()), int((nb["new_result"] == "FAILURE").sum())
-        nc = nb["new_close_pct"].dropna().mean() if len(nb) else float("nan")
-        lines += ["", f"OLD rules (every signal bought): {len(df)} trades · ✅ {n_s} · ❌ {n_f}"
-                  + (f" · close {close_avg:+.1f}% avg" if pd.notna(close_avg) else ""),
+        nc = pd.to_numeric(nb["new_close_pct"], errors="coerce").dropna().mean() if len(nb) else float("nan")
+        lines += ["", f"OLD rules (signals that went to Kite): {len(ob)} trades · ✅ {os_} · ❌ {of_}"
+                  + (f" · close {oc:+.1f}% avg" if pd.notna(oc) else ""),
                   f"NEW rules: {len(nb)} trades · ✅ {ns} · ❌ {nf}" + (f" · close {nc:+.1f}% avg" if pd.notna(nc) else "")]
         kinds = df["new"].str.extract(r"^(\S+ [A-Z]+)")[0].value_counts()
         lines.append("decisions: " + " · ".join(f"{k} {v}" for k, v in kinds.items()))
