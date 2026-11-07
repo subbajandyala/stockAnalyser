@@ -108,7 +108,7 @@ def replay(day: datetime.date) -> list[dict]:
     return out
 
 
-SIG_RE = re.compile(r"^(🟢|🔴) (\S+) ([\d.]+) [▲▼]([\d.]+)% — BUY ([\d.]+) (CE|PE) @ ₹([\d.]+)")
+SIG_RE = re.compile(r"^(🟢|🔴) (\S+) ([\d.]+) [▲▼]([\d.]+)% — (?:BUY|signal) ([\d.]+) (CE|PE) @ ₹([\d.]+)")
 ORDER_RE = re.compile(r"^\s+order (✓|✗|…) (\S+) (\d+) @ ₹([\d.]+)\s*(\S*) — (.*)$")
 SCAN_RE = re.compile(r"^\[(\d\d):(\d\d)\] \d+ stocks")
 FUT_RE = re.compile(r"fut (long buildup|short covering|short buildup|long unwinding|no OI base)")
@@ -133,6 +133,9 @@ def from_log(log: pathlib.Path) -> list[dict]:
             continue
         m = SIG_RE.match(line)
         if m and cur is not None:
+            if any(x["name"] == m.group(2) and x["side"] == m.group(6) for x in cur):
+                sig = None              # same signal again (an EARLY one decided later) — keep the first
+                continue
             sig = {"time": last_t, "side": m.group(6), "name": m.group(2), "spot": float(m.group(3)),
                    "price_pct": float(m.group(4)) * (1 if m.group(1) == "🟢" else -1),
                    "strike": float(m.group(5)), "signal_ltp": float(m.group(7)), "ts": None,
