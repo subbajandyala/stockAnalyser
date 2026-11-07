@@ -41,6 +41,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).parent))
 import pandas as pd
 
 import oi_monitor_bot as mon
+from screener import levels
 from screener import oi_monitor as om
 
 RUN_FROM, RUN_TO = "0920", "1531"
@@ -110,6 +111,9 @@ def replay(day: datetime.date) -> list[dict]:
 SIG_RE = re.compile(r"^(🟢|🔴) (\S+) ([\d.]+) [▲▼]([\d.]+)% — BUY ([\d.]+) (CE|PE) @ ₹([\d.]+)")
 ORDER_RE = re.compile(r"^\s+order (✓|✗|…) (\S+) (\d+) @ ₹([\d.]+)\s*(\S*) — (.*)$")
 SCAN_RE = re.compile(r"^\[(\d\d):(\d\d)\] \d+ stocks")
+FUT_RE = re.compile(r"fut (long buildup|short covering|short buildup|long unwinding|no OI base)")
+SR_RE = re.compile(r"(support|resistance) ([\d.]+)")
+WALL_RE = re.compile(r"next wall ([\d.]+)")
 
 
 def from_log(log: pathlib.Path) -> list[dict]:
@@ -144,6 +148,17 @@ def from_log(log: pathlib.Path) -> list[dict]:
                 sig["order"] = line.strip()
             elif "score " in line:
                 sig["score"] = line.strip().split("score ")[-1].split("/")[0]
+            m2 = FUT_RE.search(line)
+            if m2:
+                sig["fut"] = m2.group(1)
+            m3, m4 = SR_RE.search(line), WALL_RE.search(line)
+            if m3 or m4:
+                near = float(m3.group(2)) if m3 else None
+                nxt = float(m4.group(1)) if m4 else None
+                if sig["side"] == "CE":
+                    sig["put_wall"], sig["call_wall"] = near, nxt
+                else:
+                    sig["call_wall"], sig["put_wall"] = near, nxt
     dates = [d for d in day_dirs() if market_files(d)]
     days = [d for d in days if d]
     out = []
@@ -202,12 +217,134 @@ def follow(sig: dict, target: float, stop: float, next_day: datetime.date | None
     return res
 
 
+# ── New rules (step 1: simulated in this report only; the live monitor is unchanged) ──────────
+FIRST_ORDER = "0940"          # no orders before this scan (gap / first-scan rule)
+ORDER_UNTIL = "1500"
+FRESH = {"CE": "long buildup", "PE": "short buildup"}
+
+
+class Kite:
+    """Daily / 15-min / 10-min candles for the signalled stocks only (a few calls per signal)."""
+
+    def __init__(self):
+        from kiteconnect import KiteConnect
+        e = mon.env()
+        self.k = KiteConnect(e.get("KITE_API_KEY", ""))
+        self.k.set_access_token(e.get("KITE_ACCESS_TOKEN", ""))
+        self.k.profile()                      # fails fast on an expired token
+        self.tokens = {r["tradingsymbol"]: r["instrument_token"]
+                       for r in self.k.instruments("NSE") if r["segment"] == "NSE"}
+        self.cache: dict = {}
+
+    def candles(self, name: str, interval: str, start: datetime.date, end: datetime.date) -> pd.DataFrame:
+        key = (name, interval, start, end)
+        if key not in self.cache:
+            rows = self.k.historical_data(self.tokens[name], datetime.datetime.combine(start, datetime.time(9, 15)),
+                                          datetime.datetime.combine(end, datetime.time(15, 30)), interval)
+            time.sleep(0.35)
+            df = pd.DataFrame(rows)
+            if len(df):
+                df["date"] = pd.to_datetime(df["date"])
+                if df["date"].dt.tz is not None:
+                    df["date"] = df["date"].dt.tz_convert("Asia/Kolkata").dt.tz_localize(None)
+                df = df.set_index("date").sort_index()
+            self.cache[key] = df
+        return self.cache[key]
+
+
+def option_at(day: datetime.date, hm: str, name: str, side: str) -> dict | None:
+    """The ATM option of `side` in the first saved scan at / after hm: contract, entry (ask), spot."""
+    for f in market_files(day):
+        if f.name[:4] < hm:
+            continue
+        s = read(f)
+        g = s[s["name"] == name]
+        if g.empty:
+            return None
+        spot = float(g["spot"].iloc[0])
+        k = min(g["strike"].unique(), key=lambda x: abs(x - spot))
+        row = g[(g["strike"] == k) & (g["type"] == side)]
+        if row.empty:
+            return None
+        r = row.iloc[0]
+        return {"time": f"{f.name[:2]}:{f.name[2:4]}", "ts": r["ts"], "strike": float(k), "spot": spot,
+                "entry": float(r["ask"] or r["ltp"])}
+    return None
+
+
+def still_strong(day: datetime.date, name: str, side: str, from_hm: str) -> dict | None:
+    """First scan at / after from_hm where the stock is still STRONG on that side (only this stock read)."""
+    for f in market_files(day):
+        hm = f.name[:4]
+        if hm < from_hm or hm > ORDER_UNTIL:
+            continue
+        base_p, recent_p = mon.base_and_recent(day, hm)
+        one = lambda d: d[d["name"] == name] if d is not None else None
+        r = om.analyse_all(one(read(f)), one(read(base_p)) if base_p else None,
+                           one(read(recent_p)) if recent_p else None)
+        if r and r[0].get("signal") == side:
+            return {"time": f"{hm[:2]}:{hm[2:]}", "fut": r[0]["fut"], "call_wall": r[0]["call_wall"],
+                    "put_wall": r[0]["put_wall"]}
+    return None
+
+
+def new_rules(sig: dict, kite: "Kite") -> dict:
+    """What the proposed rules would have done with this signal: decision + the entry they'd use."""
+    day, side, name = sig["day"], sig["side"], sig["name"]
+    t, fut = sig["time"].replace(":", ""), sig.get("fut")
+    walls = {"call_wall": sig.get("call_wall"), "put_wall": sig.get("put_wall")}
+    note = ""
+    if t < FIRST_ORDER:                                   # rule 4: early → must still be STRONG at 09:40+
+        later = still_strong(day, name, side, FIRST_ORDER)
+        if not later:
+            return {"new": "⏱ EARLY — not STRONG again after 09:40, no trade"}
+        t, fut = later["time"].replace(":", ""), later["fut"]
+        walls = {k: later[k] for k in walls}
+        note = f"early {sig['time']} → still STRONG at {later['time']} · "
+    if fut != FRESH[side]:                                # rule 1: fresh buildup only
+        return {"new": f"👀 WATCH — fut {fut or 'n/a'} (needs {FRESH[side]})"}
+    opt = option_at(day, t, name, side)
+    if not opt:
+        return {"new": "no snapshot at the entry time"}
+    upto = datetime.datetime.combine(day, datetime.time(int(t[:2]), int(t[2:])))
+    daily = kite.candles(name, "day", day - datetime.timedelta(days=12), day - datetime.timedelta(days=1))
+    m15 = kite.candles(name, "15minute", day - datetime.timedelta(days=6), day)
+    if daily.empty or len(daily) < 2:
+        return {"new": "no daily candles"}
+    lv = levels.build(daily, m15, day, upto, walls["call_wall"], walls["put_wall"])
+    z = levels.check(side, opt["spot"], lv)
+    if z is None:                                         # room → buy now
+        return {"new": f"✅ BUY {note}no level within {levels.LEVEL_PCT:g}%", **opt}
+    today15 = m15[m15.index.date == day]
+    prev = daily.iloc[-1]
+    if len(today15) and levels.gap_into(side, float(today15["open"].iloc[0]), float(prev["high"]),
+                                        float(prev["low"]), z):   # rule 4: gap into a level
+        return {"new": f"👀 WATCH — gap into {z.text()}"}
+    # rule 3: wait for a 10-min close beyond the level
+    m10 = kite.candles(name, "10minute", day, day)
+    for ts_, c in m10.iterrows():
+        end = ts_ + datetime.timedelta(minutes=10)
+        if end <= upto:
+            continue
+        hm = f"{end:%H%M}"
+        if hm > ORDER_UNTIL:
+            break
+        if levels.broke(side, z, float(c["close"])):
+            o = option_at(day, hm, name, side)
+            if o:
+                return {"new": f"✅ BREAK → BUY {note}{z.text()} broken at {end:%H:%M}", **o}
+        if levels.held(side, z, float(c["close"])):
+            return {"new": f"❌ CANCELLED — {z.text()} held ({end:%H:%M})", "level": z.text()}
+    return {"new": f"❌ EXPIRED — {z.text()} never broke by 15:00"}
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--date", help="one day, YYYY-MM-DD (default: every saved day)")
     ap.add_argument("--target", type=float, default=20.0, help="success: premium up this %% (default 20)")
     ap.add_argument("--stop", type=float, default=20.0, help="failure: premium down this %% (default 20)")
     ap.add_argument("--push", action="store_true", help="send the summary to OI_NTFY_TOPIC")
+    ap.add_argument("--no-rules", action="store_true", help="skip the new-rules comparison (no Kite calls)")
     ap.add_argument("--replay", action="store_true",
                     help="re-run every saved scan instead of reading the pushed signals from oi_monitor.log")
     a = ap.parse_args()
@@ -225,10 +362,28 @@ def main() -> None:
             print(f"{log} not found — run with --replay to rebuild the signals from the snapshots")
             return
         found = [x for x in from_log(log) if x.get("ts") and x["day"] in days]
+    kite = None
+    if not a.no_rules:
+        try:
+            kite = Kite()
+        except Exception as ex:
+            print(f"  new rules skipped — Kite login failed ({ex})")
     print(f"  following {len(found)} signals …", flush=True)
     for sig in found:
         later = [x for x in all_days if x > sig["day"] and market_files(x)]
-        rows.append({**sig, **follow(sig, a.target, a.stop, later[0] if later else None)})
+        nd = later[0] if later else None
+        row = {**sig, **follow(sig, a.target, a.stop, nd)}
+        if kite:
+            try:
+                nr = new_rules(sig, kite)
+            except Exception as ex:
+                nr = {"new": f"rules failed: {ex}"}
+            row["new"] = nr["new"]
+            if nr.get("ts"):
+                res = follow({**sig, "time": nr["time"], "ts": nr["ts"], "entry": nr["entry"]}, a.target, a.stop, nd)
+                row.update({"new_time": nr["time"], "new_strike": nr["strike"], "new_entry": nr["entry"],
+                            "new_result": res["result"], "new_close_pct": res["close_pct"]})
+        rows.append(row)
     if not rows:
         print("no signals in the saved snapshots" + (f" for {a.date}" if a.date else ""))
         return
@@ -246,7 +401,10 @@ def main() -> None:
             print(f"  {r['time']} {'🟢' if r['side'] == 'CE' else '🔴'} {r['name']:<11} {r['spot']:>9g} "
                   f"({r['price_pct']:+.1f}%) BUY {r['strike']:g} {r['side']} @ ₹{r['entry']:g} · score {r['score']}/6"
                   f"\n        → {r['result']}{' at ' + r['hit_time'] if r['hit_time'] else ''} · {rng}{nd}"
-                  + (f"\n        order {r['order']}" if 'order' in r and pd.notna(r.get('order')) else ""))
+                  + (f"\n        order {r['order']}" if 'order' in r and pd.notna(r.get('order')) else "")
+                  + (f"\n        NEW RULES: {r['new']}" if 'new' in r and pd.notna(r.get('new')) else "")
+                  + (f" · {r['new_time']} {r['new_strike']:g} {r['side']} @ ₹{r['new_entry']:g} → {r['new_result']}"
+                     f" (close {r['new_close_pct']:+.0f}%)" if 'new_result' in r and pd.notna(r.get('new_result')) else ""))
     done = df[df["result"].isin(["SUCCESS", "FAILURE"])]
     n_s, n_f = int((df["result"] == "SUCCESS").sum()), int((df["result"] == "FAILURE").sum())
     n_up, n_dn = int((df["result"] == "OPEN ▲").sum()), int((df["result"] == "OPEN ▼").sum())
@@ -259,6 +417,15 @@ def main() -> None:
     by = df.groupby("side")["close_pct"].agg(["count", "mean"]).round(1)
     for side, r in by.iterrows():
         lines.append(f"{side}: {int(r['count'])} signals, close {r['mean']:+.1f}% on average")
+    if "new" in df:
+        nb = df[df.get("new_result").notna()] if "new_result" in df else df.iloc[0:0]
+        ns, nf = int((nb["new_result"] == "SUCCESS").sum()), int((nb["new_result"] == "FAILURE").sum())
+        nc = nb["new_close_pct"].dropna().mean() if len(nb) else float("nan")
+        lines += ["", f"OLD rules (every signal bought): {len(df)} trades · ✅ {n_s} · ❌ {n_f}"
+                  + (f" · close {close_avg:+.1f}% avg" if pd.notna(close_avg) else ""),
+                  f"NEW rules: {len(nb)} trades · ✅ {ns} · ❌ {nf}" + (f" · close {nc:+.1f}% avg" if pd.notna(nc) else "")]
+        kinds = df["new"].str.extract(r"^(\S+ [A-Z]+)")[0].value_counts()
+        lines.append("decisions: " + " · ".join(f"{k} {v}" for k, v in kinds.items()))
     print("\n" + "\n".join(l for l in lines if l))
     print(f"\nfull table → {out}")
     if a.push:
