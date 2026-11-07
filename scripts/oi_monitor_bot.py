@@ -1,4 +1,11 @@
 """
+Branch oi-monitor-equity-signals: the same OI signals and order rules, but the STOCK is traded,
+not its option — a CE signal BUYs the stock, a PE signal SELLs it short, both NSE MIS (intraday),
+OIEQ_RS_PER_TRADE rupees per trade (default 20000), LIMIT just through the best price, tag "oieq",
+cancelled if not filled in 8 s. No stop / target: exit by hand (Zerodha squares MIS off ~15:20).
+OI_AUTO_TRADE=1 places the orders; OI_MAX_ORDERS caps them per day; nothing from 15:00.
+The option-specific notes below (lots, NRML, GTT, expiry) do not apply on this branch.
+
 OI monitor — all F&O stocks, every 10 minutes, ntfy push for NEW strong CE / PE signals.
 Orders: with OI_AUTO_TRADE=1 in .env each NEW signal also BUYs the ATM CE / PE of the
 current monthly expiry — OI_LOTS lots (default 1), LIMIT just above the ask, tag "oimon",
@@ -316,6 +323,52 @@ def test_order(kite: KiteConnect, e: dict, name: str, side: str, fill: bool, tod
         print("pushed to ntfy")
 
 
+def trade_equity(kite: KiteConnect, name: str, side: str, rs: float) -> str:
+    """CE → BUY the stock, PE → SELL it short: NSE, MIS (intraday), LIMIT just through the best
+    price, quantity = rs ÷ price. Not filled in 8 s → cancelled. No stop / target: exit by hand
+    (Zerodha squares MIS off ~15:20). The line keeps the "order ✓ SYMBOL QTY @ ₹PRICE MIS — …"
+    shape the evening report reads."""
+    buy = side == "CE"
+    action = "BUY" if buy else "SELL (short)"
+    try:
+        q = kite.quote([f"NSE:{name}"])[f"NSE:{name}"]
+        ltp = float(q.get("last_price") or 0)
+        d = q.get("depth") or {}
+        best = float(((d.get("sell") if buy else d.get("buy")) or [{}])[0].get("price") or 0) or ltp
+        ref = max(best, ltp) if buy else min(best, ltp)
+        price = tick(ref * (1.002 if buy else 0.998))
+        qty = max(1, int(rs // price)) if price else 0
+        if not qty:
+            return f"order ✗ {name} 0 @ ₹0 MIS — no price for {name}"
+        oid = kite.place_order(variety=kite.VARIETY_REGULAR, exchange=kite.EXCHANGE_NSE, tradingsymbol=name,
+                               transaction_type=kite.TRANSACTION_TYPE_BUY if buy else kite.TRANSACTION_TYPE_SELL,
+                               quantity=qty, product=kite.PRODUCT_MIS, order_type=kite.ORDER_TYPE_LIMIT,
+                               price=price, tag="oieq")
+    except Exception as ex:
+        return f"order ✗ {name} 0 @ ₹0 MIS — {action}: {ex}"
+    status, why, fill = "PLACED", "", 0.0
+    for _ in range(4):
+        time.sleep(2)
+        try:
+            h = kite.order_history(oid)[-1]
+            status, why = h.get("status", status), h.get("status_message") or ""
+            fill = float(h.get("average_price") or 0)
+            if status in ("COMPLETE", "REJECTED", "CANCELLED"):
+                break
+        except Exception:
+            pass
+    if status not in ("COMPLETE", "REJECTED", "CANCELLED"):
+        try:
+            kite.cancel_order(variety=kite.VARIETY_REGULAR, order_id=oid)
+            status, why = "CANCELLED", "not filled in 8 s"
+        except Exception as ex:
+            why = f"still open, cancel failed: {ex}"
+    if status != "COMPLETE":
+        return f"order ✗ {name} {qty} @ ₹{price:g} MIS — {action} · {status}" + (f": {why}" if why else "")
+    return (f"order ✓ {name} {qty} @ ₹{fill or price:g} MIS — {action} · COMPLETE — exit by hand "
+            f"(Zerodha squares MIS off ~15:20)")
+
+
 def push(topic: str, title: str, body: str) -> None:
     parts, cur = [], ""
     for line in body.split("\n\n"):
@@ -436,6 +489,8 @@ def main() -> None:
     sl_pct = float(e.get("OI_SL_PCT") or 20)
     tgt_pct = float(e.get("OI_TARGET_PCT") or 40)
     use_gtt = e.get("OI_GTT", "0") == "1"
+    rs_per_trade = float(e.get("OIEQ_RS_PER_TRADE") or 20000)
+    act = lambda side: "BUY STOCK" if side == "CE" else "SHORT STOCK"
     days_left = lambda u: (datetime.date.fromisoformat(u["expiry"]) - today).days
     by_name = {r["name"]: r for r in res if "error" not in r}
     naive = now.replace(tzinfo=None, second=0, microsecond=0)
@@ -450,13 +505,10 @@ def main() -> None:
             return "no order — OI_AUTO_TRADE is off"
         if hm4 >= rules.ORDER_UNTIL:
             return "no order — 15:00 or later"
-        if product == "NRML" and days_left(uni[r["name"]]) < MIN_DAYS_TO_EXPIRY:
-            return (f"no order — expiry {uni[r['name']]['expiry']} is under {MIN_DAYS_TO_EXPIRY} days away "
-                    f"(stock options settle physically)")
         if n_orders >= max_orders:
             return f"no order — {max_orders} orders already today (OI_MAX_ORDERS)"
         n_orders += 1
-        return buy_atm(kite, r, snap, int(uni[r["name"]].get("lot") or 1), lots, product, sl_pct, tgt_pct, use_gtt)
+        return trade_equity(kite, r["name"], r["signal"], rs_per_trade)
 
     def atm_r(name: str, side: str) -> dict | None:
         """A minimal signal dict (ATM strike now) for an armed stock that may no longer be STRONG."""
@@ -469,7 +521,7 @@ def main() -> None:
 
     if not use_rules:                                   # OI_NEW_RULES=0: buy every new signal (old way)
         for r in new:
-            pushes.append(om.signal_line(r) + "\n   " + order(r))
+            pushes.append(om.signal_line(r).replace(" — BUY ", " — signal ", 1) + "\n   " + order(r))
             sent[r["name"]] = r["signal"]
     else:
         kd = rules.KiteData(kite, tokens=nse_tokens(kite, today),
@@ -484,11 +536,9 @@ def main() -> None:
             except Exception as ex:                     # no rules read → no order (conservative)
                 logs.append(f"{om.signal_line(r)}\n   ⚠️ rules failed ({ex}) — no order")
                 return
-            head = om.signal_line(r) + (f"\n   {prefix}" if prefix else "")
-            if d["kind"] != "BUY":                      # no order now — don't let the line say BUY
-                head = head.replace(" — BUY ", " — signal ", 1)
+            head = om.signal_line(r).replace(" — BUY ", " — signal ", 1) + (f"\n   {prefix}" if prefix else "")
             if d["kind"] == "BUY":
-                pushes.append(f"{head}\n   ✅ BUY — {d['text']}\n   {order(r)}")
+                pushes.append(f"{head}\n   ✅ {act(side)} — {d['text']}\n   {order(r)}")
             elif d["kind"] == "WAIT":
                 z = d["level"]
                 armed[name] = {"side": side, "lo": z.lo, "hi": z.hi, "label": z.label,
@@ -518,7 +568,7 @@ def main() -> None:
                 continue
             if kind == "BREAK":
                 r = atm_r(name, side)
-                pushes.append(f"{'🟢' if side == 'CE' else '🔴'} {name} {side} — ✅ BREAK → BUY: {txt}\n   "
+                pushes.append(f"{'🟢' if side == 'CE' else '🔴'} {name} {side} — ✅ BREAK → {act(side)}: {txt}\n   "
                               + (order(r) if r else "no order — stock not in this scan"))
                 armed.pop(name)
             elif kind == "HELD":

@@ -45,6 +45,8 @@ from screener import oi_monitor as om
 from screener import oi_rules as rules
 
 RUN_FROM, RUN_TO = "0920", "1531"
+EQUITY = True            # branch oi-monitor-equity-signals: the stock is traded, not its option
+EQ_TARGET, EQ_STOP = 1.0, 1.0   # equity success / failure: stock +1 % / −1 % in the trade's direction
 _CACHE: dict = {}
 
 
@@ -162,6 +164,12 @@ def from_log(log: pathlib.Path) -> list[dict]:
                     sig["put_wall"], sig["call_wall"] = near, nxt
                 else:
                     sig["call_wall"], sig["put_wall"] = near, nxt
+    for dd in days:
+        for x in dd:
+            if EQUITY:                 # the stock is the trade: entry = the order price, else the signal's spot
+                if x.get("ts") != x["name"]:
+                    x["entry"] = x["spot"]
+                x["ts"], x["equity"] = x["name"], True
     dates = [d for d in day_dirs() if market_files(d)]
     days = [d for d in days if d]
     out = []
@@ -178,17 +186,28 @@ def from_log(log: pathlib.Path) -> list[dict]:
     return out
 
 
+def name_of(sig: dict) -> str:
+    return sig["name"]
+
+
 def follow(sig: dict, target: float, stop: float, next_day: datetime.date | None) -> dict:
     """Track the signal's option through the day's later snapshots."""
     day, hm = sig["day"], sig["time"].replace(":", "")
+    eq = bool(sig.get("equity"))
+    short = eq and sig["side"] == "PE"
+    if eq:
+        target, stop = sig.get("eq_target", EQ_TARGET), sig.get("eq_stop", EQ_STOP)
     path = []
     for f in market_files(day):
         if f.name[:4] <= hm:
             continue
         s = read(f)
-        x = s[s["ts"] == sig["ts"]]
+        x = s[s["name"] == sig["name"]] if eq else s[s["ts"] == sig["ts"]]
         if len(x):
-            path.append((f.name[:2] + ":" + f.name[2:4], float(x.iloc[0]["ltp"]), float(x.iloc[0]["spot"])))
+            px = float(x.iloc[0]["spot"]) if eq else float(x.iloc[0]["ltp"])
+            if short and px:
+                px = sig["entry"] ** 2 / px          # a short gains as the price falls (mirror it)
+            path.append((f.name[:2] + ":" + f.name[2:4], px, float(x.iloc[0]["spot"])))
     e = sig["entry"]
     res = {"result": "NO DATA", "max_pct": None, "min_pct": None, "close_pct": None, "hit_time": "",
            "spot_close": None, "next_pct": None}
@@ -210,7 +229,7 @@ def follow(sig: dict, target: float, stop: float, next_day: datetime.date | None
         res["result"], res["hit_time"] = hit
     else:
         res["result"] = "OPEN ▲" if close >= e else "OPEN ▼"
-    if next_day:
+    if next_day and not eq:            # equity is intraday (MIS)
         nf = market_files(next_day)
         if nf:
             s = read(nf[-1])
@@ -305,15 +324,19 @@ def new_rules(sig: dict, kite: "rules.KiteData") -> dict:
 
 
 def main() -> None:
+    global EQ_TARGET, EQ_STOP
     ap = argparse.ArgumentParser()
     ap.add_argument("--date", help="one day, YYYY-MM-DD (default: every saved day)")
     ap.add_argument("--target", type=float, default=20.0, help="success: premium up this %% (default 20)")
     ap.add_argument("--stop", type=float, default=20.0, help="failure: premium down this %% (default 20)")
     ap.add_argument("--push", action="store_true", help="send the summary to OI_NTFY_TOPIC")
     ap.add_argument("--no-rules", action="store_true", help="skip the new-rules comparison (no Kite calls)")
+    ap.add_argument("--eq-target", type=float, default=EQ_TARGET, help="equity success: stock moves this %% in favour (1)")
+    ap.add_argument("--eq-stop", type=float, default=EQ_STOP, help="equity failure: stock moves this %% against (1)")
     ap.add_argument("--replay", action="store_true",
                     help="re-run every saved scan instead of reading the pushed signals from oi_monitor.log")
     a = ap.parse_args()
+    EQ_TARGET, EQ_STOP = a.eq_target, a.eq_stop
 
     days = day_dirs()
     if a.date:
@@ -346,6 +369,8 @@ def main() -> None:
                 nr = {"new": f"rules failed: {ex}"}
             row["new"] = nr["new"]
             if nr.get("ts"):
+                if EQUITY:
+                    nr = {**nr, "ts": name_of(sig), "entry": nr["spot"]}
                 res = follow({**sig, "time": nr["time"], "ts": nr["ts"], "entry": nr["entry"]}, a.target, a.stop, nd)
                 row.update({"new_time": nr["time"], "new_strike": nr["strike"], "new_entry": nr["entry"],
                             "new_result": res["result"], "new_close_pct": res["close_pct"]})
@@ -361,15 +386,20 @@ def main() -> None:
                 df[c] = pd.NA
     out = mon.ROOT / "data" / f"oi_signals_report_{datetime.date.today()}.csv"
     df.to_csv(out, index=False)
-    print(f"OI monitor signals · success = premium +{a.target:g}% before −{a.stop:g}%\n")
+    print(f"OI monitor signals · " + (f"equity: success = stock +{EQ_TARGET:g}% in the trade's direction "
+          f"before −{EQ_STOP:g}% (PE = short)" if EQUITY else
+          f"success = premium +{a.target:g}% before −{a.stop:g}%") + "\n")
     for day, g in df.groupby("day"):
         print(f"── {day} ({len(g)} signals)")
         for _, r in g.iterrows():
             nd = f" · next day {r['next_pct']:+.0f}%" if pd.notna(r["next_pct"]) else ""
-            rng = (f"max {r['max_pct']:+.0f}% min {r['min_pct']:+.0f}% close {r['close_pct']:+.0f}%"
+            dp = 1 if EQUITY else 0
+            rng = (f"max {r['max_pct']:+.{dp}f}% min {r['min_pct']:+.{dp}f}% close {r['close_pct']:+.{dp}f}%"
                    if pd.notna(r["max_pct"]) else "no later snapshot")
+            what = ((f"{'BUY' if r['side'] == 'CE' else 'SHORT'} {r['name']} @ ₹{r['entry']:g}") if EQUITY
+                    else f"BUY {r['strike']:g} {r['side']} @ ₹{r['entry']:g}")
             print(f"  {r['time']} {'🟢' if r['side'] == 'CE' else '🔴'} {r['name']:<11} {r['spot']:>9g} "
-                  f"({r['price_pct']:+.1f}%) BUY {r['strike']:g} {r['side']} @ ₹{r['entry']:g} · score {r['score']}/6"
+                  f"({r['price_pct']:+.1f}%) {what} · score {r['score']}/6"
                   f"\n        → {r['result']}{' at ' + r['hit_time'] if r['hit_time'] else ''} · {rng}{nd}"
                   + (f"\n        order {r['order']}" if 'order' in r and pd.notna(r.get('order')) else "")
                   + (f"\n        NEW RULES: {r['new']}" if 'new' in r and pd.notna(r.get('new')) else "")
@@ -379,11 +409,13 @@ def main() -> None:
     n_s, n_f = int((df["result"] == "SUCCESS").sum()), int((df["result"] == "FAILURE").sum())
     n_up, n_dn = int((df["result"] == "OPEN ▲").sum()), int((df["result"] == "OPEN ▼").sum())
     close_avg = df["close_pct"].dropna().mean()
-    lines = [f"OI signals report · {len(df)} signals on {df['day'].nunique()} day(s) · "
-             f"success = +{a.target:g}% before −{a.stop:g}%",
+    rule = (f"equity: success = stock +{EQ_TARGET:g}% in the trade's direction before −{EQ_STOP:g}%"
+            if EQUITY else f"success = +{a.target:g}% before −{a.stop:g}%")
+    lines = [f"OI signals report · {len(df)} signals on {df['day'].nunique()} day(s) · {rule}",
              f"✅ success {n_s} · ❌ failure {n_f} · open ▲ {n_up} · open ▼ {n_dn}"
              + (f" · hit rate {round(100 * n_s / len(done))}% of decided" if len(done) else ""),
-             f"average premium change at the close: {close_avg:+.1f}%" if pd.notna(close_avg) else ""]
+             (f"average {'move in the trade' if EQUITY else 'premium change'} at the close: {close_avg:+.2f}%"
+              if pd.notna(close_avg) else "")]
     by = df.groupby("side")["close_pct"].agg(["count", "mean"]).round(1)
     for side, r in by.iterrows():
         lines.append(f"{side}: {int(r['count'])} signals, close {r['mean']:+.1f}% on average")
