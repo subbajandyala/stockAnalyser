@@ -39,6 +39,14 @@ import oi_monitor_bot as mon
 from screener import oi_monitor as om
 
 RUN_FROM, RUN_TO = "0920", "1531"
+_CACHE: dict = {}
+
+
+def read(p: pathlib.Path) -> pd.DataFrame:
+    """Each snapshot file is read once (the replay and every signal's follow-up share it)."""
+    if p not in _CACHE:
+        _CACHE[p] = pd.read_csv(p)
+    return _CACHE[p]
 
 
 def day_dirs() -> list[datetime.date]:
@@ -62,9 +70,9 @@ def replay(day: datetime.date) -> list[dict]:
     seen, out = set(), []
     for f in market_files(day):
         hm = f.name[:4]
-        snap = pd.read_csv(f)
+        snap = read(f)
         base_p, recent_p = mon.base_and_recent(day, hm)
-        base, recent = mon.load(base_p), mon.load(recent_p)
+        base, recent = (read(base_p) if base_p else None), (read(recent_p) if recent_p else None)
         for r in om.analyse_all(snap, base, recent):
             side = r.get("signal")
             if not side or (r["name"], side) in seen:
@@ -87,7 +95,7 @@ def follow(sig: dict, target: float, stop: float, next_day: datetime.date | None
     for f in market_files(day):
         if f.name[:4] <= hm:
             continue
-        s = pd.read_csv(f)
+        s = read(f)
         x = s[s["ts"] == sig["ts"]]
         if len(x):
             path.append((f.name[:2] + ":" + f.name[2:4], float(x.iloc[0]["ltp"]), float(x.iloc[0]["spot"])))
@@ -115,7 +123,7 @@ def follow(sig: dict, target: float, stop: float, next_day: datetime.date | None
     if next_day:
         nf = market_files(next_day)
         if nf:
-            s = pd.read_csv(nf[-1])
+            s = read(nf[-1])
             x = s[s["ts"] == sig["ts"]]
             if len(x):
                 res["next_pct"] = round((float(x.iloc[0]["ltp"]) / e - 1) * 100, 1)
