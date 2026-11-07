@@ -17,6 +17,9 @@ the day's snapshots:
             judged by the order the snapshots show them)
   next day  the premium in the next trading day's last snapshot, when one exists (NRML holds)
 
+By default it takes the signals the monitor actually pushed (and their order lines) from
+oi_monitor.log; --replay re-runs every saved scan instead (slow on the 512 MB machine).
+
 Usage (Subba's machine):
   /root/venv/bin/python scripts/oi_signals_report.py                  # all saved days
   /root/venv/bin/python scripts/oi_signals_report.py --date 2026-11-06
@@ -28,6 +31,7 @@ Kite only lists today's orders, so order fills are not part of this report — s
 import argparse
 import datetime
 import pathlib
+import re
 import sys
 import time
 
@@ -103,6 +107,59 @@ def replay(day: datetime.date) -> list[dict]:
     return out
 
 
+SIG_RE = re.compile(r"^(🟢|🔴) (\S+) ([\d.]+) [▲▼]([\d.]+)% — BUY ([\d.]+) (CE|PE) @ ₹([\d.]+)")
+ORDER_RE = re.compile(r"^\s+order (✓|✗|…) (\S+) (\d+) @ ₹([\d.]+)\s*(\S*) — (.*)$")
+SCAN_RE = re.compile(r"^\[(\d\d):(\d\d)\] \d+ stocks")
+
+
+def from_log(log: pathlib.Path) -> list[dict]:
+    """Signals the monitor pushed, with their order lines, from oi_monitor.log.
+
+    The log has times but no dates: a scan time earlier than the one before starts a new
+    day, and the days are matched (newest last) to the dates that have saved snapshots."""
+    days, cur, last_t, sig = [], None, None, None
+    for line in log.read_text(encoding="utf-8", errors="replace").splitlines():
+        m = SCAN_RE.match(line)
+        if m:
+            t = m.group(1) + ":" + m.group(2)
+            if last_t is None or t < last_t:
+                cur = []
+                days.append(cur)
+            last_t, sig = t, None
+            continue
+        m = SIG_RE.match(line)
+        if m and cur is not None:
+            sig = {"time": last_t, "side": m.group(6), "name": m.group(2), "spot": float(m.group(3)),
+                   "price_pct": float(m.group(4)) * (1 if m.group(1) == "🟢" else -1),
+                   "strike": float(m.group(5)), "signal_ltp": float(m.group(7)), "ts": None,
+                   "order": "no order line", "entry": float(m.group(7)), "score": ""}
+            cur.append(sig)
+            continue
+        if sig is not None:
+            m = ORDER_RE.match(line)
+            if m:
+                sig.update({"ts": m.group(2), "entry": float(m.group(4)),
+                            "order": f"{m.group(1)} {m.group(6)}".strip()})
+            elif "no order" in line:
+                sig["order"] = line.strip()
+            elif "score " in line:
+                sig["score"] = line.strip().split("score ")[-1].split("/")[0]
+    dates = [d for d in day_dirs() if market_files(d)]
+    days = [d for d in days if d]
+    out = []
+    for date, sigs in zip(dates[-len(days):] if days else [], days[-len(dates):] if dates else []):
+        for x in sigs:
+            x["day"] = date
+            if not x["ts"]:            # no order line: find the contract in that day's snapshot
+                f = market_files(date)
+                s = read(f[0]) if f else None
+                if s is not None:
+                    y = s[(s["name"] == x["name"]) & (s["strike"] == x["strike"]) & (s["type"] == x["side"])]
+                    x["ts"] = y.iloc[0]["ts"] if len(y) else None
+            out.append(x)
+    return out
+
+
 def follow(sig: dict, target: float, stop: float, next_day: datetime.date | None) -> dict:
     """Track the signal's option through the day's later snapshots."""
     day, hm = sig["day"], sig["time"].replace(":", "")
@@ -151,6 +208,8 @@ def main() -> None:
     ap.add_argument("--target", type=float, default=20.0, help="success: premium up this %% (default 20)")
     ap.add_argument("--stop", type=float, default=20.0, help="failure: premium down this %% (default 20)")
     ap.add_argument("--push", action="store_true", help="send the summary to OI_NTFY_TOPIC")
+    ap.add_argument("--replay", action="store_true",
+                    help="re-run every saved scan instead of reading the pushed signals from oi_monitor.log")
     a = ap.parse_args()
 
     days = day_dirs()
@@ -158,12 +217,14 @@ def main() -> None:
         days = [d for d in days if str(d) == a.date]
     rows = []
     all_days = day_dirs()
-    for d in days:
-        later = [x for x in all_days if x > d and market_files(x)]
-        sigs = replay(d)
-        print(f"  following {len(sigs)} signals …", flush=True)
-        for sig in sigs:
-            rows.append({**sig, **follow(sig, a.target, a.stop, later[0] if later else None)})
+    if a.replay:
+        found = [sig for d in days for sig in replay(d)]
+    else:
+        found = [x for x in from_log(mon.ROOT / "oi_monitor.log") if x.get("ts") and x["day"] in days]
+    print(f"  following {len(found)} signals …", flush=True)
+    for sig in found:
+        later = [x for x in all_days if x > sig["day"] and market_files(x)]
+        rows.append({**sig, **follow(sig, a.target, a.stop, later[0] if later else None)})
     if not rows:
         print("no signals in the saved snapshots" + (f" for {a.date}" if a.date else ""))
         return
@@ -180,7 +241,8 @@ def main() -> None:
                    if pd.notna(r["max_pct"]) else "no later snapshot")
             print(f"  {r['time']} {'🟢' if r['side'] == 'CE' else '🔴'} {r['name']:<11} {r['spot']:>9g} "
                   f"({r['price_pct']:+.1f}%) BUY {r['strike']:g} {r['side']} @ ₹{r['entry']:g} · score {r['score']}/6"
-                  f"\n        → {r['result']}{' at ' + r['hit_time'] if r['hit_time'] else ''} · {rng}{nd}")
+                  f"\n        → {r['result']}{' at ' + r['hit_time'] if r['hit_time'] else ''} · {rng}{nd}"
+                  + (f"\n        order {r['order']}" if 'order' in r and pd.notna(r.get('order')) else ""))
     done = df[df["result"].isin(["SUCCESS", "FAILURE"])]
     n_s, n_f = int((df["result"] == "SUCCESS").sum()), int((df["result"] == "FAILURE").sum())
     n_up, n_dn = int((df["result"] == "OPEN ▲").sum()), int((df["result"] == "OPEN ▼").sum())
