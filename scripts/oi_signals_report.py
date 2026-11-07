@@ -29,6 +29,7 @@ import argparse
 import datetime
 import pathlib
 import sys
+import time
 
 sys.path.insert(0, str(pathlib.Path(__file__).parent.parent))
 sys.path.insert(0, str(pathlib.Path(__file__).parent))
@@ -42,10 +43,20 @@ RUN_FROM, RUN_TO = "0920", "1531"
 _CACHE: dict = {}
 
 
+COLS = ["name", "strike", "type", "ts", "oi", "ltp", "bid", "ask", "spot", "spot_close",
+        "fut_ltp", "fut_close", "fut_oi"]
+DTYPES = {"name": "category", "type": "category", "ts": "category", "strike": "float32", "oi": "float32",
+          "ltp": "float32", "bid": "float32", "ask": "float32", "spot": "float32", "spot_close": "float32",
+          "fut_ltp": "float32", "fut_close": "float32", "fut_oi": "float32"}
+
+
 def read(p: pathlib.Path) -> pd.DataFrame:
-    """Each snapshot file is read once (the replay and every signal's follow-up share it)."""
+    """Each snapshot is read once, only the needed columns, compact types (512 MB machine)."""
     if p not in _CACHE:
-        _CACHE[p] = pd.read_csv(p)
+        df = pd.read_csv(p, usecols=lambda c: c in COLS, dtype=DTYPES)
+        for c in ("name", "type", "ts"):
+            df[c] = df[c].astype(str)
+        _CACHE[p] = df
     return _CACHE[p]
 
 
@@ -68,8 +79,12 @@ def market_files(day: datetime.date) -> list[pathlib.Path]:
 def replay(day: datetime.date) -> list[dict]:
     """Signals of one day, in order, with the scan they came from."""
     seen, out = set(), []
-    for f in market_files(day):
+    files = market_files(day)
+    t0 = time.time()
+    for n, f in enumerate(files, 1):
         hm = f.name[:4]
+        print(f"  replay {day} {hm[:2]}:{hm[2:]} ({n}/{len(files)}) · {len(out)} signals · {time.time() - t0:.0f}s",
+              flush=True)
         snap = read(f)
         base_p, recent_p = mon.base_and_recent(day, hm)
         base, recent = (read(base_p) if base_p else None), (read(recent_p) if recent_p else None)
@@ -145,7 +160,9 @@ def main() -> None:
     all_days = day_dirs()
     for d in days:
         later = [x for x in all_days if x > d and market_files(x)]
-        for sig in replay(d):
+        sigs = replay(d)
+        print(f"  following {len(sigs)} signals …", flush=True)
+        for sig in sigs:
             rows.append({**sig, **follow(sig, a.target, a.stop, later[0] if later else None)})
     if not rows:
         print("no signals in the saved snapshots" + (f" for {a.date}" if a.date else ""))
