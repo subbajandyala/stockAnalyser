@@ -220,7 +220,11 @@ def main() -> None:
     if a.replay:
         found = [sig for d in days for sig in replay(d)]
     else:
-        found = [x for x in from_log(mon.ROOT / "oi_monitor.log") if x.get("ts") and x["day"] in days]
+        log = mon.ROOT / "oi_monitor.log"
+        if not log.exists():
+            print(f"{log} not found — run with --replay to rebuild the signals from the snapshots")
+            return
+        found = [x for x in from_log(log) if x.get("ts") and x["day"] in days]
     print(f"  following {len(found)} signals …", flush=True)
     for sig in found:
         later = [x for x in all_days if x > sig["day"] and market_files(x)]
