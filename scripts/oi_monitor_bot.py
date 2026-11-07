@@ -10,6 +10,17 @@ at most OI_MAX_ORDERS (default 5) a day, none after 15:00; unfilled after 8 s �
   OI_PRODUCT=MIS: intraday, no GTT; Zerodha squares it off ~15:20.
 The result (filled + GTT / Kite's rejection reason) is added to the push.
 
+Order rules (screener/oi_rules.py, OI_NEW_RULES=1 default; 0 = buy every new signal as before):
+  before 09:40      EARLY — decided at the first scan from 09:40 where the stock is still STRONG
+  NIFTY             up ≥ 0.5 % and above its open → no PE; down ≥ 0.5 % and below → no CE
+  futures           current + next month OI together vs yesterday: CE long buildup, PE short buildup
+  levels            CPR today / day −1 / day −2, last 2 days' highs / lows, opening range, 15-min zones,
+                    OI walls — one within 1 % → WAITING; each scan: a 10-min close beyond it → BUY,
+                    held (1 % the wrong way) / OI turned (score ≤ 2) / 15:00 → CANCELLED
+  15:00 or later    no order
+Pushes: BUY, WAITING and their follow-ups (BREAK → BUY, CANCELLED). WATCH / EARLY only in the
+log and the evening report (OI_PUSH_ALL=1 pushes those too).
+
 Each run:
   1. F&O stock list + nearest-expiry options / futures from Kite (cached per day)
   2. Quotes: stock, futures, and CE + PE for ATM ±10 strikes (≈ 18 quote calls, ~20 s)
@@ -43,7 +54,9 @@ import pandas as pd
 import requests
 from kiteconnect import KiteConnect
 
+from screener import levels
 from screener import oi_monitor as om
+from screener import oi_rules as rules
 
 ROOT = pathlib.Path(__file__).parent.parent
 DATA = ROOT / "data" / "oi"
@@ -90,7 +103,7 @@ def universe(kite: KiteConnect, today: datetime.date) -> dict:
     cache = DATA / f"universe_{today}.json"
     if cache.exists():
         uni = json.loads(cache.read_text())
-        if all("lot" in v for v in uni.values()):
+        if all("lot" in v and "futs" in v for v in uni.values()):
             return uni
     rows = [r for r in kite.instruments("NFO") if r["name"] not in INDEXES and r["expiry"] >= today]
     uni: dict = {}
@@ -110,13 +123,28 @@ def universe(kite: KiteConnect, today: datetime.date) -> dict:
         opts = [[k, v["CE"], v["PE"]] for k, v in sorted(legs.items()) if "CE" in v and "PE" in v]
         if len(opts) >= 2 * om.NEAR + 1:
             uni[name] = {"fut": fut[0]["tradingsymbol"], "expiry": str(exp), "opts": opts,
-                         "lot": int(fut[0].get("lot_size") or 1)}
+                         "lot": int(fut[0].get("lot_size") or 1),
+                         "futs": [[int(f.get("instrument_token") or 0), str(f["expiry"])] for f in fut[:2]]}
     DATA.mkdir(parents=True, exist_ok=True)
     cache.write_text(json.dumps(uni))
     for old in DATA.glob("universe_*.json"):
         if old != cache:
             old.unlink()
     return uni
+
+
+def nse_tokens(kite: KiteConnect, today: datetime.date) -> dict:
+    """NSE symbol → instrument token, cached per day (only read when a signal needs candles)."""
+    cache = DATA / f"nse_tokens_{today}.json"
+    if cache.exists():
+        return json.loads(cache.read_text())
+    toks = {r["tradingsymbol"]: r["instrument_token"] for r in kite.instruments("NSE") if r["segment"] == "NSE"}
+    DATA.mkdir(parents=True, exist_ok=True)
+    cache.write_text(json.dumps(toks))
+    for old in DATA.glob("nse_tokens_*.json"):
+        if old != cache:
+            old.unlink()
+    return toks
 
 
 def snapshot(kite: KiteConnect, uni: dict) -> tuple[pd.DataFrame, datetime.date | None]:
@@ -396,8 +424,10 @@ def main() -> None:
 
     state_p = day_dir / "sent.json"
     sent = json.loads(state_p.read_text()) if state_p.exists() else {}
+    early, armed = sent.setdefault("_early", {}), sent.setdefault("_armed", {})
+    use_rules = e.get("OI_NEW_RULES", "1") == "1"
+    push_all = e.get("OI_PUSH_ALL", "0") == "1"
     new = [r for r in strong if sent.get(r["name"]) != r["signal"]]
-    lines = {r["name"]: om.signal_line(r) for r in new}
     auto = e.get("OI_AUTO_TRADE", "0") == "1" and not a.dry_run
     max_orders = int(e.get("OI_MAX_ORDERS") or 5)
     lots = max(1, int(e.get("OI_LOTS") or 1))
@@ -407,28 +437,131 @@ def main() -> None:
     tgt_pct = float(e.get("OI_TARGET_PCT") or 40)
     use_gtt = e.get("OI_GTT", "0") == "1"
     days_left = lambda u: (datetime.date.fromisoformat(u["expiry"]) - today).days
-    for r in new:
-        if auto:
-            if now.time() > ORDER_UNTIL:
-                lines[r["name"]] += f"\n   no order — after {ORDER_UNTIL:%H:%M}"
-            elif product == "NRML" and days_left(uni[r["name"]]) < MIN_DAYS_TO_EXPIRY:
-                lines[r["name"]] += (f"\n   no order — expiry {uni[r['name']]['expiry']} is under "
-                                     f"{MIN_DAYS_TO_EXPIRY} days away (stock options settle physically)")
-            elif n_orders >= max_orders:
-                lines[r["name"]] += f"\n   no order — {max_orders} orders already today (OI_MAX_ORDERS)"
-            else:
-                res_txt = buy_atm(kite, r, snap, int(uni[r["name"]].get("lot") or 1), lots,
-                                  product, sl_pct, tgt_pct, use_gtt)
-                n_orders += 1
-                lines[r["name"]] += f"\n   {res_txt}"
-        print(lines[r["name"]])
-    if new and not a.dry_run:
-        topic = e.get("OI_NTFY_TOPIC") or e.get("NTFY_TOPIC", "")
-        if topic:
-            push(topic, f"OI monitor {now:%H:%M}: {len(new)} new signal(s)",
-                 "\n\n".join(lines[r["name"]] for r in new))
+    by_name = {r["name"]: r for r in res if "error" not in r}
+    naive = now.replace(tzinfo=None, second=0, microsecond=0)
+    hm4 = now.strftime("%H%M")
+    pushes: list[str] = []          # what goes to ntfy this scan
+    logs: list[str] = []            # log only (WATCH / EARLY, unless OI_PUSH_ALL=1)
+
+    def order(r: dict) -> str:
+        """Place the order for r (signal side, ATM strike) — or say why not."""
+        nonlocal n_orders
+        if not auto:
+            return "no order — OI_AUTO_TRADE is off"
+        if hm4 >= rules.ORDER_UNTIL:
+            return "no order — 15:00 or later"
+        if product == "NRML" and days_left(uni[r["name"]]) < MIN_DAYS_TO_EXPIRY:
+            return (f"no order — expiry {uni[r['name']]['expiry']} is under {MIN_DAYS_TO_EXPIRY} days away "
+                    f"(stock options settle physically)")
+        if n_orders >= max_orders:
+            return f"no order — {max_orders} orders already today (OI_MAX_ORDERS)"
+        n_orders += 1
+        return buy_atm(kite, r, snap, int(uni[r["name"]].get("lot") or 1), lots, product, sl_pct, tgt_pct, use_gtt)
+
+    def atm_r(name: str, side: str) -> dict | None:
+        """A minimal signal dict (ATM strike now) for an armed stock that may no longer be STRONG."""
+        g = snap[snap["name"] == name]
+        if g.empty:
+            return None
+        spot = float(g["spot"].iloc[0])
+        return {"name": name, "signal": side, "spot": spot,
+                "option": {"strike": min(g["strike"].unique(), key=lambda k: abs(k - spot))}}
+
+    if not use_rules:                                   # OI_NEW_RULES=0: buy every new signal (old way)
         for r in new:
+            pushes.append(om.signal_line(r) + "\n   " + order(r))
             sent[r["name"]] = r["signal"]
+    else:
+        kd = rules.KiteData(kite, tokens=nse_tokens(kite, today),
+                            futs={n: [{"instrument_token": t, "expiry": x} for t, x in u.get("futs", [])]
+                                  for n, u in uni.items()})
+
+        def evaluate(r: dict, prefix: str = "") -> None:
+            name, side = r["name"], r["signal"]
+            try:
+                d = rules.decide(name, side, today, naive, float(r["spot"]), r["call_wall"], r["put_wall"],
+                                 kd, r.get("fut"))
+            except Exception as ex:                     # no rules read → no order (conservative)
+                logs.append(f"{om.signal_line(r)}\n   ⚠️ rules failed ({ex}) — no order")
+                return
+            head = om.signal_line(r) + (f"\n   {prefix}" if prefix else "")
+            if d["kind"] != "BUY":                      # no order now — don't let the line say BUY
+                head = head.replace(" — BUY ", " — signal ", 1)
+            if d["kind"] == "BUY":
+                pushes.append(f"{head}\n   ✅ BUY — {d['text']}\n   {order(r)}")
+            elif d["kind"] == "WAIT":
+                z = d["level"]
+                armed[name] = {"side": side, "lo": z.lo, "hi": z.hi, "label": z.label,
+                               "since": naive.isoformat(), "checked": naive.isoformat()}
+                pushes.append(f"{head}\n   ⏸ WAITING — {d['text']}")
+            else:
+                logs.append(f"{head}\n   👀 WATCH — {d['text']}")
+
+        # 1. WAITING signals: break → buy, held / OI turned / 15:00 → cancel
+        for name, w in list(armed.items()):
+            side, z = w["side"], levels.Level(w["lo"], w["hi"], w["label"])
+            r_now = by_name.get(name)
+            score = r_now[f"{side.lower()}_score"] if r_now else None
+            if hm4 >= rules.ORDER_UNTIL:
+                pushes.append(f"❌ CANCELLED — {name} {side}: {z.text()} never broke by 15:00")
+                armed.pop(name)
+                continue
+            if score is not None and score <= 2:
+                pushes.append(f"❌ CANCELLED — {name} {side}: OI turned (score now {score}/6)")
+                armed.pop(name)
+                continue
+            try:
+                kind, txt, at = rules.watch_break(name, side, z, today,
+                                                  datetime.datetime.fromisoformat(w["checked"]), naive, kd)
+            except Exception as ex:
+                logs.append(f"{name} {side} waiting: break check failed ({ex})")
+                continue
+            if kind == "BREAK":
+                r = atm_r(name, side)
+                pushes.append(f"{'🟢' if side == 'CE' else '🔴'} {name} {side} — ✅ BREAK → BUY: {txt}\n   "
+                              + (order(r) if r else "no order — stock not in this scan"))
+                armed.pop(name)
+            elif kind == "HELD":
+                pushes.append(f"❌ CANCELLED — {name} {side}: {txt}")
+                armed.pop(name)
+            else:
+                w["checked"] = naive.isoformat()
+
+        # 2. EARLY signals (before 09:40): decided at the first scan from 09:40 where still STRONG
+        if hm4 >= rules.FIRST_ORDER:
+            for name, side in list(early.items()):
+                r_now = by_name.get(name)
+                if hm4 >= rules.ORDER_UNTIL:
+                    logs.append(f"⏱ EARLY — {name} {side} faded (not STRONG again by 15:00)")
+                    early.pop(name)
+                elif r_now and r_now.get("signal") == side:
+                    early.pop(name)
+                    evaluate(r_now, prefix=f"early signal → still STRONG at {now:%H:%M}")
+
+        # 3. new signals
+        for r in new:
+            name, side = r["name"], r["signal"]
+            sent[name] = side
+            if name in armed and armed[name]["side"] != side:
+                logs.append(f"{name}: waiting {armed.pop(name)['side']} dropped — signal flipped to {side}")
+            early.pop(name, None) if early.get(name) != side else None
+            if hm4 >= rules.ORDER_UNTIL:
+                logs.append(f"{om.signal_line(r)}\n   ⏰ 15:00 or later — no order")
+            elif hm4 < rules.FIRST_ORDER:
+                early[name] = side
+                logs.append(f"{om.signal_line(r)}\n   ⏱ EARLY — decided from 09:40 if still STRONG")
+            else:
+                evaluate(r)
+
+    for m in pushes:
+        print(m)
+    for m in logs:
+        print(m)
+    if not a.dry_run:
+        topic = e.get("OI_NTFY_TOPIC") or e.get("NTFY_TOPIC", "")
+        out = pushes + (logs if push_all else [])
+        if topic and out:
+            push(topic, f"OI monitor {now:%H:%M}: {len(out)} update(s)", "\n\n".join(out))
         sent["_orders"] = n_orders
         state_p.write_text(json.dumps(sent))
 

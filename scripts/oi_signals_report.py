@@ -41,8 +41,8 @@ sys.path.insert(0, str(pathlib.Path(__file__).parent))
 import pandas as pd
 
 import oi_monitor_bot as mon
-from screener import levels
 from screener import oi_monitor as om
+from screener import oi_rules as rules
 
 RUN_FROM, RUN_TO = "0920", "1531"
 _CACHE: dict = {}
@@ -217,55 +217,17 @@ def follow(sig: dict, target: float, stop: float, next_day: datetime.date | None
     return res
 
 
-# ── New rules (simulated in this report only; the live monitor is unchanged) ───────────────────
-# Order of checks: after 15:00 → none · before 09:40 → must still be STRONG at 09:40+ ·
-# NIFTY up ≥ 0.5 % and above its open → no PE (mirror: no CE) · futures buildup from current +
-# next month OI together (rollover-proof): CE needs long buildup, PE short buildup · a level
-# within 1 % → wait for a 10-min close beyond it · gap into a level → watch.
-FIRST_ORDER = "0940"          # no orders before this scan (gap / first-scan rule)
-ORDER_UNTIL = "1500"
-FRESH = {"CE": "long buildup", "PE": "short buildup"}
+# ── New rules: screener/oi_rules.py (the same rules the live monitor uses) ─────────────────────
+FIRST_ORDER, ORDER_UNTIL = rules.FIRST_ORDER, rules.ORDER_UNTIL
 
 
-class Kite:
-    """Daily / 15-min / 10-min candles for the signalled stocks only (a few calls per signal)."""
-
-    def __init__(self):
-        from kiteconnect import KiteConnect
-        e = mon.env()
-        self.k = KiteConnect(e.get("KITE_API_KEY", ""))
-        self.k.set_access_token(e.get("KITE_ACCESS_TOKEN", ""))
-        self.k.profile()                      # fails fast on an expired token
-        self.tokens = {r["tradingsymbol"]: r["instrument_token"]
-                       for r in self.k.instruments("NSE") if r["segment"] == "NSE"}
-        self.cache: dict = {}
-        self._futs: dict | None = None
-
-    def futures(self, name: str, day: datetime.date) -> list[dict]:
-        """The stock's current and next month futures on `day` (rollover-proof OI = both together)."""
-        if self._futs is None:
-            self._futs = {}
-            for r in self.k.instruments("NFO"):
-                if r["instrument_type"] == "FUT":
-                    self._futs.setdefault(r["name"], []).append(r)
-        return sorted((r for r in self._futs.get(name, []) if r["expiry"] >= day), key=lambda r: r["expiry"])[:2]
-
-    def candles(self, name: str, interval: str, start: datetime.date, end: datetime.date,
-                token: int | None = None, oi: bool = False) -> pd.DataFrame:
-        key = (name, interval, start, end, token, oi)
-        if key not in self.cache:
-            tok = token if token is not None else (NIFTY_TOKEN if name == "NIFTY" else self.tokens[name])
-            rows = self.k.historical_data(tok, datetime.datetime.combine(start, datetime.time(9, 15)),
-                                          datetime.datetime.combine(end, datetime.time(15, 30)), interval, oi=oi)
-            time.sleep(0.35)
-            df = pd.DataFrame(rows)
-            if len(df):
-                df["date"] = pd.to_datetime(df["date"])
-                if df["date"].dt.tz is not None:
-                    df["date"] = df["date"].dt.tz_convert("Asia/Kolkata").dt.tz_localize(None)
-                df = df.set_index("date").sort_index()
-            self.cache[key] = df
-        return self.cache[key]
+def Kite() -> "rules.KiteData":
+    from kiteconnect import KiteConnect
+    e = mon.env()
+    k = KiteConnect(e.get("KITE_API_KEY", ""))
+    k.set_access_token(e.get("KITE_ACCESS_TOKEN", ""))
+    k.profile()                      # fails fast on an expired token
+    return rules.KiteData(k)
 
 
 def option_at(day: datetime.date, hm: str, name: str, side: str) -> dict | None:
@@ -304,120 +266,39 @@ def still_strong(day: datetime.date, name: str, side: str, from_hm: str) -> dict
     return None
 
 
-NIFTY_TOKEN = 256265
-MARKET_PCT = 0.5          # NIFTY up / down this much (and beyond its open) → no PE / no CE
-
-
-def last_closed(df: pd.DataFrame, upto: datetime.datetime, minutes: int = 10) -> pd.Series | None:
-    """The last candle that had closed by `upto`."""
-    if df is None or df.empty:
-        return None
-    done = df[df.index + datetime.timedelta(minutes=minutes) <= upto]
-    return done.iloc[-1] if len(done) else None
-
-
-def market(day: datetime.date, upto: datetime.datetime, kite: "Kite") -> tuple[str | None, str]:
-    """NIFTY's direction at `upto`: 'up' / 'down' / None, plus a short text."""
-    m10 = kite.candles("NIFTY", "10minute", day, day)
-    d = kite.candles("NIFTY", "day", day - datetime.timedelta(days=10), day - datetime.timedelta(days=1))
-    c = last_closed(m10, upto)
-    if c is None or d.empty or m10.empty:
-        return None, "NIFTY n/a"
-    prev_close, day_open, now = float(d["close"].iloc[-1]), float(m10["open"].iloc[0]), float(c["close"])
-    pct = (now / prev_close - 1) * 100
-    txt = f"NIFTY {pct:+.2f}% ({'above' if now > day_open else 'below'} its open)"
-    if pct >= MARKET_PCT and now > day_open:
-        return "up", txt
-    if pct <= -MARKET_PCT and now < day_open:
-        return "down", txt
-    return None, txt
-
-
-def combined_fut(name: str, day: datetime.date, upto: datetime.datetime, kite: "Kite") -> tuple[str | None, str]:
-    """Futures buildup from current + next month OI together (rollover moves OI between them).
-    Price = the current month's change vs yesterday's close; OI = both months now vs yesterday's close."""
-    futs = kite.futures(name, day)
-    if not futs:
-        return None, "no futures"
-    oi_now = oi_prev = 0.0
-    px_now = px_prev = None
-    for k, f in enumerate(futs):
-        h = kite.candles(name, "10minute", day - datetime.timedelta(days=6), day, token=f["instrument_token"], oi=True)
-        if h is None or h.empty or "oi" not in h:
-            continue
-        c = last_closed(h, upto)
-        prev = h[h.index.date < day]
-        if c is None or prev.empty:
-            continue
-        oi_now += float(c["oi"])
-        oi_prev += float(prev["oi"].iloc[-1])
-        if k == 0:
-            px_now, px_prev = float(c["close"]), float(prev["close"].iloc[-1])
-    if px_now is None or not oi_prev:
-        return None, "futures n/a"
-    pct, oi_pct = (px_now / px_prev - 1) * 100, (oi_now / oi_prev - 1) * 100
-    lab = om.fut_label(pct, oi_now - oi_prev)
-    return lab, f"fut {lab} (price {pct:+.1f}%, OI {oi_pct:+.1f}% both months)"
-
-
-def new_rules(sig: dict, kite: "Kite") -> dict:
-    """What the proposed rules would have done with this signal: decision + the entry they'd use."""
+def new_rules(sig: dict, kite: "rules.KiteData") -> dict:
+    """What the rules would have done with this signal: decision + the entry they'd use."""
     day, side, name = sig["day"], sig["side"], sig["name"]
     t, fut = sig["time"].replace(":", ""), sig.get("fut")
-    if t > ORDER_UNTIL:
-        return {"new": "⏰ after 15:00 — no order"}
+    if t >= ORDER_UNTIL:
+        return {"new": "⏰ 15:00 or later — no order"}
     walls = {"call_wall": sig.get("call_wall"), "put_wall": sig.get("put_wall")}
     note = ""
-    if t < FIRST_ORDER:                                   # rule 4: early → must still be STRONG at 09:40+
+    if t < FIRST_ORDER:                                   # early → must still be STRONG at 09:40+
         later = still_strong(day, name, side, FIRST_ORDER)
         if not later:
             return {"new": "⏱ EARLY — not STRONG again after 09:40, no trade"}
         t, fut = later["time"].replace(":", ""), later["fut"]
         walls = {k: later[k] for k in walls}
         note = f"early {sig['time']} → still STRONG at {later['time']} · "
-    upto = datetime.datetime.combine(day, datetime.time(int(t[:2]), int(t[2:])))
-    mk, mk_txt = market(day, upto, kite)                  # rule B: don't fight the market
-    if (side == "PE" and mk == "up") or (side == "CE" and mk == "down"):
-        return {"new": f"👀 WATCH — {mk_txt}: no {side} against the market"}
-    lab, fut_txt = combined_fut(name, day, upto, kite)    # rule A: rollover-proof futures buildup
-    fut = lab or fut
-    if fut != FRESH[side]:                                # rule 1: fresh buildup only
-        return {"new": f"👀 WATCH — {fut_txt if lab else 'fut ' + str(fut or 'n/a')} (needs {FRESH[side]})"}
-    note += f"{mk_txt} · {fut_txt} · "
     opt = option_at(day, t, name, side)
     if not opt:
         return {"new": "no snapshot at the entry time"}
-    daily = kite.candles(name, "day", day - datetime.timedelta(days=12), day - datetime.timedelta(days=1))
-    m15 = kite.candles(name, "15minute", day - datetime.timedelta(days=6), day)
-    if daily.empty or len(daily) < 2:
-        return {"new": "no daily candles"}
-    daily = daily.copy()
-    daily.index = [pd.Timestamp(d).date() for d in daily.index]     # Kite gives Timestamps
-    lv = levels.build(daily, m15, day, upto, walls["call_wall"], walls["put_wall"])
-    z = levels.check(side, opt["spot"], lv)
-    if z is None:                                         # room → buy now
-        return {"new": f"✅ BUY — {note}no level within {levels.LEVEL_PCT:g}%", **opt}
-    today15 = m15[m15.index.date == day]
-    prev = daily.iloc[-1]
-    if len(today15) and levels.gap_into(side, float(today15["open"].iloc[0]), float(prev["high"]),
-                                        float(prev["low"]), z):   # rule 4: gap into a level
-        return {"new": f"👀 WATCH — gap into {z.text()}"}
-    # rule 3: wait for a 10-min close beyond the level
-    m10 = kite.candles(name, "10minute", day, day)
-    for ts_, c in m10.iterrows():
-        end = ts_ + datetime.timedelta(minutes=10)
-        if end <= upto:
-            continue
-        hm = f"{end:%H%M}"
-        if hm > ORDER_UNTIL:
-            break
-        if levels.broke(side, z, float(c["close"])):
-            o = option_at(day, hm, name, side)
-            if o:
-                return {"new": f"✅ BREAK → BUY — {note}{z.text()} broken at {end:%H:%M}", **o}
-        if levels.held(side, z, float(c["close"])):
-            return {"new": f"❌ CANCELLED — {z.text()} held ({end:%H:%M})", "level": z.text()}
-    return {"new": f"❌ EXPIRED — {z.text()} never broke by 15:00"}
+    upto = datetime.datetime.combine(day, datetime.time(int(t[:2]), int(t[2:])))
+    d = rules.decide(name, side, day, upto, opt["spot"], walls["call_wall"], walls["put_wall"], kite, fut)
+    if d["kind"] == "WATCH":
+        return {"new": f"👀 WATCH — {d['text']}"}
+    if d["kind"] == "BUY":
+        return {"new": f"✅ BUY — {note}{d['text']}", **opt}
+    end_of_day = datetime.datetime.combine(day, datetime.time(15, 0))
+    kind, txt, at = rules.watch_break(name, side, d["level"], day, upto, end_of_day, kite)
+    if kind == "BREAK":
+        o = option_at(day, f"{at:%H%M}", name, side)
+        if o:
+            return {"new": f"✅ BREAK → BUY — {note}{d['note']} · {txt}", **o}
+    if kind == "HELD":
+        return {"new": f"❌ CANCELLED — {txt}", "level": d["level"].text()}
+    return {"new": f"❌ EXPIRED — {d['level'].text()} never broke by 15:00"}
 
 
 def main() -> None:
