@@ -59,8 +59,7 @@ def build(daily: pd.DataFrame, m15: pd.DataFrame, day: datetime.date, upto: date
     m15: 15-min OHLC with an IST-naive DatetimeIndex."""
     out: list[Level] = []
     daily = daily.copy()
-    daily.index = [d.date() if hasattr(d, "date") and not isinstance(d, datetime.date.__class__) and
-                   isinstance(d, datetime.datetime) else d for d in daily.index]   # Kite: Timestamps
+    daily.index = [d.date() if isinstance(d, datetime.datetime) else d for d in daily.index]  # Kite: Timestamps
     prev = daily[[d < day for d in daily.index]].tail(days + 1)      # D-3 … D-1
     rows = list(prev.itertuples())
     # CPR shown on today and the previous `days` days: each from the day before it
