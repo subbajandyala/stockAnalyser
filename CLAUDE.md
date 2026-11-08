@@ -1,4 +1,4 @@
-# CLAUDE.md — branch `chandu-logic`
+# CLAUDE.md — branch `praveen-new-changes`
 
 A fresh, small trading bot. Only proven plumbing was copied in from the other
 branches; the trading logic is written here step by step with the user.
@@ -18,7 +18,7 @@ branches; the trading logic is written here step by step with the user.
 | `core/kite_data.py` | Historical OHLCV from Kite (`fetch_ohlcv`) | ma-cpr-scalp `screener/` |
 | `core/live_ticks.py` | Reads live ticks / 1m candles from Redis | ma-cpr-scalp `screener/` |
 | `core/kite_order.py` | ATM option LIMIT buy + OCO GTT, safe sells (GTT id fix of 2 Nov included) | ma-cpr-scalp `screener/` |
-| `scripts/chandu_bot.py` | The bot — not written yet | new |
+| `scripts/praveen_bot.py` | The bot — not written yet | new |
 | `start_droplet.sh` / `stop_droplet.sh` | Start / stop the live feed and the bot | new |
 
 ## .env (droplet)
