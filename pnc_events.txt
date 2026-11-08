@@ -1,0 +1,2 @@
+# Event days for scripts/praveen_bot.py — no new trades on these dates (YYYY-MM-DD, one per line).
+# Add RBI policy, Budget, US Fed (next morning), election results, etc.
