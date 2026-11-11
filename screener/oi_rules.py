@@ -107,11 +107,47 @@ def market(day: datetime.date, upto: datetime.datetime, kd: KiteData) -> tuple[s
     return None, txt
 
 
-def combined_fut(name: str, day: datetime.date, upto: datetime.datetime, kd: KiteData) -> tuple[str | None, str]:
-    """Futures buildup from current + next month OI together (rollover moves OI between them)."""
-    futs = kd.futures(name, day)
-    if not futs:
-        return None, "no futures"
+ROLL_DAYS = 7                 # expiry7 mode: both months only in the last 7 trading days to expiry
+FUT_MODE = "combined"         # "combined" = current + next month always; "expiry7" = see fut_months()
+
+
+def trading_days_to(day: datetime.date, expiry: datetime.date) -> int:
+    """Weekdays from `day` to `expiry`, both counted (expiry day itself = 1). Holidays ignored."""
+    n, d = 0, day
+    while d <= expiry:
+        n += d.weekday() < 5
+        d += datetime.timedelta(days=1)
+    return n
+
+
+def fut_months(futs: list[dict], day: datetime.date, mode: str) -> tuple[list[dict], str]:
+    """Which futures months count for the OI change, and a short label for the alert."""
+    if mode != "expiry7" or len(futs) < 2:
+        return futs, "both months"
+    left = trading_days_to(day, futs[0]["expiry"])
+    if left <= ROLL_DAYS:
+        return futs, f"both months, {left}d to expiry"
+    return futs[:1], f"current month, {left}d to expiry"
+
+
+def last_tuesday(day: datetime.date) -> datetime.date:
+    nxt = (day.replace(day=28) + datetime.timedelta(days=4)).replace(day=1)
+    d = nxt - datetime.timedelta(days=1)
+    while d.weekday() != 1:
+        d -= datetime.timedelta(days=1)
+    return d
+
+
+def current_known(futs: list[dict], day: datetime.date) -> bool:
+    """False when `day`'s real current-month future has already expired and so is missing from
+    Kite's instrument list (Kite only lists live contracts) — e.g. any October day before the
+    October expiry, seen from November. Stock futures expire on the month's last Tuesday."""
+    return bool(futs) and not (futs[0]["expiry"].month != day.month and day <= last_tuesday(day))
+
+
+def fut_change(name: str, day: datetime.date, upto: datetime.datetime, kd: KiteData,
+               futs: list[dict]) -> tuple[str | None, float, float]:
+    """(label, price %, OI %) from the given futures months: last closed 10-min candle vs yesterday."""
     oi_now = oi_prev = 0.0
     px_now = px_prev = None
     for k, f in enumerate(futs):
@@ -127,10 +163,31 @@ def combined_fut(name: str, day: datetime.date, upto: datetime.datetime, kd: Kit
         if k == 0:
             px_now, px_prev = float(c["close"]), float(prev["close"].iloc[-1])
     if px_now is None or not oi_prev:
-        return None, "futures n/a"
+        return None, 0.0, 0.0
     pct, oi_pct = (px_now / px_prev - 1) * 100, (oi_now / oi_prev - 1) * 100
-    lab = om.fut_label(pct, oi_now - oi_prev)
-    return lab, f"fut {lab} (price {pct:+.1f}%, OI {oi_pct:+.1f}% both months)"
+    return om.fut_label(pct, oi_now - oi_prev), pct, oi_pct
+
+
+def combined_fut(name: str, day: datetime.date, upto: datetime.datetime, kd: KiteData,
+                 mode: str | None = None) -> tuple[str | None, str]:
+    """Futures buildup. mode "combined": current + next month OI together (rollover moves OI between
+    them). mode "expiry7": current month only, both months in the last ROLL_DAYS trading days.
+    The alert also names the other mode's label when it differs (shadow comparison)."""
+    mode = mode or FUT_MODE
+    futs = kd.futures(name, day)
+    if not futs:
+        return None, "no futures"
+    use, how = fut_months(futs, day, mode)
+    lab, pct, oi_pct = fut_change(name, day, upto, kd, use)
+    if lab is None:
+        return None, "futures n/a"
+    txt = f"fut {lab} (price {pct:+.1f}%, OI {oi_pct:+.1f}% {how})"
+    other = futs[:1] if len(use) == 2 else futs
+    if len(futs) == 2 and len(other) != len(use):
+        alt, _, alt_oi = fut_change(name, day, upto, kd, other)
+        if alt and alt != lab:
+            txt += f" · {'current month' if len(other) == 1 else 'both months'}: {alt} (OI {alt_oi:+.1f}%)"
+    return lab, txt
 
 
 def decide(name: str, side: str, day: datetime.date, upto: datetime.datetime, price: float,
