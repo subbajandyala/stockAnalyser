@@ -9,7 +9,8 @@ Then every later 10-min snapshot of that day is walked (exit price = the option'
   fixed 40/20      premium +40 % target / −20 % stop (the live OI_TARGET_PCT / OI_SL_PCT)
   fixed 20/20      premium +20 % / −20 %
   plan (1 lot)     target on the STOCK = the nearer of k × daily ATR(14) and just before the next
-                   level / OI wall ahead (screener/levels.py), capped by the day's range left
+                   level / OI wall ahead (screener/levels.py) that is at least 0.25 × ATR away
+                   (a nearer one booked tiny gains), capped by the day's range left
                    (ATR − today's high-low so far; < 0.25 ATR left → no trade)
                    stop on the stock = 0.3 × daily ATR · breakeven: once the premium is +12 %,
                    exit if it falls back to the entry · OI turn: the signal's score ≤ 2 · futures
@@ -44,6 +45,7 @@ from screener import oi_monitor as om
 EXIT_BY = "1510"
 BE_ARM, TIME_MIN, TIME_GAIN = 12.0, 90, 10.0
 STOP_ATR, MIN_ROOM_ATR = 0.3, 0.25
+MIN_LEVEL_ATR = 0.25   # a level / wall closer than this (× daily ATR) is not used as the target
 AGAINST = {"CE": ("short buildup", "long unwinding"), "PE": ("long buildup", "short covering")}
 
 BASE_PLAN = {"k": 0.5, "level": True, "room": True, "be": True, "oi": True, "fut": True, "time": True,
@@ -57,6 +59,7 @@ PLANS = {
     "· target 0.3 ATR": {**BASE_PLAN, "k": 0.3},
     "· target 0.75 ATR": {**BASE_PLAN, "k": 0.75},
     "· ATR only (no level)": {**BASE_PLAN, "level": False},
+    "· levels at any distance": {**BASE_PLAN, "level": "any"},
     "· no room skip": {**BASE_PLAN, "room": False},
     "· no breakeven": {**BASE_PLAN, "be": False},
     "· no OI turn": {**BASE_PLAN, "oi": False},
@@ -129,14 +132,18 @@ def build(sig: dict, kd) -> dict | None:
     d2.index = [pd.Timestamp(x).date() for x in d2.index]
     lv = levels.build(d2, m15, day, t0, walls[0], walls[1]) if walls else []
     spot0 = scans[0]["spot"]
-    if side == "CE":
-        ahead = [z.lo for z in lv if z.lo > spot0 * 1.001]
-        lvl_target = min(ahead) * 0.999 if ahead else None
-    else:
-        ahead = [z.hi for z in lv if z.hi < spot0 * 0.999]
-        lvl_target = max(ahead) * 1.001 if ahead else None
+    gap = MIN_LEVEL_ATR * atr if atr else 0.0
+
+    def nearest(min_dist: float) -> float | None:
+        if side == "CE":
+            ahead = [z.lo for z in lv if z.lo > max(spot0 * 1.001, spot0 + min_dist)]
+            return min(ahead) * 0.999 if ahead else None
+        ahead = [z.hi for z in lv if z.hi < min(spot0 * 0.999, spot0 - min_dist)]
+        return max(ahead) * 1.001 if ahead else None
+
+    lvl_target, lvl_any = nearest(gap), nearest(0.0)
     return {"sig": sig, "scans": scans, "entry": float(sig["entry"]), "spot0": spot0, "atr": atr, "range": rng,
-            "lvl_target": lvl_target, "m10": m10, "m15": m15}
+            "lvl_target": lvl_target, "lvl_any": lvl_any, "m10": m10, "m15": m15}
 
 
 def trail_hit(kind: str, side: str, c: dict, since: datetime.datetime, now: datetime.datetime) -> bool:
@@ -181,8 +188,9 @@ def simulate(c: dict, p: dict) -> dict:
             return {"pct": None, "why": "no room", "at": ""}
         dist = min(dist, left)
     target = c["spot0"] + dist if ce else c["spot0"] - dist
-    if p["level"] and c["lvl_target"]:
-        target = min(target, c["lvl_target"]) if ce else max(target, c["lvl_target"])
+    lvl = c["lvl_any"] if p.get("level") == "any" else c["lvl_target"]
+    if p["level"] and lvl:
+        target = min(target, lvl) if ce else max(target, lvl)
     stop = c["spot0"] - STOP_ATR * atr if ce else c["spot0"] + STOP_ATR * atr
     armed, best, booked = False, e, None          # booked = (pct of the half sold at target, time)
     t0 = c["scans"][0]["t"]
