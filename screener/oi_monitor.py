@@ -146,6 +146,29 @@ def analyse_stock(now: pd.DataFrame, base: pd.DataFrame, recent: pd.DataFrame | 
     }
 
 
+LIQUID_NEAR = 2        # liquid list: ATM ± 2 strikes, CE + PE
+
+
+def liquid_rank(snap: pd.DataFrame | None, near: int = LIQUID_NEAR) -> pd.DataFrame | None:
+    """Stocks ranked by the traded value (volume × LTP, ₹) of their ATM ± `near` options, CE + PE,
+    in one snapshot (the previous day's last one = that whole day). None if it has no volume."""
+    if snap is None or snap.empty or "volume" not in snap:
+        return None
+    out = []
+    for name, g in snap.groupby("name", observed=True):
+        spot = float(g["spot"].iloc[0])
+        strikes = sorted(g["strike"].unique())
+        if not strikes:
+            continue
+        i = min(range(len(strikes)), key=lambda j: abs(strikes[j] - spot))
+        keep = strikes[max(0, i - near): i + near + 1]
+        b = g[g["strike"].isin(keep)]
+        out.append({"name": name, "value_cr": float((b["volume"] * b["ltp"]).sum()) / 1e7})
+    df = pd.DataFrame(out).sort_values("value_cr", ascending=False).reset_index(drop=True)
+    df["rank"] = df.index + 1
+    return df
+
+
 def analyse_all(now: pd.DataFrame, base: pd.DataFrame | None, recent: pd.DataFrame | None) -> list[dict]:
     out = []
     base = base if base is not None else now

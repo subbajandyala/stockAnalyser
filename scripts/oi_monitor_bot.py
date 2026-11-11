@@ -19,6 +19,8 @@ Order rules (screener/oi_rules.py, OI_NEW_RULES=1 default; 0 = buy every new sig
                     OI walls — one within 1 % → WAITING; each scan: a 10-min close beyond it → BUY,
                     held (1 % the wrong way) / OI turned (score ≤ 2) / 15:00 → CANCELLED
   15:00 or later    no order
+Liquidity: ATM option spread ≤ OI_MAX_SPREAD % (default 3). OI_LIQUID_TOP=N: only the top N stocks by
+  the previous day's traded value of their ATM ±2 options (CE + PE) can signal (0 = all, default).
 Pushes: BUY, WAITING and their follow-ups (BREAK → BUY, CANCELLED). WATCH / EARLY only in the
 log and the evening report (OI_PUSH_ALL=1 pushes those too).
 
@@ -397,7 +399,29 @@ def main() -> None:
         snap.to_csv(fh, index=False)
     base, recent = load(base_p), load(recent_p)
 
+    om.MAX_SPREAD_PCT = float(e.get("OI_MAX_SPREAD") or om.MAX_SPREAD_PCT)
     res = om.analyse_all(snap, base, recent)
+    liquid_top = int(e.get("OI_LIQUID_TOP") or 0)       # 0 = every F&O stock can signal
+    if liquid_top:
+        lq_p = day_dir / "liquid.csv"
+        if lq_p.exists():
+            rank = pd.read_csv(lq_p)
+        else:
+            prev = [f for d in sorted(DATA.iterdir()) if d.is_dir() and d.name[:2] == "20" and d.name < str(today)
+                    for f in [snap_files(datetime.date.fromisoformat(d.name))] if f]
+            rank = om.liquid_rank(load(prev[-1][-1])) if prev else None
+            if rank is not None:
+                rank.to_csv(lq_p, index=False)
+        if rank is None:
+            print("  liquid list: no previous-day snapshot with volume — every stock allowed today")
+        else:
+            ok_names = set(rank[rank["rank"] <= liquid_top]["name"])
+            dropped = [r["name"] for r in res if r.get("signal") and r["name"] not in ok_names]
+            for r in res:
+                if r.get("signal") and r["name"] not in ok_names:
+                    r["signal"] = None
+            if dropped:
+                print(f"  illiquid (not in yesterday's top {liquid_top} by ATM±2 option value): {', '.join(dropped)}")
     strong = [r for r in res if r.get("signal")]
     print(f"[{now:%H:%M}] {snap['name'].nunique()} stocks, {len(snap)} contracts in {time.time() - t0:.0f}s · "
           f"base {base_p.parent.name + '/' + base_p.name if base_p else 'none (first snapshot)'} · "
