@@ -90,18 +90,39 @@ def env() -> dict:
     return e
 
 
+def _quote_part(kite: KiteConnect, keys: list[str], bad: list) -> dict:
+    """One quote call; when Kite refuses it (a 400 on one batch every scan, 12 Nov), split it in
+    halves down to the single contract that breaks it, so the rest of the batch is kept."""
+    err = None
+    for _ in range(2):
+        try:
+            r = kite.quote(keys)
+            time.sleep(1.05)                     # Kite quote limit: 1 request / second
+            return r
+        except Exception as ex:
+            err = ex
+            time.sleep(1.05)
+    if len(keys) == 1:
+        bad.append(keys[0])
+        print(f"  quote failed for {keys[0]}: {str(err)[:90]} — skipped today")
+        return {}
+    mid = len(keys) // 2
+    return {**_quote_part(kite, keys[:mid], bad), **_quote_part(kite, keys[mid:], bad)}
+
+
 def quotes(kite: KiteConnect, keys: list[str]) -> dict:
-    out = {}
+    skip_p = DATA / f"bad_quotes_{datetime.date.today()}.json"
+    skip = set(json.loads(skip_p.read_text())) if skip_p.exists() else set()
+    keys = [k for k in keys if k not in skip]
+    out, bad = {}, []
     for i in range(0, len(keys), 500):
-        for attempt in range(3):
-            try:
-                out.update(kite.quote(keys[i:i + 500]))
-                break
-            except Exception as ex:
-                if attempt == 2:
-                    print(f"  quote batch {i // 500 + 1} failed: {ex}")
-                time.sleep(2)
-        time.sleep(1.05)          # Kite quote limit: 1 request / second
+        out.update(_quote_part(kite, keys[i:i + 500], bad))
+    if bad:
+        DATA.mkdir(parents=True, exist_ok=True)
+        for old in DATA.glob("bad_quotes_*.json"):
+            if old != skip_p:
+                old.unlink()
+        skip_p.write_text(json.dumps(sorted(skip | set(bad))))
     return out
 
 
