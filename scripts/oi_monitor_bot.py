@@ -323,6 +323,29 @@ def test_order(kite: KiteConnect, e: dict, name: str, side: str, fill: bool, tod
         print("pushed to ntfy")
 
 
+_NSE_TICK: dict = {}
+
+
+def nse_tick(kite: KiteConnect, name: str) -> float:
+    """The stock's tick size from Kite's NSE instrument list (₹1 for DIXON / FORCEMOT-priced
+    stocks — a 5-paise price was rejected on 12 Nov), cached per day; 0.05 if unknown."""
+    if not _NSE_TICK:
+        cache = DATA / f"nse_ticks_{datetime.date.today()}.json"
+        if cache.exists():
+            _NSE_TICK.update(json.loads(cache.read_text()))
+        else:
+            try:
+                _NSE_TICK.update({r["tradingsymbol"]: float(r.get("tick_size") or 0.05)
+                                  for r in kite.instruments("NSE") if r["segment"] == "NSE"})
+                DATA.mkdir(parents=True, exist_ok=True)
+                for old in DATA.glob("nse_ticks_*.json"):
+                    old.unlink()
+                cache.write_text(json.dumps(_NSE_TICK))
+            except Exception:
+                pass
+    return float(_NSE_TICK.get(name) or 0.05)
+
+
 def trade_equity(kite: KiteConnect, name: str, side: str, rs: float) -> str:
     """CE → BUY the stock, PE → SELL it short: NSE, MIS (intraday), LIMIT just through the best
     price, quantity = rs ÷ price. Not filled in 8 s → cancelled. No stop / target: exit by hand
@@ -336,7 +359,8 @@ def trade_equity(kite: KiteConnect, name: str, side: str, rs: float) -> str:
         d = q.get("depth") or {}
         best = float(((d.get("sell") if buy else d.get("buy")) or [{}])[0].get("price") or 0) or ltp
         ref = max(best, ltp) if buy else min(best, ltp)
-        price = tick(ref * (1.002 if buy else 0.998))
+        ts_ = nse_tick(kite, name)
+        price = tick(ref * (1.002 if buy else 0.998), ts_)
         qty = max(1, int(rs // price)) if price else 0
         if not qty:
             return f"order ✗ {name} 0 @ ₹0 MIS — no price for {name}"
