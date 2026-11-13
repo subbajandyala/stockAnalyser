@@ -421,6 +421,7 @@ def main() -> None:
     base, recent = load(base_p), load(recent_p)
 
     om.MAX_SPREAD_PCT = float(e.get("OI_MAX_SPREAD") or om.MAX_SPREAD_PCT)
+    om.FRESH_REQUIRED = e.get("OI_FRESH", "1") == "1"     # STRONG needs the last ~20 min to agree
     res = om.analyse_all(snap, base, recent)
     liquid_top = int(e.get("OI_LIQUID_TOP") or 0)       # 0 = every F&O stock can signal
     if liquid_top:

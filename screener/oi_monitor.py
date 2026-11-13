@@ -11,7 +11,7 @@ The four cases, read near the money (writers' view):
     call OI addition  above price → ceiling (bearish)   call unwinding → ceiling breaking (bullish)
     put  OI addition  below price → support (bullish)   put  unwinding → support breaking (bearish)
 
-STRONG CE needs the three core checks plus at least two of the other three (score ≥ 5 of 6):
+STRONG CE needs the three core checks, check 5 (fresh — OI_FRESH=1, the default) and a score ≥ 5 of 6:
     1 calls unwinding near ATM        (core)    4 futures price up (long buildup / short covering)
     2 puts added near ATM             (core)    5 fresh: last ~20 min agree
     3 price up past call strikes      (core)    6 room: next call wall ≥ ROOM_PCT above
@@ -28,6 +28,8 @@ MIN_CHG_PCT = 5.0     # near-ATM OI change must be ≥ 5% of the base OI to coun
 MIN_PRICE_PCT = 0.5   # stock move vs yesterday's close
 MIN_FUT_PCT = 0.3     # futures move vs yesterday's close
 ROOM_PCT = 1.5        # distance to the next wall
+FRESH_REQUIRED = True  # OI_FRESH=1 (default): STRONG also needs check 5 — the last ~20 min still agree
+                       # (DIXON PE 13 Nov fired at 14:40 after the whole fall, then bounced)
 MAX_SPREAD_PCT = 3.0  # ATM option bid/ask spread, % of its price
 
 
@@ -116,7 +118,7 @@ def analyse_stock(now: pd.DataFrame, base: pd.DataFrame, recent: pd.DataFrame | 
     def verdict(checks: dict) -> tuple[int, bool]:
         v = list(checks.values())
         score = sum(v)
-        return score, all(v[:3]) and score >= 5
+        return score, all(v[:3]) and score >= 5 and (v[4] or not FRESH_REQUIRED)
 
     ce_score, ce_strong = verdict(ce)
     pe_score, pe_strong = verdict(pe)
