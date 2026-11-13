@@ -10,7 +10,8 @@ the 400 CPR of 4 Nov, BAJFINANCE into its 1040–1047 zone). Levels built here:
   zones         15-min consolidations of the last 2 days: ≥ ZONE_BARS candles in a row whose
                 whole range is ≤ ZONE_PCT % of the price
   OI walls      put wall (support) / call wall (resistance), passed in by the caller
-Levels / zones closer than MERGE_PCT % are merged.
+Levels / zones closer than MERGE_PCT % are merged, while the merged zone stays ≤ MAX_ZONE_PCT % wide;
+beyond that the next level starts a new zone, so the nearest one is waited for, not the whole band.
 
 check(): a PE is blocked by support at most LEVEL_PCT % below the price, or price inside a zone;
 a CE by resistance at most LEVEL_PCT % above. broke() / held(): the wait-for-break decision on
@@ -25,7 +26,10 @@ from dataclasses import dataclass
 import pandas as pd
 
 LEVEL_PCT = 1.0       # a level this close (%) blocks the order
-MERGE_PCT = 0.2       # levels closer than this are one zone
+MERGE_PCT = 0.2       # levels closer than this are one zone …
+MAX_ZONE_PCT = 0.5    # … as long as the merged zone stays this narrow (% of its price); chains of
+                      # nearby levels had grown into 2–3 % bands that a signal had to fall through
+                      # entirely before it traded (13 Nov: 8 PE signals waiting, none ordered)
 ZONE_BARS = 4         # consolidation: at least this many 15-min candles in a row …
 ZONE_PCT = 0.6        # … whose whole range is at most this % of the price
 BREAK_PCT = 0.1       # a break = a 10-min close this far beyond the level
@@ -113,7 +117,8 @@ def merge(levels: list[Level]) -> list[Level]:
     levels = sorted(levels, key=lambda z: z.lo)
     out: list[Level] = []
     for z in levels:
-        if out and (z.lo - out[-1].hi) / max(out[-1].hi, 1e-9) * 100 <= MERGE_PCT:
+        if out and (z.lo - out[-1].hi) / max(out[-1].hi, 1e-9) * 100 <= MERGE_PCT \
+                and (max(out[-1].hi, z.hi) - out[-1].lo) / max(out[-1].lo, 1e-9) * 100 <= MAX_ZONE_PCT:
             last = out[-1]
             out[-1] = Level(min(last.lo, z.lo), max(last.hi, z.hi),
                             last.label if z.label in last.label else f"{last.label} + {z.label}")
