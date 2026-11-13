@@ -17,7 +17,8 @@ Every 5 minutes, ~20 s after a 5-min candle closes (09:20–15:30 IST, Mon–Fri
 
 .env: IOS_AUTO_TRADE=0 (1 = real orders) · IOS_NTFY_TOPIC=index-oi-structure · IOS_LOTS=1 ·
       IOS_SYMBOLS=NIFTY,BANKNIFTY,SENSEX · IOS_MAX_TRADES=3 · IOS_MAX_LOSSES=2 · IOS_OI_NEED=2 ·
-      IOS_PUSH_SKIPS=1 (also push setups that the OI check blocked)
+      IOS_PUSH_SKIPS=1 (also push setups that the OI check blocked) · IOS_SCAN_DELAY=20 (s after the
+      5-min close; 45 on a machine that also runs the OI monitor, so their Kite calls don't collide)
 Usage: python scripts/index_bot.py [--once] [--dry-run] [--force]
 """
 
@@ -177,7 +178,14 @@ def chain_now(kite, ins: pd.DataFrame, sym: str, expiry, spot: float) -> pd.Data
                & ins["strike"].astype(float).isin(want)]
     exch = INDEX[sym]["exch"]
     keys = [f"{exch}:{t}" for t in rows["tradingsymbol"]]
-    q = kite.quote(keys) if keys else {}
+    q = {}
+    for attempt in range(3):                       # Kite quote: 1 request / s, shared with other bots
+        try:
+            q = kite.quote(keys) if keys else {}
+            break
+        except Exception as e:
+            LOG.warning(f"{sym} chain quote failed ({e}) — retry")
+            time.sleep(2)
     time.sleep(1.05)
     out = []
     for _, r in rows.iterrows():
@@ -446,11 +454,12 @@ def main() -> None:
     if a.once:
         scan(a.dry_run, a.force)
         return
-    LOG.info("index_bot started — scans 20 s after every 5-min candle close")
+    delay = int(load_env().get("IOS_SCAN_DELAY", "20"))   # seconds after the 5-min close (45 next to the OI monitor)
+    LOG.info(f"index_bot started — scans {delay} s after every 5-min candle close")
     cache: dict = {}
     while True:
         now = datetime.datetime.now(IST)
-        nxt = now.replace(second=0, microsecond=0) + datetime.timedelta(minutes=5 - now.minute % 5, seconds=20)
+        nxt = now.replace(second=0, microsecond=0) + datetime.timedelta(minutes=5 - now.minute % 5, seconds=delay)
         time.sleep(max(1.0, (nxt - now).total_seconds()))
         try:
             scan(a.dry_run, a.force, cache)
