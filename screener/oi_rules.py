@@ -29,6 +29,11 @@ from screener import oi_monitor as om
 FIRST_ORDER = "0940"
 ORDER_UNTIL = "1500"          # from 15:00 on: no orders
 FRESH = {"CE": "long buildup", "PE": "short buildup"}
+# OI_FUT_WEAK=1 (default): the futures rule also accepts the "weak" label that still moves the
+# signal's way — short covering for a CE, long unwinding for a PE (as on oi-monitor-equity-signals,
+# 12 Nov). 0 = only long / short buildup, as before.
+WEAK = {"CE": "short covering", "PE": "long unwinding"}
+WEAK_OK = True
 NIFTY_TOKEN = 256265
 MARKET_PCT = 0.5
 
@@ -200,9 +205,12 @@ def decide(name: str, side: str, day: datetime.date, upto: datetime.datetime, pr
         return {"kind": "WATCH", "text": f"{mk_txt}: no {side} against the market", "level": None}
     lab, fut_txt = combined_fut(name, day, upto, kd)
     fut = lab or fallback_fut
-    if fut != FRESH[side]:
+    ok = (FRESH[side], WEAK[side]) if WEAK_OK else (FRESH[side],)
+    if fut not in ok:
         return {"kind": "WATCH", "level": None,
-                "text": f"{fut_txt if lab else 'fut ' + str(fut or 'n/a')} (needs {FRESH[side]})"}
+                "text": f"{fut_txt if lab else 'fut ' + str(fut or 'n/a')} (needs {' or '.join(ok)})"}
+    if fut == WEAK[side]:
+        fut_txt += " (accepted, OI_FUT_WEAK=1)"
     note = f"{mk_txt} · {fut_txt}"
     daily = kd.candles(name, "day", day - datetime.timedelta(days=12), day - datetime.timedelta(days=1))
     m15 = kd.candles(name, "15minute", day - datetime.timedelta(days=6), day)

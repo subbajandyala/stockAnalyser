@@ -472,6 +472,7 @@ def main() -> None:
     sent = json.loads(state_p.read_text()) if state_p.exists() else {}
     early, armed = sent.setdefault("_early", {}), sent.setdefault("_armed", {})
     use_rules = e.get("OI_NEW_RULES", "1") == "1"
+    rules.WEAK_OK = e.get("OI_FUT_WEAK", "1") == "1"     # CE also on short covering, PE on long unwinding
     rules.FUT_MODE = e.get("OI_FUT_MODE", "combined")   # expiry7 = current month until 7 days to expiry
     push_all = e.get("OI_PUSH_ALL", "0") == "1"
     new = [r for r in strong if sent.get(r["name"]) != r["signal"]]
