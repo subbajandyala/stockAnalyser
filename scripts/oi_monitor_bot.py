@@ -495,6 +495,7 @@ def main() -> None:
         snap.to_csv(fh, index=False)
     base, recent = load(base_p), load(recent_p)
 
+    om.FRESH_REQUIRED = e.get("OI_FRESH", "1") == "1"     # STRONG needs the last ~20 min to agree
     res = om.analyse_all(snap, base, recent)
     strong = [r for r in res if r.get("signal")]
     print(f"[{now:%H:%M}] {snap['name'].nunique()} stocks, {len(snap)} contracts in {time.time() - t0:.0f}s · "
