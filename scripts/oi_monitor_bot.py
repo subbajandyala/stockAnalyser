@@ -10,7 +10,12 @@ at most OI_MAX_ORDERS (default 5) a day, none after 15:00; unfilled after 8 s �
   OI_PRODUCT=MIS: intraday, no GTT; Zerodha squares it off ~15:20.
 The result (filled + GTT / Kite's rejection reason) is added to the push.
 
-Order rules (screener/oi_rules.py, OI_NEW_RULES=1 default; 0 = buy every new signal as before):
+Trigger (OI_TRIGGER): start (default) = buy when a move BEGINS — screener/oi_start.py: a breakout of
+  the last hour's range in the last ~10 min, still early (≤ 0.6 % beyond, ≤ 1 % from VWAP), near-ATM OI
+  flipping the same way in those 10 min, volume ≥ 1.5× normal, yesterday's OI not against, NIFTY not
+  against; ordered at once, no new orders from OI_LAST_ORDER (14:30). Run every 5 minutes.
+  strong = the old trigger below (STRONG vs yesterday's close, then the rules).
+Order rules for OI_TRIGGER=strong (screener/oi_rules.py, OI_NEW_RULES=1 default; 0 = buy every new signal):
   before 09:40      EARLY — decided at the first scan from 09:40 where the stock is still STRONG
   NIFTY             up ≥ 0.5 % and above its open → no PE; down ≥ 0.5 % and below → no CE
   futures           current + next month OI together vs yesterday: CE long buildup, PE short buildup
@@ -59,6 +64,7 @@ from kiteconnect import KiteConnect
 
 from screener import levels
 from screener import oi_monitor as om
+from screener import oi_start
 from screener import oi_rules as rules
 
 ROOT = pathlib.Path(__file__).parent.parent
@@ -191,7 +197,11 @@ def snapshot(kite: KiteConnect, uni: dict) -> tuple[pd.DataFrame, datetime.date 
                    "spot_close": float((s.get("ohlc") or {}).get("close") or (f.get("ohlc") or {}).get("close") or 0),
                    "fut_ltp": float(f.get("last_price") or 0),
                    "fut_close": float((f.get("ohlc") or {}).get("close") or 0),
-                   "fut_oi": float(f.get("oi") or 0), "pick": pick}
+                   "fut_oi": float(f.get("oi") or 0), "pick": pick,
+                   "vwap": float(s.get("average_price") or 0),
+                   "day_high": float((s.get("ohlc") or {}).get("high") or 0),
+                   "day_low": float((s.get("ohlc") or {}).get("low") or 0),
+                   "stock_volume": float(s.get("volume") or 0)}
         for k, ce, pe in pick:
             want += [f"NFO:{ce}", f"NFO:{pe}"]
 
@@ -210,7 +220,9 @@ def snapshot(kite: KiteConnect, uni: dict) -> tuple[pd.DataFrame, datetime.date 
                              "oi": float(q.get("oi") or 0), "ltp": float(q.get("last_price") or 0),
                              "bid": float(bid), "ask": float(ask), "volume": float(q.get("volume") or 0),
                              "spot": mt["spot"], "spot_close": mt["spot_close"], "fut_ltp": mt["fut_ltp"],
-                             "fut_close": mt["fut_close"], "fut_oi": mt["fut_oi"]})
+                             "fut_close": mt["fut_close"], "fut_oi": mt["fut_oi"], "vwap": mt["vwap"],
+                             "day_high": mt["day_high"], "day_low": mt["day_low"],
+                             "stock_volume": mt["stock_volume"]})
     return pd.DataFrame(rows), traded
 
 
@@ -424,6 +436,7 @@ def main() -> None:
     om.FRESH_REQUIRED = e.get("OI_FRESH", "1") == "1"     # STRONG needs the last ~20 min to agree
     res = om.analyse_all(snap, base, recent)
     liquid_top = int(e.get("OI_LIQUID_TOP") or 0)       # 0 = every F&O stock can signal
+    liquid_ok = None
     if liquid_top:
         lq_p = day_dir / "liquid.csv"
         if lq_p.exists():
@@ -438,6 +451,7 @@ def main() -> None:
             print("  liquid list: no previous-day snapshot with volume — every stock allowed today")
         else:
             ok_names = set(rank[rank["rank"] <= liquid_top]["name"])
+            liquid_ok = ok_names
             dropped = [r["name"] for r in res if r.get("signal") and r["name"] not in ok_names]
             for r in res:
                 if r.get("signal") and r["name"] not in ok_names:
@@ -516,7 +530,40 @@ def main() -> None:
         return {"name": name, "signal": side, "spot": spot,
                 "option": {"strike": min(g["strike"].unique(), key=lambda k: abs(k - spot))}}
 
-    if not use_rules:                                   # OI_NEW_RULES=0: buy every new signal (old way)
+    trigger = e.get("OI_TRIGGER", "start").lower()     # start = buy when a move begins (screener/oi_start.py)
+    last_order = e.get("OI_LAST_ORDER", "1430")          # start trigger: no new orders from this time
+    if trigger == "start":
+        files = [f for f in snap_files(today) if f.name[:4] <= hm]
+        prev_p = oi_start.snap_ago(files, hm, oi_start.WINDOW_MIN)
+        window = [pd.read_csv(f, usecols=["name", "spot"]) for f in oi_start.range_files(files, hm)]
+        context = {r["name"]: r for r in res if "error" not in r}
+        context["_prev_hm"] = prev_p.name[:4] if prev_p else hm
+        found = oi_start.starts(snap, load(prev_p), window, context, hm)
+        if liquid_ok is not None:
+            found = [s for s in found if s["name"] in liquid_ok]
+        started = sent.setdefault("_start", {})
+        mk = None
+        for s in found:
+            key = f"{s['name']}|{s['signal']}"
+            if key in started:
+                continue
+            started[key] = hm
+            head = oi_start.line(s)
+            if hm4 >= last_order:
+                logs.append(f"{head}\n   ⏰ {last_order[:2]}:{last_order[2:]} or later — no order")
+                continue
+            if mk is None:
+                try:
+                    mk = rules.market(today, naive, rules.KiteData(kite))
+                except Exception as ex:
+                    mk = (None, f"NIFTY n/a ({ex})")
+            if (s["signal"] == "PE" and mk[0] == "up") or (s["signal"] == "CE" and mk[0] == "down"):
+                logs.append(f"{head}\n   👀 WATCH — {mk[1]}: no {s['signal']} against the market")
+                continue
+            pushes.append(f"{head}\n   {mk[1]}\n   {order(s)}")
+        print(f"  start trigger: {len(found)} start(s) this scan · 10-min base "
+              f"{prev_p.name if prev_p else 'none'} · range from {len(window)} snapshot(s)")
+    elif not use_rules:                                 # OI_NEW_RULES=0: buy every new signal (old way)
         for r in new:
             pushes.append(om.signal_line(r) + "\n   " + order(r))
             sent[r["name"]] = r["signal"]
