@@ -14,6 +14,10 @@ Trigger (OI_TRIGGER): start (default) = buy when a move BEGINS — screener/oi_s
   the last hour's range in the last ~10 min, still early (≤ 0.6 % beyond, ≤ 1 % from VWAP), near-ATM OI
   flipping the same way in those 10 min, volume ≥ 1.5× normal, yesterday's OI not against, NIFTY not
   against; ordered at once, no new orders from OI_LAST_ORDER (14:30). Run every 5 minutes.
+  Exits of start trades (screener/oi_exit.py, OI_EXIT=1): take profit when the move turns (2 of: OI
+  writers building again on the trade's side, stock gave back ≥ 35 % of its move, stock turned in 10 min;
+  premium ≥ +5 %), lock half of a +20 % gain, stop when the stock is back past the broken level or the
+  premium is −25 %, square-off at OI_EXIT_BY (15:15). Alerts-only mode follows them as paper trades.
   strong = the old trigger below (STRONG vs yesterday's close, then the rules).
 Order rules for OI_TRIGGER=strong (screener/oi_rules.py, OI_NEW_RULES=1 default; 0 = buy every new signal):
   before 09:40      EARLY — decided at the first scan from 09:40 where the stock is still STRONG
@@ -65,6 +69,7 @@ from kiteconnect import KiteConnect
 from screener import levels
 from screener import oi_monitor as om
 from screener import oi_start
+from screener import oi_exit
 from screener import oi_rules as rules
 
 ROOT = pathlib.Path(__file__).parent.parent
@@ -252,8 +257,9 @@ def tick(x: float, size: float = 0.05) -> float:
 def buy_atm(kite: KiteConnect, r: dict, snap: pd.DataFrame, lot: int, lots: int,
             product: str = "NRML", sl_pct: float = 20.0, tgt_pct: float = 40.0,
             gtt: bool = False, exchange: str = "NFO", tick_size: float = 0.05,
-            price_factor: float = 1.005) -> str:
-    """BUY lots × lot of the signal's ATM option: LIMIT just above the ask.
+            price_factor: float = 1.005, out: dict | None = None) -> str:
+    """BUY lots × lot of the signal's ATM option: LIMIT just above the ask. `out` (if given) gets
+    ts / qty / fill / gtt_id of a filled order, for the exit manager.
 
     NRML (default): held overnight. gtt=True adds an OCO GTT once filled — stop sl_pct
     below the fill, target tgt_pct above; off by default (stop / target managed by hand).
@@ -295,6 +301,8 @@ def buy_atm(kite: KiteConnect, r: dict, snap: pd.DataFrame, lot: int, lots: int,
     if status != "COMPLETE":
         return f"order ✗ {ts} {qty} @ ₹{price:g} {product} — {status}" + (f": {why}" if why else "")
     fill = fill or price
+    if out is not None:
+        out.update({"ts": ts, "qty": qty, "fill": fill, "exchange": exchange})
     txt = f"order ✓ {ts} {qty} @ ₹{fill:g} {product} — COMPLETE"
     if product == "MIS":
         return txt + " (no stop: MIS square-off ~15:20)"
@@ -308,9 +316,44 @@ def buy_atm(kite: KiteConnect, r: dict, snap: pd.DataFrame, lot: int, lots: int,
                            trigger_values=[sl, tgt], last_price=fill,
                            orders=[leg(max(tick_size, tick(sl * 0.95, tick_size))), leg(tick(tgt * 0.99, tick_size))])
         gid = g.get("trigger_id") if isinstance(g, dict) else g
+        if out is not None:
+            out["gtt_id"] = gid
         return txt + f"\n   GTT {gid}: stop ₹{sl:g} (−{sl_pct:g}%) · target ₹{tgt:g} (+{tgt_pct:g}%)"
     except Exception as ex:
         return txt + f"\n   ⚠️ GTT FAILED ({ex}) — SET A STOP LOSS IN KITE NOW"
+
+
+def sell_option(kite: KiteConnect, ts: str, qty: int, product: str, exchange: str = "NFO",
+                gtt_id=None) -> tuple[bool, str]:
+    """Exit a bot trade: delete its GTT (if any), LIMIT SELL at LTP − 2 %, wait ~8 s, cancel if open."""
+    if gtt_id:
+        try:
+            kite.delete_gtt(int(gtt_id))
+        except Exception:
+            pass
+    try:
+        ltp = float(kite.ltp([f"{exchange}:{ts}"])[f"{exchange}:{ts}"]["last_price"])
+        prod = kite.PRODUCT_MIS if product == "MIS" else kite.PRODUCT_NRML
+        oid = kite.place_order(variety=kite.VARIETY_REGULAR, exchange=exchange, tradingsymbol=ts,
+                               transaction_type=kite.TRANSACTION_TYPE_SELL, quantity=qty, product=prod,
+                               order_type=kite.ORDER_TYPE_LIMIT, price=max(0.05, tick(ltp * 0.98)), tag="oimon")
+    except Exception as ex:
+        return False, f"sell failed: {ex}"
+    for _ in range(4):
+        time.sleep(2)
+        try:
+            h = kite.order_history(oid)[-1]
+            if h.get("status") == "COMPLETE":
+                return True, f"sold {qty} @ ₹{float(h.get('average_price') or 0):g}"
+            if h.get("status") in ("REJECTED", "CANCELLED"):
+                return False, f"sell {h.get('status')}: {h.get('status_message') or ''}"
+        except Exception:
+            pass
+    try:
+        kite.cancel_order(variety=kite.VARIETY_REGULAR, order_id=oid)
+    except Exception:
+        pass
+    return False, "sell not filled in 8 s — cancelled, retry next scan"
 
 
 def test_order(kite: KiteConnect, e: dict, name: str, side: str, fill: bool, today: datetime.date) -> None:
@@ -506,7 +549,7 @@ def main() -> None:
     pushes: list[str] = []          # what goes to ntfy this scan
     logs: list[str] = []            # log only (WATCH / EARLY, unless OI_PUSH_ALL=1)
 
-    def order(r: dict) -> str:
+    def order(r: dict, out: dict | None = None) -> str:
         """Place the order for r (signal side, ATM strike) — or say why not."""
         nonlocal n_orders
         if not auto:
@@ -519,7 +562,8 @@ def main() -> None:
         if n_orders >= max_orders:
             return f"no order — {max_orders} orders already today (OI_MAX_ORDERS)"
         n_orders += 1
-        return buy_atm(kite, r, snap, int(uni[r["name"]].get("lot") or 1), lots, product, sl_pct, tgt_pct, use_gtt)
+        return buy_atm(kite, r, snap, int(uni[r["name"]].get("lot") or 1), lots, product, sl_pct, tgt_pct, use_gtt,
+                       out=out)
 
     def atm_r(name: str, side: str) -> dict | None:
         """A minimal signal dict (ATM strike now) for an armed stock that may no longer be STRONG."""
@@ -538,7 +582,42 @@ def main() -> None:
         window = [pd.read_csv(f, usecols=["name", "spot"]) for f in oi_start.range_files(files, hm)]
         context = {r["name"]: r for r in res if "error" not in r}
         context["_prev_hm"] = prev_p.name[:4] if prev_p else hm
-        found = oi_start.starts(snap, load(prev_p), window, context, hm)
+        prev_df = load(prev_p)
+        found = oi_start.starts(snap, prev_df, window, context, hm)
+        # ── manage open start trades (screener/oi_exit.py): take profit when the move turns, stop, 15:15
+        trades = sent.setdefault("_trades", {})
+        manage = e.get("OI_EXIT", "1") == "1"
+        oi_exit.EXIT_BY = e.get("OI_EXIT_BY", oi_exit.EXIT_BY)
+        held = None
+        for key, tr in trades.items():
+            if tr.get("closed") or not manage:
+                continue
+            if not tr.get("paper"):
+                if held is None:
+                    try:
+                        held = {p["tradingsymbol"]: int(p.get("quantity") or 0) for p in kite.positions().get("net", [])}
+                    except Exception:
+                        held = {}
+                if held and held.get(tr["ts"], 0) <= 0:
+                    tr.update({"closed": hm, "why": "closed outside the bot (sold by hand / GTT)"})
+                    logs.append(f"{tr['name']} {tr['side']}: position no longer held — closed outside the bot")
+                    continue
+            g_now = snap[snap["name"] == tr["name"]]
+            g_prev = prev_df[prev_df["name"] == tr["name"]] if prev_df is not None else None
+            kind, why, prem = oi_exit.check(tr, g_now, g_prev, hm)
+            if not kind:
+                continue
+            info = "paper trade"
+            if not tr.get("paper"):
+                ok, info = sell_option(kite, tr["ts"], tr["qty"], product, tr.get("exchange", "NFO"), tr.get("gtt_id"))
+                if not ok:
+                    pushes.append(f"⚠️ EXIT FAILED — {tr['name']} {tr['ts']}: {why} — {info}")
+                    continue
+            pct = (prem / tr["entry"] - 1) * 100
+            tr.update({"closed": hm, "why": why, "exit": prem, "pct": round(pct, 1)})
+            icon = {"profit": "💰 TAKE PROFIT", "stop": "🛑 STOP", "time": "⏰ SQUARE-OFF"}[kind]
+            pushes.append(f"{icon} — {tr['name']} {tr['ts']}: ₹{tr['entry']:g} → ₹{prem:g} ({pct:+.1f}%)\n"
+                          f"   {why}\n   {info}")
         if liquid_ok is not None:
             found = [s for s in found if s["name"] in liquid_ok]
         started = sent.setdefault("_start", {})
@@ -560,7 +639,16 @@ def main() -> None:
             if (s["signal"] == "PE" and mk[0] == "up") or (s["signal"] == "CE" and mk[0] == "down"):
                 logs.append(f"{head}\n   👀 WATCH — {mk[1]}: no {s['signal']} against the market")
                 continue
-            pushes.append(f"{head}\n   {mk[1]}\n   {order(s)}")
+            fill: dict = {}
+            res_line = order(s, fill)
+            pushes.append(f"{head}\n   {mk[1]}\n   {res_line}")
+            rec = {"name": s["name"], "side": s["signal"], "level": s["level"], "stop": s["stop"],
+                   "entry_spot": s["spot"], "opened": hm}
+            if fill.get("fill"):
+                trades[key] = {**rec, "ts": fill["ts"], "qty": fill["qty"], "entry": fill["fill"],
+                               "exchange": fill.get("exchange", "NFO"), "gtt_id": fill.get("gtt_id")}
+            elif not auto:                                   # alerts only: follow it as a paper trade
+                trades[key] = {**rec, "ts": s["ts"], "qty": 0, "entry": s["entry"], "paper": True}
         print(f"  start trigger: {len(found)} start(s) this scan · 10-min base "
               f"{prev_p.name if prev_p else 'none'} · range from {len(window)} snapshot(s)")
     elif not use_rules:                                 # OI_NEW_RULES=0: buy every new signal (old way)
