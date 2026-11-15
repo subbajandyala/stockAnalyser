@@ -17,7 +17,16 @@ at most OI_MAX_ORDERS (default 5) a day, none after 15:00; unfilled after 8 s �
   OI_PRODUCT=MIS: intraday, no GTT; Zerodha squares it off ~15:20.
 The result (filled + GTT / Kite's rejection reason) is added to the push.
 
-Order rules (screener/oi_rules.py, OI_NEW_RULES=1 default; 0 = buy every new signal as before):
+Trigger (OI_TRIGGER): start (default) = trade the stock when a move BEGINS — screener/oi_start.py: a
+  breakout of the last hour's range in the last ~10 min, still early (≤ 0.6 % beyond, ≤ 1 % from VWAP),
+  near-ATM OI flipping the same way in those 10 min, volume ≥ 1.5× normal, yesterday's OI and NIFTY not
+  against; ordered at once (CE → buy, PE → short, MIS), no new orders from OI_LAST_ORDER (14:30).
+  Exits by the bot (screener/oi_exit.py, equity mode, OI_EXIT=1): take profit once the stock is ≥ 0.3 %
+  our way and 2 of 3 turning signs (OI writers building again on our side, stock gave back ≥ 35 % of its
+  move, stock turned vs ~10 min ago); lock half of a ≥ 1 % move; stop when the stock is back past the
+  broken level or 1 % against; 15:15 square-off. Run every 5 minutes.
+  strong = the old trigger below (STRONG vs yesterday's close, then the rules).
+Order rules for OI_TRIGGER=strong (screener/oi_rules.py, OI_NEW_RULES=1 default; 0 = buy every new signal):
   before 09:40      EARLY — decided at the first scan from 09:40 where the stock is still STRONG
   NIFTY             up ≥ 0.5 % and above its open → no PE; down ≥ 0.5 % and below → no CE
   futures           current + next month OI together vs yesterday: CE long buildup, PE short buildup
@@ -64,6 +73,8 @@ from kiteconnect import KiteConnect
 
 from screener import levels
 from screener import oi_monitor as om
+from screener import oi_start
+from screener import oi_exit
 from screener import oi_rules as rules
 
 ROOT = pathlib.Path(__file__).parent.parent
@@ -196,7 +207,11 @@ def snapshot(kite: KiteConnect, uni: dict) -> tuple[pd.DataFrame, datetime.date 
                    "spot_close": float((s.get("ohlc") or {}).get("close") or (f.get("ohlc") or {}).get("close") or 0),
                    "fut_ltp": float(f.get("last_price") or 0),
                    "fut_close": float((f.get("ohlc") or {}).get("close") or 0),
-                   "fut_oi": float(f.get("oi") or 0), "pick": pick}
+                   "fut_oi": float(f.get("oi") or 0), "pick": pick,
+                   "vwap": float(s.get("average_price") or 0),
+                   "day_high": float((s.get("ohlc") or {}).get("high") or 0),
+                   "day_low": float((s.get("ohlc") or {}).get("low") or 0),
+                   "stock_volume": float(s.get("volume") or 0)}
         for k, ce, pe in pick:
             want += [f"NFO:{ce}", f"NFO:{pe}"]
 
@@ -215,7 +230,9 @@ def snapshot(kite: KiteConnect, uni: dict) -> tuple[pd.DataFrame, datetime.date 
                              "oi": float(q.get("oi") or 0), "ltp": float(q.get("last_price") or 0),
                              "bid": float(bid), "ask": float(ask), "volume": float(q.get("volume") or 0),
                              "spot": mt["spot"], "spot_close": mt["spot_close"], "fut_ltp": mt["fut_ltp"],
-                             "fut_close": mt["fut_close"], "fut_oi": mt["fut_oi"]})
+                             "fut_close": mt["fut_close"], "fut_oi": mt["fut_oi"], "vwap": mt["vwap"],
+                             "day_high": mt["day_high"], "day_low": mt["day_low"],
+                             "stock_volume": mt["stock_volume"]})
     return pd.DataFrame(rows), traded
 
 
@@ -368,7 +385,7 @@ def nse_tick(kite: KiteConnect, name: str) -> float:
     return float(_NSE_TICK.get(name) or 0.05)
 
 
-def trade_equity(kite: KiteConnect, name: str, side: str, rs: float) -> str:
+def trade_equity(kite: KiteConnect, name: str, side: str, rs: float, out: dict | None = None) -> str:
     """CE → BUY the stock, PE → SELL it short: NSE, MIS (intraday), LIMIT just through the best
     price, quantity = rs ÷ price. Not filled in 8 s → cancelled. No stop / target: exit by hand
     (Zerodha squares MIS off ~15:20). The line keeps the "order ✓ SYMBOL QTY @ ₹PRICE MIS — …"
@@ -411,8 +428,45 @@ def trade_equity(kite: KiteConnect, name: str, side: str, rs: float) -> str:
             why = f"still open, cancel failed: {ex}"
     if status != "COMPLETE":
         return f"order ✗ {name} {qty} @ ₹{price:g} MIS — {action} · {status}" + (f": {why}" if why else "")
-    return (f"order ✓ {name} {qty} @ ₹{fill or price:g} MIS — {action} · COMPLETE — exit by hand "
-            f"(Zerodha squares MIS off ~15:20)")
+    if out is not None:
+        out.update({"qty": qty, "fill": fill or price})
+    return (f"order ✓ {name} {qty} @ ₹{fill or price:g} MIS — {action} · COMPLETE"
+            + (" — exits by the bot (take profit / stop / 15:15)" if out is not None else
+               " — exit by hand (Zerodha squares MIS off ~15:20)"))
+
+
+def close_equity(kite: KiteConnect, name: str, side: str, qty: int) -> tuple[bool, str]:
+    """Close a bot MIS trade: a long (CE) is SOLD, a short (PE) BOUGHT back — LIMIT just through the best
+    price, ~8 s fill check, cancelled if still open (retried next scan)."""
+    sell = side == "CE"
+    try:
+        q = kite.quote([f"NSE:{name}"])[f"NSE:{name}"]
+        ltp = float(q.get("last_price") or 0)
+        d = q.get("depth") or {}
+        best = float(((d.get("buy") if sell else d.get("sell")) or [{}])[0].get("price") or 0) or ltp
+        ts_ = nse_tick(kite, name)
+        price = tick(best * (0.998 if sell else 1.002), ts_)
+        oid = kite.place_order(variety=kite.VARIETY_REGULAR, exchange=kite.EXCHANGE_NSE, tradingsymbol=name,
+                               transaction_type=kite.TRANSACTION_TYPE_SELL if sell else kite.TRANSACTION_TYPE_BUY,
+                               quantity=qty, product=kite.PRODUCT_MIS, order_type=kite.ORDER_TYPE_LIMIT,
+                               price=price, tag="oieq")
+    except Exception as ex:
+        return False, f"exit order failed: {ex}"
+    for _ in range(4):
+        time.sleep(2)
+        try:
+            h = kite.order_history(oid)[-1]
+            if h.get("status") == "COMPLETE":
+                return True, f"{'sold' if sell else 'bought back'} {qty} @ ₹{float(h.get('average_price') or 0):g}"
+            if h.get("status") in ("REJECTED", "CANCELLED"):
+                return False, f"exit {h.get('status')}: {h.get('status_message') or ''}"
+        except Exception:
+            pass
+    try:
+        kite.cancel_order(variety=kite.VARIETY_REGULAR, order_id=oid)
+    except Exception:
+        pass
+    return False, "exit not filled in 8 s — cancelled, retry next scan"
 
 
 def push(topic: str, title: str, body: str) -> None:
@@ -546,7 +600,7 @@ def main() -> None:
     pushes: list[str] = []          # what goes to ntfy this scan
     logs: list[str] = []            # log only (WATCH / EARLY, unless OI_PUSH_ALL=1)
 
-    def order(r: dict) -> str:
+    def order(r: dict, out: dict | None = None) -> str:
         """Place the order for r (signal side, ATM strike) — or say why not."""
         nonlocal n_orders
         if not auto:
@@ -556,7 +610,7 @@ def main() -> None:
         if n_orders >= max_orders:
             return f"no order — {max_orders} orders already today (OI_MAX_ORDERS)"
         n_orders += 1
-        return trade_equity(kite, r["name"], r["signal"], rs_per_trade)
+        return trade_equity(kite, r["name"], r["signal"], rs_per_trade, out=out)
 
     def atm_r(name: str, side: str) -> dict | None:
         """A minimal signal dict (ATM strike now) for an armed stock that may no longer be STRONG."""
@@ -567,7 +621,84 @@ def main() -> None:
         return {"name": name, "signal": side, "spot": spot,
                 "option": {"strike": min(g["strike"].unique(), key=lambda k: abs(k - spot))}}
 
-    if not use_rules:                                   # OI_NEW_RULES=0: buy every new signal (old way)
+    trigger = e.get("OI_TRIGGER", "start").lower()     # start = trade when a move begins (screener/oi_start.py)
+    last_order = e.get("OI_LAST_ORDER", "1430")          # start trigger: no new orders from this time
+    if trigger == "start":
+        files = [f for f in snap_files(today) if f.name[:4] <= hm]
+        prev_p = oi_start.snap_ago(files, hm, oi_start.WINDOW_MIN)
+        window = [pd.read_csv(f, usecols=["name", "spot"]) for f in oi_start.range_files(files, hm)]
+        context = {r["name"]: r for r in res if "error" not in r}
+        context["_prev_hm"] = prev_p.name[:4] if prev_p else hm
+        prev_df = load(prev_p)
+        found = oi_start.starts(snap, prev_df, window, context, hm)
+        # ── manage open start trades (screener/oi_exit.py, equity mode): take profit on the turn, stop, 15:15
+        trades = sent.setdefault("_trades", {})
+        manage = e.get("OI_EXIT", "1") == "1"
+        oi_exit.EXIT_BY = e.get("OI_EXIT_BY", oi_exit.EXIT_BY)
+        held = None
+        for key, tr in trades.items():
+            if tr.get("closed") or not manage:
+                continue
+            if not tr.get("paper"):
+                if held is None:
+                    try:
+                        held = {p["tradingsymbol"]: int(p.get("quantity") or 0) for p in kite.positions().get("net", [])
+                                if p.get("product") == "MIS" and p.get("exchange") == "NSE"}
+                    except Exception:
+                        held = {}
+                q = held.get(tr["name"], 0) if held else None
+                if q is not None and ((tr["side"] == "CE" and q <= 0) or (tr["side"] == "PE" and q >= 0)):
+                    tr.update({"closed": hm, "why": "closed outside the bot (by hand / Zerodha)"})
+                    logs.append(f"{tr['name']} {tr['side']}: position no longer held — closed outside the bot")
+                    continue
+            g_now = snap[snap["name"] == tr["name"]]
+            g_prev = prev_df[prev_df["name"] == tr["name"]] if prev_df is not None else None
+            kind, why, px = oi_exit.check(tr, g_now, g_prev, hm)
+            if not kind:
+                continue
+            info = "paper trade"
+            if not tr.get("paper"):
+                ok, info = close_equity(kite, tr["name"], tr["side"], tr["qty"])
+                if not ok:
+                    pushes.append(f"⚠️ EXIT FAILED — {tr['name']} {tr['side']}: {why} — {info}")
+                    continue
+            pct = (1 if tr["side"] == "CE" else -1) * (px / tr["entry"] - 1) * 100
+            pnl = pct / 100 * tr["entry"] * tr.get("qty", 0)
+            tr.update({"closed": hm, "why": why, "exit": px, "pct": round(pct, 2)})
+            icon = {"profit": "💰 TAKE PROFIT", "stop": "🛑 STOP", "time": "⏰ SQUARE-OFF"}[kind]
+            pushes.append(f"{icon} — {tr['name']} {'long' if tr['side'] == 'CE' else 'short'}: ₹{tr['entry']:g} → "
+                          f"₹{px:g} ({pct:+.2f}%" + (f", ₹{pnl:+,.0f}" if tr.get("qty") else "") + f")\n   {why}\n   {info}")
+        started = sent.setdefault("_start", {})
+        mk = None
+        for s in found:
+            key = f"{s['name']}|{s['signal']}"
+            if key in started:
+                continue
+            started[key] = hm
+            head = oi_start.line(s, equity=True)
+            if hm4 >= last_order:
+                logs.append(f"{head}\n   ⏰ {last_order[:2]}:{last_order[2:]} or later — no order")
+                continue
+            if mk is None:
+                try:
+                    mk = rules.market(today, naive, rules.KiteData(kite))
+                except Exception as ex:
+                    mk = (None, f"NIFTY n/a ({ex})")
+            if (s["signal"] == "PE" and mk[0] == "up") or (s["signal"] == "CE" and mk[0] == "down"):
+                logs.append(f"{head}\n   👀 WATCH — {mk[1]}: no {s['signal']} against the market")
+                continue
+            fill: dict = {}
+            res_line = order(s, fill)
+            pushes.append(f"{head}\n   {mk[1]}\n   {res_line}")
+            rec = {"name": s["name"], "side": s["signal"], "level": s["level"], "stop": s["stop"],
+                   "entry_spot": s["spot"], "opened": hm, "mode": "equity", "ts": s["name"]}
+            if fill.get("fill"):
+                trades[key] = {**rec, "qty": fill["qty"], "entry": fill["fill"]}
+            elif not auto:                                   # alerts only: follow it as a paper trade
+                trades[key] = {**rec, "qty": max(1, int(rs_per_trade // s["spot"])), "entry": s["spot"], "paper": True}
+        print(f"  start trigger: {len(found)} start(s) this scan · 10-min base "
+              f"{prev_p.name if prev_p else 'none'} · range from {len(window)} snapshot(s)")
+    elif not use_rules:                                 # OI_NEW_RULES=0: buy every new signal (old way)
         for r in new:
             pushes.append(om.signal_line(r).replace(" — BUY ", " — signal ", 1) + "\n   " + order(r))
             sent[r["name"]] = r["signal"]
