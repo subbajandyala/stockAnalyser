@@ -18,6 +18,10 @@ Trigger (OI_TRIGGER): start (default) = buy when a move BEGINS — screener/oi_s
   writers building again on the trade's side, stock gave back ≥ 35 % of its move, stock turned in 10 min;
   premium ≥ +5 %), lock half of a +20 % gain, stop when the stock is back past the broken level or the
   premium is −25 %, square-off at OI_EXIT_BY (15:15). Alerts-only mode follows them as paper trades.
+  5-EMA alert candle (screener/alert_candle.py): OI_NO_CHASE=1 skips a start whose last 5-min candle is
+  already entirely beyond the 5 EMA in its direction or RSI > 70 / < 30; OI_ALERT_EXIT=profit exits once in
+  profit when an opposite alert candle (entirely beyond the 5 EMA against the move) is broken
+  (any = also at a loss, 0 = off).
   strong = the old trigger below (STRONG vs yesterday's close, then the rules).
 Order rules for OI_TRIGGER=strong (screener/oi_rules.py, OI_NEW_RULES=1 default; 0 = buy every new signal):
   before 09:40      EARLY — decided at the first scan from 09:40 where the stock is still STRONG
@@ -70,6 +74,7 @@ from screener import levels
 from screener import oi_monitor as om
 from screener import oi_start
 from screener import oi_exit
+from screener import alert_candle as ac
 from screener import oi_rules as rules
 
 ROOT = pathlib.Path(__file__).parent.parent
@@ -586,6 +591,45 @@ def main() -> None:
         found = oi_start.starts(snap, prev_df, window, context, hm)
         # ── manage open start trades (screener/oi_exit.py): take profit when the move turns, stop, 15:15
         trades = sent.setdefault("_trades", {})
+        alert_mode = e.get("OI_ALERT_EXIT", "profit").lower()   # profit (default) / any / 0
+        no_chase = e.get("OI_NO_CHASE", "1") == "1"
+        m5_cache: dict = {}
+        _kd: dict = {}
+
+        def m5_of(name: str):
+            """Closed 5-min candles of the stock (last ~4 days), fetched only for stocks that need them."""
+            if name not in m5_cache:
+                try:
+                    if "kd" not in _kd:
+                        _kd["kd"] = rules.KiteData(kite, tokens=nse_tokens(kite, today))
+                    df = _kd["kd"].candles(name, "5minute", today - datetime.timedelta(days=4), today)
+                    m5_cache[name] = (df[df.index + pd.Timedelta(minutes=5) <= pd.Timestamp(naive)]
+                                      if df is not None and len(df) else None)
+                except Exception as ex:
+                    logs.append(f"{name}: 5-min candles n/a ({ex})")
+                    m5_cache[name] = None
+            return m5_cache[name]
+
+        def alert_check(tr: dict) -> str | None:
+            """A new opposite-alert break since the entry (screener/alert_candle.py) → the reason, or None."""
+            m5 = m5_of(tr["name"])
+            if m5 is None or "last_prem" not in tr:
+                return None
+            since = pd.Timestamp(datetime.datetime.combine(today, datetime.time(int(tr["opened"][:2]),
+                                                                                int(tr["opened"][2:]))))
+            br = [b for b in ac.exit_breaks(m5, tr["side"], since) if str(b) > tr.get("alert_seen", "")]
+            if not br:
+                return None
+            tr["alert_seen"] = str(br[-1])
+            if tr.get("mode") == "equity":
+                g = (1 if tr["side"] == "CE" else -1) * (tr["last_spot"] / tr["entry"] - 1) * 100
+                need = oi_exit.EQ_MIN_PROFIT_PCT
+            else:
+                g = (tr["last_prem"] / tr["entry"] - 1) * 100
+                need = oi_exit.MIN_PROFIT_PCT
+            if alert_mode == "profit" and g < need:
+                return None
+            return f"opposite 5-EMA alert candle broke at {br[-1]:%H:%M} — the move turned ({g:+.1f}%)"
         manage = e.get("OI_EXIT", "1") == "1"
         oi_exit.EXIT_BY = e.get("OI_EXIT_BY", oi_exit.EXIT_BY)
         held = None
@@ -605,6 +649,10 @@ def main() -> None:
             g_now = snap[snap["name"] == tr["name"]]
             g_prev = prev_df[prev_df["name"] == tr["name"]] if prev_df is not None else None
             kind, why, prem = oi_exit.check(tr, g_now, g_prev, hm)
+            if kind not in ("time", "stop") and alert_mode != "0":
+                why_a = alert_check(tr)                         # opposite 5-EMA alert candle broken
+                if why_a and tr.get("last_prem"):
+                    kind, why, prem = "profit", why_a, tr["last_prem"]
             if not kind:
                 continue
             info = "paper trade"
@@ -628,6 +676,11 @@ def main() -> None:
                 continue
             started[key] = hm
             head = oi_start.line(s)
+            if no_chase:
+                why_s = ac.stretched(m5_of(s["name"]), s["signal"])
+                if why_s:
+                    logs.append(f"{head}\n   ⛔ STRETCHED — no order: {why_s}")
+                    continue
             if hm4 >= last_order:
                 logs.append(f"{head}\n   ⏰ {last_order[:2]}:{last_order[2:]} or later — no order")
                 continue
