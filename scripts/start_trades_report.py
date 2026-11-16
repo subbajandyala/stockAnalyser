@@ -6,7 +6,9 @@ The START lines and their order lines are read from oi_monitor.log (the day's bl
 through that day's saved snapshots exactly as the live bot does every 5 minutes: screener/oi_exit.check() on the
 newest snapshot and the one ~10 min older (move failed / hard stop / take profit on the turn / profit lock /
 15:15). Entry = the option's ask in the START line (what the order would have paid); exit = the option's bid in
-the snapshot where an exit fires. P&L = (exit − entry) × the order's quantity, before charges.
+the snapshot where an exit fires. P&L is for ONE LOT of each trade (lot size from Kite's instrument list that day), as if the account had enough
+money for every order: money made on the winners, money lost on the losers, the net, estimated charges, and the
+most money that was needed at one time (all open trades' premium together).
 
 Usage (Subba's machine):
   /root/venv/bin/python scripts/start_trades_report.py                    # the newest day in the log
@@ -15,6 +17,7 @@ Usage (Subba's machine):
 
 import argparse
 import datetime
+import json
 import pathlib
 import re
 import sys
@@ -107,34 +110,48 @@ def main() -> None:
         print(f"no START lines for {day} in {a.log}")
         return
     files = mon.snap_files(datetime.date.fromisoformat(day))
+    uni_p = mon.DATA / f"universe_{day}.json"
+    lots = {n: int(u.get("lot") or 0) for n, u in json.loads(uni_p.read_text()).items()} if uni_p.exists() else {}
     starts = [s for s in pairs[day] if s["order"] in ("✓", "✗") and s.get("stop")]
     skipped = [s for s in pairs[day] if s not in starts]
     rows = []
     for s in starts:
         r = follow(s, files)
         pct = (r["exit"] / s["entry"] - 1) * 100 if r["exit"] else None
+        lot = lots.get(s["name"]) or s["qty"]          # 1 lot (the bot orders OI_LOTS=1 lot anyway)
         rows.append({"time": f"{s['hm'][:2]}:{s['hm'][2:]}", "stock": s["name"],
-                     "option": f"{s['strike']:g} {s['side']}", "qty": s["qty"],
+                     "option": f"{s['strike']:g} {s['side']}", "lot": lot,
+                     "cost": round(s["entry"] * lot), "_in": s["hm"], "_out": r["exit_hm"] or "1530",
                      "kite": "filled" if s["order"] == "✓" else "rejected", "entry": s["entry"],
                      "exit_at": f"{r['exit_hm'][:2]}:{r['exit_hm'][2:]}" if r["exit_hm"] else "",
                      "exit": r["exit"], "pct": round(pct, 1) if pct is not None else None,
-                     "pnl": round((r["exit"] - s["entry"]) * s["qty"]) if r["exit"] else None,
+                     "pnl": round((r["exit"] - s["entry"]) * lot) if r["exit"] else None,
                      "result": r["kind"], "why": r["why"][:90]})
     df = pd.DataFrame(rows)
     if df.empty:
         print(f"{day}: no START orders")
         return
     out = mon.ROOT / "data" / f"start_trades_{day}.csv"
-    df.to_csv(out, index=False)
+    df.drop(columns=["_in", "_out"]).to_csv(out, index=False)
     pd.set_option("display.width", 250)
     pd.set_option("display.max_colwidth", 90)
     print(f"\n{day}: {len(df)} START orders (Kite: {sum(df['kite'] == 'filled')} filled, "
           f"{sum(df['kite'] == 'rejected')} rejected) — each followed with the bot's exit rules\n")
-    print(df.drop(columns=["why"]).to_string(index=False))
+    print(df.drop(columns=["why", "_in", "_out"]).to_string(index=False))
     ok = df.dropna(subset=["pnl"])
     w, l_ = ok[ok["pnl"] > 0], ok[ok["pnl"] <= 0]
-    print(f"\nwinners {len(w)} · losers {len(l_)} · total ₹{ok['pnl'].sum():+,.0f} before charges "
-          f"(≈ ₹{60 * len(ok):,} charges for {len(ok)} round trips)")
+    made, lost = w["pnl"].sum(), l_["pnl"].sum()
+    charges = 60 * len(ok)                               # ≈ brokerage ₹40 + STT / exchange / GST / stamp per round trip
+    times = sorted(set(ok["_in"]) | set(ok["_out"]))
+    peak = max((ok[(ok["_in"] <= t) & (ok["_out"] > t)]["cost"].sum() for t in times), default=0)
+    print(f"\nONE LOT of each trade:")
+    print(f"  winners {len(w):>3}   money made  ₹{made:>+12,.0f}   (avg ₹{w['pnl'].mean() if len(w) else 0:+,.0f})")
+    print(f"  losers  {len(l_):>3}   money lost  ₹{lost:>+12,.0f}   (avg ₹{l_['pnl'].mean() if len(l_) else 0:+,.0f})")
+    print(f"  net before charges   ₹{made + lost:>+12,.0f}")
+    print(f"  charges (≈ ₹60 × {len(ok)})   ₹{-charges:>+12,.0f}")
+    print(f"  NET                  ₹{made + lost - charges:>+12,.0f}")
+    print(f"  money needed at one time (open trades' premium together, peak): ₹{peak:,.0f}"
+          f" · all {len(ok)} buys together ₹{ok['cost'].sum():,.0f}")
     print("by exit: " + " · ".join(f"{k} {len(g)} (₹{g['pnl'].sum():+,.0f})" for k, g in ok.groupby("result")))
     print("\nwhy each exit fired:")
     for _, r in df.iterrows():
