@@ -22,6 +22,12 @@ Trigger (OI_TRIGGER): start (default) = buy when a move BEGINS — screener/oi_s
   already entirely beyond the 5 EMA in its direction or RSI > 70 / < 30; OI_ALERT_EXIT=profit exits once in
   profit when an opposite alert candle (entirely beyond the 5 EMA against the move) is broken
   (any = also at a loss, 0 = off).
+  OI_ORDER_FROM=1000: starts before 10:00 are pushed as alerts only, orders from 10:00 (not set = from 09:35).
+  OI_AGAINST_WRITE=1.5: day type from NIFTY each scan (screener/oi_rules.day_type: UP = ≥ 0.25 % above yesterday's
+  close and above today's open, DOWN = the mirror, else FLAT — a fading gap is FLAT). A trade WITH the day needs
+  nothing more; a trade AGAINST it, or any trade on a FLAT day, needs the writers on the other side building in
+  the same 10 min (PE: near-ATM calls added ≥ 1.5 % = a ceiling; CE: puts added ≥ 1.5 % = a floor) — covering
+  alone is not enough. Replaces the NIFTY ±0.5 % block. 0 / not set = the old block.
   strong = the old trigger below (STRONG vs yesterday's close, then the rules).
 Order rules for OI_TRIGGER=strong (screener/oi_rules.py, OI_NEW_RULES=1 default; 0 = buy every new signal):
   before 09:40      EARLY — decided at the first scan from 09:40 where the stock is still STRONG
@@ -669,7 +675,9 @@ def main() -> None:
         if liquid_ok is not None:
             found = [s for s in found if s["name"] in liquid_ok]
         started = sent.setdefault("_start", {})
-        mk = None
+        mk, dt = None, None
+        order_from = e.get("OI_ORDER_FROM", "").replace(":", "")   # e.g. 1000: earlier starts are pushed, not ordered
+        against_write = float(e.get("OI_AGAINST_WRITE") or 0)    # e.g. 1.5: day-type rule (0 = the old NIFTY block)
         for s in found:
             key = f"{s['name']}|{s['signal']}"
             if key in started:
@@ -684,17 +692,34 @@ def main() -> None:
             if hm4 >= last_order:
                 logs.append(f"{head}\n   ⏰ {last_order[:2]}:{last_order[2:]} or later — no order")
                 continue
+            if order_from and hm4 < order_from:              # before OI_ORDER_FROM: alert only
+                pushes.append(f"{head}\n   ⏱ before {order_from[:2]}:{order_from[2:]} — alert only, no order")
+                continue
             if mk is None:
                 try:
-                    mk = rules.market(today, naive, rules.KiteData(kite))
+                    kd_m = rules.KiteData(kite)
+                    mk = rules.market(today, naive, kd_m)
+                    dt = rules.day_type(today, naive, kd_m) if against_write else None
                 except Exception as ex:
-                    mk = (None, f"NIFTY n/a ({ex})")
-            if (s["signal"] == "PE" and mk[0] == "up") or (s["signal"] == "CE" and mk[0] == "down"):
+                    mk, dt = (None, f"NIFTY n/a ({ex})"), ("flat", f"day type n/a ({ex})")
+            if against_write:                                # day type: against the day / flat → writers needed
+                ce = s["signal"] == "CE"
+                need = dt[0] in (("down", "flat") if ce else ("up", "flat"))
+                wrote = s.get("oi_puts" if ce else "oi_calls")
+                if need and (wrote is None or wrote < against_write):
+                    what = "puts written (a floor)" if ce else "calls written (a ceiling)"
+                    logs.append(f"{head}\n   👀 WATCH — {dt[1]}: a {s['signal']} here needs {what} "
+                                f"≥ {against_write:g}% in 10 min, now {wrote if wrote is not None else 'n/a'}% — no order")
+                    continue
+                ctx = dt[1] + (f" · {'puts' if ce else 'calls'} written {wrote:+.1f}% ✓" if need else " · with the day")
+            elif (s["signal"] == "PE" and mk[0] == "up") or (s["signal"] == "CE" and mk[0] == "down"):
                 logs.append(f"{head}\n   👀 WATCH — {mk[1]}: no {s['signal']} against the market")
                 continue
+            else:
+                ctx = mk[1]
             fill: dict = {}
             res_line = order(s, fill)
-            pushes.append(f"{head}\n   {mk[1]}\n   {res_line}")
+            pushes.append(f"{head}\n   {ctx}\n   {res_line}")
             rec = {"name": s["name"], "side": s["signal"], "level": s["level"], "stop": s["stop"],
                    "entry_spot": s["spot"], "opened": hm}
             if fill.get("fill"):

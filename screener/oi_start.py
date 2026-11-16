@@ -139,7 +139,7 @@ def starts(now: pd.DataFrame, prev: pd.DataFrame | None, window: list[pd.DataFra
         out.append({"name": name, "signal": side, "spot": spot, "level": level, "stop": round(stop, 2),
                     "beyond_pct": round(beyond, 2), "price_pct": a.get("price_pct") if a else None,
                     "option": {"strike": strikes[atm_i], "ltp": ltp, "spread_pct": round(spread, 1)},
-                    "entry": ask or ltp, "ts": o.get("ts"), "why": why,
+                    "entry": ask or ltp, "ts": o.get("ts"), "why": why, "oi_calls": round(c, 2), "oi_puts": round(p, 2),
                     "call_wall": a.get("call_wall") if a else None, "put_wall": a.get("put_wall") if a else None})
     return out
 

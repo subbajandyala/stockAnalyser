@@ -95,6 +95,29 @@ def last_closed(df: pd.DataFrame | None, upto: datetime.datetime, minutes: int =
     return done.iloc[-1] if len(done) else None
 
 
+DAY_PCT = 0.25               # day type: NIFTY at least this far from yesterday's close, on the same side of its open
+
+
+def day_type(day: datetime.date, upto: datetime.datetime, kd: KiteData) -> tuple[str, str]:
+    """The day so far from NIFTY (10-min candles, re-read every scan): 'up' = above yesterday's close by
+    ≥ DAY_PCT and above today's open (a gap-up that holds); 'down' = the mirror; else 'flat' (a gap that is
+    fading back through its open counts as flat)."""
+    m10 = kd.candles("NIFTY", "10minute", day, day)
+    d = kd.candles("NIFTY", "day", day - datetime.timedelta(days=10), day - datetime.timedelta(days=1))
+    c = last_closed(m10, upto)
+    if c is None or d.empty or m10.empty:
+        return "flat", "day type n/a (NIFTY candles missing)"
+    prev_close, day_open, now = float(d["close"].iloc[-1]), float(m10["open"].iloc[0]), float(c["close"])
+    pct, gap = (now / prev_close - 1) * 100, (day_open / prev_close - 1) * 100
+    where = "above" if now > day_open else "below"
+    txt = f"NIFTY {pct:+.2f}% (gap {gap:+.2f}%, {where} its open)"
+    if pct >= DAY_PCT and now > day_open:
+        return "up", f"UP day — {txt}"
+    if pct <= -DAY_PCT and now < day_open:
+        return "down", f"DOWN day — {txt}"
+    return "flat", f"FLAT day — {txt}"
+
+
 def market(day: datetime.date, upto: datetime.datetime, kd: KiteData) -> tuple[str | None, str]:
     """NIFTY's direction at `upto`: 'up' / 'down' / None, plus a short text."""
     m10 = kd.candles("NIFTY", "10minute", day, day)
