@@ -81,6 +81,12 @@ NTFY_TOPIC=...              # your ntfy.sh topic name
 */5 9-15 * * 1-5 cd /root/stockAnalyser && /root/venv/bin/python scripts/agent_flow_bot.py NIFTY BANKNIFTY SENSEX --once >> agent_bot.log 2>&1
 ```
 
+Straddle tracker — runs 15:45 IST every weekday, does nothing unless today is an expiry:
+```
+# droplet clock is UTC (token cron 02:30 UTC = 08:00 IST) → 10:15 UTC = 15:45 IST
+15 10 * * 1-5 cd /root/stockAnalyser && /root/venv/bin/python scripts/straddle_tracker_bot.py --once >> straddle_bot.log 2>&1
+```
+
 Edit with: `crontab -e`
 
 ---

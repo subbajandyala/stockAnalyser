@@ -81,6 +81,7 @@ Cron entry:
 | `gamma_blast_bot.py` | cron | ntfy |
 | `red_flag_bot.py` | cron | ntfy |
 | `eod_report.py` | cron, 15:35 | ntfy |
+| `straddle_tracker_bot.py` | cron `15 10 * * 1-5` UTC = 15:45 IST (no-op unless expiry day) | ntfy |
 
 All bots support `--once` flag (single scan, exit) and `--state-file` for dedup.
 
@@ -148,6 +149,7 @@ fetch_ohlcv_yf_compat(symbol, period="1y", interval="1d")  # drop-in for yf.down
 | `option_chain.py` | Live NSE option chain (blocked on cloud, works locally) |
 | `news.py` | RSS → NIFTY 500 company name match → analyze_stock |
 | `live_ticks.py` | Redis tick reader for WebSocket data |
+| `straddle_tracker.py` | T-1 15:20 ATM straddle (expected move) vs expiry close; same-strike 11:00 decay; JSON log at `data/straddle_tracker.json` |
 
 ---
 

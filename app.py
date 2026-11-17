@@ -81,6 +81,7 @@ from screener.oi_buildup_history import (
 from screener.chart_analysis import analyze_chart as _analyze_chart, INTERVAL_CFG as _CA_INTERVAL_CFG
 from screener.cpr_adx import analyze_cpr_adx as _cpr_adx_analyze, NIFTY50_FNO as _CPR_ADX_SYMBOLS
 from screener.rsi_scalp import analyze_rsi_scalp as _rsi_scalp_analyze
+from screener import straddle_tracker as _STT
 from plotly.subplots import make_subplots
 
 try:
@@ -611,6 +612,7 @@ _NAV = [
     ("chart_analysis",   "📐 Chart Analysis"),
     ("cpr_adx",          "📊 CPR + ADX"),
     ("rsi_scalp",        "📈 RSI Scalp"),
+    ("straddle_tracker", "🎯 Straddle Tracker"),
 ]
 _NAV_KEYS   = [k for k, _ in _NAV]
 _NAV_LABELS = {k: lbl for k, lbl in _NAV}
@@ -9443,6 +9445,201 @@ def page_rsi_scalp():
 </div>""", unsafe_allow_html=True)
 
 
+# ── PAGE: Straddle Tracker ────────────────────────────────────────────────────
+def page_straddle_tracker():
+    _api = st.session_state.get("kite_api_key",      _get_secret("KITE_API_KEY", ""))
+    _tok = st.session_state.get("kite_access_token", "")
+    _ok  = bool(_api and _tok)
+    _IST_TZ = datetime.timezone(datetime.timedelta(hours=5, minutes=30))
+
+    st.markdown("""
+<div style="margin-bottom:6px;">
+  <div style="font-size:1.25rem;font-weight:900;color:#fff;letter-spacing:-0.5px;">🎯 Straddle Tracker — Expected vs Actual Move</div>
+  <div style="font-size:0.78rem;color:#6e7681;margin-top:2px;">T-1 15:20 ATM straddle vs expiry close · same-strike decay at 11:00 · builds an edge log across expiries</div>
+</div>""", unsafe_allow_html=True)
+
+    _c1, _c2, _c3 = st.columns([1.3, 1.6, 1.6])
+    with _c1:
+        _sym = st.selectbox("Index", list(_STT.INSTRUMENTS), key="stt_symbol",
+                            label_visibility="collapsed")
+    with _c2:
+        _rec_btn = st.button("📥 Record latest expiry", key="stt_record", use_container_width=True,
+                             type="primary", disabled=not _ok,
+                             help="Rebuilds today's expiry from Kite candles. Run after 15:30 on expiry day "
+                                  "(earlier = partial record). Expired contracts can't be fetched later.")
+    with _c3:
+        st.markdown(
+            '<div style="color:#6e7681;font-size:0.72rem;padding-top:8px;">'
+            'Auto: <code>straddle_tracker_bot.py --once</code> at 15:45</div>',
+            unsafe_allow_html=True)
+
+    if _rec_btn:
+        with st.spinner(f"Rebuilding {_sym} expiry from Kite candles…"):
+            try:
+                _now = datetime.datetime.now(_IST_TZ).replace(tzinfo=None)
+                _rec = _STT.build_expiry_record(_api, _tok, _sym, None, _now)
+                _STT.upsert_record(_rec)
+                st.success(f"Saved {_sym} {_rec['expiry']} ({_rec['status']}).")
+                st.code(_STT.format_summary_text(_rec), language=None)
+            except Exception as _e:
+                st.error(f"Could not record: {_e}")
+    if not _ok:
+        st.caption("Connect Kite to record automatically. Manual entry and history work without it.")
+
+    _df = _STT.records_df(_sym)
+
+    # ── Manual entry (backfill from your notes / Sensibull) ───────────────────
+    with st.expander("✍️ Add / backfill an expiry manually", expanded=_df.empty):
+        with st.form("stt_manual"):
+            _m1, _m2, _m3 = st.columns(3)
+            with _m1:
+                _me_exp = st.date_input("Expiry date", key="stt_me_exp")
+                _me_t1  = st.date_input("Entry date (T-1)",
+                                        value=datetime.date.today() - datetime.timedelta(days=1),
+                                        key="stt_me_t1")
+                _me_spot = st.number_input("Spot at 15:20", min_value=0.0, step=1.0, key="stt_me_spot")
+                _me_strike = st.number_input("ATM strike", min_value=0.0, step=50.0, key="stt_me_k")
+            with _m2:
+                _me_ce = st.number_input("CE premium", min_value=0.0, step=0.5, key="stt_me_ce")
+                _me_pe = st.number_input("PE premium", min_value=0.0, step=0.5, key="stt_me_pe")
+                _me_vix = st.number_input("India VIX (optional)", min_value=0.0, step=0.1, key="stt_me_vix")
+                _me_mid = st.number_input("Same-strike straddle at 11:00 (optional)",
+                                          min_value=0.0, step=0.5, key="stt_me_mid")
+            with _m3:
+                _me_close = st.number_input("Expiry close", min_value=0.0, step=1.0, key="stt_me_close")
+                _me_high = st.number_input("Expiry high (optional)", min_value=0.0, step=1.0, key="stt_me_hi")
+                _me_low = st.number_input("Expiry low (optional)", min_value=0.0, step=1.0, key="stt_me_lo")
+                _me_tag = st.text_input("Tag (e.g. RBI, Fed, CPI)", key="stt_me_tag")
+            _me_ok = st.form_submit_button("Save expiry")
+        if _me_ok:
+            if min(_me_spot, _me_ce, _me_pe, _me_close) <= 0:
+                st.error("Spot, CE, PE and close are required.")
+            elif _me_t1 >= _me_exp:
+                st.error("Entry date must be before expiry date.")
+            else:
+                _mr = _STT.manual_record(
+                    _sym, _me_exp, _me_t1, _me_spot, _me_strike or round(_me_spot / 50) * 50,
+                    _me_ce, _me_pe, _me_close, _me_high, _me_low, _me_vix, _me_mid, _me_tag.strip())
+                _STT.upsert_record(_mr)
+                st.success(f"Saved {_sym} {_mr['expiry']}.")
+                st.rerun()
+
+    if _df.empty:
+        st.info("No expiries recorded yet. Record today's expiry after 15:30, or backfill manually above.")
+        return
+
+    # ── Headline stats ────────────────────────────────────────────────────────
+    _s = _STT.summarize(_df)
+    if _s.get("n", 0):
+        _k = st.columns(4)
+        _k[0].metric("Expiries", f"{_s['n']}", help="Completed records used in the stats")
+        _k[1].metric("Avg straddle %", f"{_s['avg_straddle_pct']:.2f}%")
+        _k[2].metric("Avg |move| %", f"{_s['avg_abs_move_pct']:.2f}%")
+        _ratio = _s["ratio_of_avgs"]
+        _k[3].metric("Move / Straddle", f"{_ratio:.2f}",
+                     delta=("market over-prices" if _ratio < 1 else "market under-prices"),
+                     delta_color=("normal" if _ratio < 1 else "inverse"),
+                     help="Avg |move| ÷ avg straddle. Below 1 = straddle overestimated the move.")
+        _k2 = st.columns(4)
+        _k2[0].metric("Closed inside range", f"{_s['pct_closed_inside']:.0f}%",
+                      help="~58% expected if straddle is fairly priced (straddle ≈ 0.8σ)")
+        _k2[1].metric("Touched outside intraday",
+                      f"{_s['pct_touched_outside']:.0f}%" if "pct_touched_outside" in _s else "—",
+                      help="High/low after entry crossed spot ± straddle (stop-loss risk for sellers)")
+        _k2[2].metric("Avg decay by 11:00",
+                      f"{_s['avg_decay_pct']:.1f}%" if "avg_decay_pct" in _s else "—",
+                      help="Same strikes re-priced at 11:00 on expiry day")
+        _k2[3].metric("Seller win rate", f"{_s['seller_win_rate']:.0f}%",
+                      delta=f"{_s['seller_total_pts']:+.0f} pts total · worst {_s['seller_worst_pts']:+.0f}",
+                      delta_color="off",
+                      help="Short ATM straddle held to expiry, before costs/slippage")
+        if _s["n"] < 20:
+            st.caption(f"⚠️ {_s['n']} expiries so far — treat as observations until you have 20+, "
+                       f"ideally spread across different VIX regimes.")
+
+        # ── Chart: straddle % vs |move| % ─────────────────────────────────────
+        _done = _df[_df["move_ratio"].notna()] if "move_ratio" in _df.columns else _df.iloc[0:0]
+        if not _done.empty:
+            _fig = make_subplots(specs=[[{"secondary_y": True}]])
+            _fig.add_bar(x=_done["expiry"], y=_done["straddle_pct"], name="Straddle % (expected)",
+                         marker_color="#58a6ff")
+            _fig.add_bar(x=_done["expiry"], y=_done["abs_move_pct"], name="|Move| % (actual)",
+                         marker_color=["#f85149" if o else "#00d4aa" for o in _done["closed_outside"]])
+            _fig.add_scatter(x=_done["expiry"], y=_done["move_ratio"], name="Ratio",
+                             mode="lines+markers", line=dict(color="#e6a817", width=2),
+                             secondary_y=True)
+            _fig.add_hline(y=1.0, line_dash="dot", line_color="#e6a817", secondary_y=True,
+                           annotation_text="ratio 1.0", annotation_font_color="#e6a817")
+            _fig.update_layout(barmode="group", height=340, margin=dict(l=10, r=10, t=30, b=10),
+                               paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+                               font=dict(color="#c9d1d9"), legend=dict(orientation="h", y=1.12),
+                               xaxis=dict(type="category"))
+            _fig.update_yaxes(title_text="% of spot", secondary_y=False, gridcolor="#21262d")
+            _fig.update_yaxes(title_text="ratio", secondary_y=True, showgrid=False)
+            st.plotly_chart(_fig, use_container_width=True, key="stt_chart")
+            st.caption("Red bar = closed outside spot ± straddle · green = inside")
+
+        # ── Segments ──────────────────────────────────────────────────────────
+        _sg1, _sg2 = st.columns(2)
+        with _sg1:
+            st.markdown("**By India VIX at entry**")
+            _seg_v = _STT.segment(_df, "vix_bucket")
+            if _seg_v.empty:
+                st.caption("—")
+            else:
+                st.dataframe(_seg_v, hide_index=True, use_container_width=True)
+        with _sg2:
+            st.markdown("**By event tag**")
+            _seg_t = _STT.segment(_df, "tag")
+            if _seg_t.empty:
+                st.caption("—")
+            else:
+                st.dataframe(_seg_t, hide_index=True, use_container_width=True)
+
+    # ── Expiry log (tags/notes editable) ──────────────────────────────────────
+    st.markdown("**Expiry log**  <span style='color:#6e7681;font-size:0.75rem;'>edit Tag / Notes and save</span>",
+                unsafe_allow_html=True)
+    _cols = [c for c in [
+        "expiry", "entry_date", "entry_spot", "atm_strike", "ce_entry", "pe_entry", "straddle_entry",
+        "straddle_pct", "atm_iv", "vix_entry", "range_low", "range_high", "gap_pct",
+        "mid_same_strike_straddle", "decay_pct", "exp_high", "exp_low", "exp_close",
+        "move_pct", "move_ratio", "closed_outside", "touched_outside", "max_excursion_pct",
+        "seller_pnl_pts", "seller_pnl_per_lot", "status", "source", "tag", "notes",
+    ] if c in _df.columns]
+    _view = _df[_cols].sort_values("expiry", ascending=False).reset_index(drop=True)
+    _edited = st.data_editor(
+        _view, hide_index=True, use_container_width=True, key="stt_editor",
+        disabled=[c for c in _cols if c not in ("tag", "notes")],
+    )
+    _e1, _e2, _e3 = st.columns([1.2, 1.2, 2])
+    with _e1:
+        if st.button("💾 Save tags/notes", key="stt_save_tags", use_container_width=True):
+            for _, _row in _edited.iterrows():
+                _STT.update_annotations(_sym, _row["expiry"], str(_row.get("tag", "") or ""),
+                                        str(_row.get("notes", "") or ""))
+            st.success("Saved.")
+            st.rerun()
+    with _e2:
+        st.download_button("⬇ CSV", _view.to_csv(index=False), f"{_sym}_straddle_tracker.csv",
+                           "text/csv", use_container_width=True, key="stt_dl")
+    with _e3:
+        _del = st.selectbox("Delete expiry", ["—"] + list(_view["expiry"]), key="stt_del",
+                            label_visibility="collapsed")
+        if _del != "—" and st.button(f"🗑 Delete {_del}", key="stt_del_btn"):
+            _STT.delete_record(_sym, _del)
+            st.rerun()
+
+    with st.expander("📖 How to read this", expanded=False):
+        st.markdown("""
+- **Straddle %** = (ATM CE + PE at 15:20 on the day before expiry) ÷ spot. It prices the *average absolute* move, roughly **0.8 × one standard deviation**.
+- So even with fair pricing, expiry closes **outside** spot ± straddle about **40%** of the time. One breach means little — watch the **Move / Straddle ratio** across many expiries.
+- **Decay by 11:00** re-prices the **same strikes** you'd have sold at T-1, so it isn't distorted by the ATM strike shifting. Check *spot drift* in the log: a big drift means the drop isn't pure theta.
+- **Touched outside** uses the high/low from entry to expiry close — the stop-loss risk a seller actually faces.
+- **Seller P&L** = straddle − |close − strike|, held to expiry, **before** STT, brokerage and slippage.
+- Records are rebuilt from Kite candles on expiry day only; Kite drops expired contracts the next day. Backfill old expiries manually.
+""")
+
+
 # ── Page routing ──────────────────────────────────────────────────────────────
 {
     "smart_alerts_pro": page_smart_alerts_pro,
@@ -9461,4 +9658,5 @@ def page_rsi_scalp():
     "chart_analysis":   page_chart_analysis,
     "cpr_adx":          page_cpr_adx,
     "rsi_scalp":        page_rsi_scalp,
+    "straddle_tracker": page_straddle_tracker,
 }.get(_cur_page, page_smart_alerts_pro)()
