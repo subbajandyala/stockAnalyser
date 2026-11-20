@@ -17,7 +17,10 @@ Every 5 minutes, ~20 s after a 5-min candle closes (09:20–15:30 IST, Mon–Fri
 
 .env: IOS_AUTO_TRADE=0 (1 = real orders) · IOS_NTFY_TOPIC=index-oi-structure · IOS_LOTS=1 ·
       IOS_SYMBOLS=NIFTY,BANKNIFTY,SENSEX · IOS_MAX_TRADES=3 · IOS_MAX_LOSSES=2 · IOS_OI_NEED=2 ·
-      IOS_PUSH_SKIPS=1 (also push setups that the OI check blocked) · IOS_SCAN_DELAY=20 (s after the
+      IOS_PUSH_SKIPS=1 (also push setups that the OI check blocked) · IOS_FLOOR=1 (CE: put OI at the strike at /
+      below the entry up ≥ 1 % in ~15 min — a floor; PE: call OI above) · IOS_EXHAUST=1 (no buy when a wall the
+      price just crossed is ≥ 40 % covered from today's peak and flat) · IOS_VIX_UP=4 (no buy when India VIX is
+      up ≥ 4 % in 30 min) — these three are off unless set · IOS_SCAN_DELAY=20 (s after the
       5-min close; 45 on a machine that also runs the OI monitor, so their Kite calls don't collide)
 Usage: python scripts/index_bot.py [--once] [--dry-run] [--force]
 """
@@ -85,6 +88,9 @@ class Ctx:
         self.max_losses = int(env.get("IOS_MAX_LOSSES", "2"))
         self.oi_need = int(env.get("IOS_OI_NEED", str(ios.OI_NEED)))
         self.push_skips = env.get("IOS_PUSH_SKIPS", "1") == "1"
+        self.floor = float(env.get("IOS_FLOOR", "0") or 0)          # e.g. 1: floor (opposite writers) at the entry
+        self.exhaust = env.get("IOS_EXHAUST", "0") == "1"           # no buy when the crossed wall's squeeze is done
+        self.vix_up = float(env.get("IOS_VIX_UP", "0") or 0)        # e.g. 4: no buy when VIX is up ≥ 4 % in 30 min
         self.key = env.get("KITE_API_KEY", "")
         self.token = env.get("KITE_ACCESS_TOKEN", "")
 
@@ -266,8 +272,43 @@ def gather(kite, sym: str, now: datetime.datetime, cache: dict) -> dict | None:
         rec_spot = float(rec["spot"].iloc[0]) if rec is not None and "spot" in rec and len(rec) else None
         cv = ios.chain_view(ch, base, rec, spot, rec_spot)
         ch.to_csv(day_dir(day) / f"{sym}_{now:%H%M}.csv.gz", index=False)
+        g_rec = rec
+    else:
+        g_rec = None
     return {"sym": sym, "now": now, "m5": m5, "m15": m15, "daily": cache[sym], "spot": spot,
-            "fut": fut, "cv": cv, "chain": ch, "expiry": exp}
+            "fut": fut, "cv": cv, "chain": ch, "expiry": exp, "rec": g_rec}
+
+
+def day_peaks(sym: str, day: datetime.date) -> dict:
+    """(strike, type) → today's highest OI, from the chains saved today."""
+    frames = []
+    for p in sorted(day_dir(day).glob(f"{sym}_[0-9][0-9][0-9][0-9].csv.gz")):
+        try:
+            frames.append(pd.read_csv(p, usecols=["strike", "type", "oi"]))
+        except Exception:
+            pass
+    return pd.concat(frames).groupby(["strike", "type"])["oi"].max().to_dict() if frames else {}
+
+
+def refine_block(ctx: Ctx, kite, g: dict, s) -> str | None:
+    """The optional entry checks (IOS_FLOOR / IOS_EXHAUST / IOS_VIX_UP) → why not to buy, or None."""
+    if ctx.vix_up:
+        try:
+            w = ios.vix_jump(candles(kite, 264969, 1, "5minute", g["now"]), ctx.vix_up)
+        except Exception as ex:
+            w = None
+            LOG.info(f"VIX n/a: {ex}")
+        if w:
+            return "📈 " + w
+    if ctx.exhaust:
+        w = ios.cover_exhausted(s.side, g["spot"], g["chain"], g.get("rec"), day_peaks(g["sym"], g["now"].date()))
+        if w:
+            return "⛽ " + w
+    if ctx.floor:
+        ok, txt = ios.floor_check(s.side, s.entry, g["chain"], g.get("rec"), ctx.floor)
+        if not ok:
+            return f"🧱 no new floor at the entry ({txt}, needs +{ctx.floor:g}%)"
+    return None
 
 
 # ── trades ─────────────────────────────────────────────────────────────────────────────────
@@ -385,6 +426,12 @@ def enter(ctx: Ctx, kite, st: dict, g: dict) -> None:
             LOG.info(f"{sym} {s.side} setup blocked by OI")
             if ctx.push_skips:
                 push(ctx, f"IOS {sym} {s.side} setup - OI says no", head, "low", "pause_button")
+            continue
+        blk = refine_block(ctx, kite, g, s)
+        if blk:
+            LOG.info(f"{sym} {s.side} setup blocked: {blk}")
+            if ctx.push_skips:
+                push(ctx, f"IOS {sym} {s.side} setup - no buy", f"{blk}\n\n{head}", "low", "pause_button")
             continue
         tr = ios.new_trade(s, ctx.lots)
         tr["paper"] = not ctx.auto

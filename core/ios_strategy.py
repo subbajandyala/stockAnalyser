@@ -273,3 +273,65 @@ def manage_step(tr: dict, m5: pd.DataFrame, oi_against: bool = False) -> tuple[s
     if oi_against:
         return "exit", "OI against the trade"
     return None, ""
+
+
+# ── entry refinements (index_bot .env switches, all off by default) ───────────────────────────
+
+def floor_check(side: str, price: float, now: pd.DataFrame, recent: pd.DataFrame | None,
+                pct: float) -> tuple[bool, str]:
+    """IOS_FLOOR: the writers build a floor where the trade is entered — CE: put OI at the strike at / below the
+    entry up ≥ pct % over ~15 min (PE: call OI at the strike at / above it)."""
+    if now is None or now.empty or recent is None or recent.empty:
+        return False, "no chain from ~15 min ago"
+    strikes = sorted(now["strike"].unique())
+    ce = side == "CE"
+    pick = [k for k in strikes if k <= price] if ce else [k for k in strikes if k >= price]
+    if not pick:
+        return False, "no strike at the entry"
+    k = pick[-1] if ce else pick[0]
+    typ = "PE" if ce else "CE"
+    a = now[(now["type"] == typ) & (now["strike"] == k)]["oi"].sum()
+    b = recent[(recent["type"] == typ) & (recent["strike"] == k)]["oi"].sum()
+    if not b:
+        return False, f"no OI at {k:g} 15 min ago"
+    chg = (a / b - 1) * 100
+    txt = f"{'puts' if ce else 'calls'} at {k:g} {chg:+.1f}% in 15 min"
+    return chg >= pct, txt
+
+
+def cover_exhausted(side: str, spot: float, now: pd.DataFrame, recent: pd.DataFrame | None, peaks: dict,
+                    drop: float = 40.0, flat: float = 1.0, within_pct: float = 0.5) -> str | None:
+    """IOS_EXHAUST: a wall the price just crossed (CE: calls at strikes within within_pct % below the price; PE:
+    puts above) has already lost ≥ drop % of today's peak OI and the last ~15 min are flat — the squeeze is
+    used up. → reason or None."""
+    if now is None or now.empty:
+        return None
+    ce = side == "CE"
+    typ = "CE" if ce else "PE"
+    rows = now[now["type"] == typ]
+    crossed = rows[(rows["strike"] <= spot) & (rows["strike"] >= spot * (1 - within_pct / 100))] if ce else \
+        rows[(rows["strike"] >= spot) & (rows["strike"] <= spot * (1 + within_pct / 100))]
+    for _, r in crossed.iterrows():
+        k, oi = float(r["strike"]), float(r["oi"])
+        peak = peaks.get((k, typ)) or 0
+        if peak <= 0 or oi <= 0:
+            continue
+        gone = (1 - oi / peak) * 100
+        prev = recent[(recent["type"] == typ) & (recent["strike"] == k)]["oi"].sum() if recent is not None else 0
+        last = (oi / prev - 1) * 100 if prev else 0.0
+        if gone >= drop and last > -flat:
+            return (f"{'call' if ce else 'put'} wall {k:g} already {gone:.0f}% covered from today's peak and the "
+                    f"covering stopped ({last:+.1f}% in 15 min) — squeeze used up")
+    return None
+
+
+def vix_jump(vix5: pd.DataFrame, pct: float, bars: int = 6) -> str | None:
+    """IOS_VIX_UP: India VIX up ≥ pct % over the last `bars` closed 5-min candles (30 min) — option premiums
+    are inflated and can collapse. → reason or None."""
+    if vix5 is None or len(vix5) <= bars:
+        return None
+    a, b = float(vix5["close"].iloc[-1]), float(vix5["close"].iloc[-1 - bars])
+    if b <= 0:
+        return None
+    up = (a / b - 1) * 100
+    return f"India VIX {b:.2f} → {a:.2f} ({up:+.1f}%) in 30 min — premiums inflated" if up >= pct else None
