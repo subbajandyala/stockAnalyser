@@ -34,6 +34,8 @@ SCAN_RE = re.compile(r"^\[(\d\d):(\d\d)\] \d+ stocks")
 START_RE = re.compile(r"^(🟢|🔴) (\S+) ([\d.]+).* — START (CE|PE): broke (?:above|below) the last hour's (?:high|low) "
                       r"([\d.]+) .*— BUY ([\d.]+) (?:CE|PE) @ ₹([\d.]+)")
 STOP_RE = re.compile(r"stop: stock back (?:below|above) ([\d.]+)")
+RETEST_RE = re.compile(r"^(🟢|🔴) (\S+) (CE|PE) — ✅ RETEST BUY ([\d.]+) (?:CE|PE) @ ₹([\d.]+): pulled back to "
+                       r"([\d.]+) \(now ([\d.]+)")
 ORDER_RE = re.compile(r"^\s+order (✓|✗) (\S+) (\d+) @ ₹([\d.]+)\s*\S* — (.*)$")
 
 
@@ -48,6 +50,13 @@ def log_days(log: pathlib.Path) -> list[list[dict]]:
                 cur = []
                 days.append(cur)
             last_t, s = t, None
+            continue
+        m = RETEST_RE.match(line)
+        if m and cur is not None:                   # OI_ENTRY=retest: the buy comes on a later scan
+            s = {"hm": last_t, "name": m.group(2), "side": m.group(3), "spot": float(m.group(7)),
+                 "level": float(m.group(6)), "strike": float(m.group(4)), "entry": float(m.group(5)),
+                 "order": "", "ts": None, "qty": 0}
+            cur.append(s)
             continue
         m = START_RE.match(line)
         if m and cur is not None:
@@ -76,7 +85,7 @@ def log_days(log: pathlib.Path) -> list[list[dict]]:
 
 def follow(s: dict, files: list) -> dict:
     tr = {"side": s["side"], "entry": s["entry"], "ts": s["ts"], "stop": s["stop"], "entry_spot": s["spot"],
-          "level": s["level"]}
+          "level": s["level"], "opened": s["hm"]}
     later = [f for f in files if f.name[:4] > s["hm"]]
     last = None
     for f in later:
@@ -90,7 +99,9 @@ def follow(s: dict, files: list) -> dict:
         if tr.get("last_prem"):
             last = (hm, tr["last_prem"])
         if kind:
-            return {"exit_hm": hm, "exit": prem, "kind": kind, "why": why}
+            if why.startswith("stop-loss"):             # the SL order in Kite fills near its trigger
+                prem = s["entry"] * (1 - oi_exit.SL_PCT / 100) * 0.97
+            return {"exit_hm": hm, "exit": round(prem, 2), "kind": kind, "why": why}
     if last:
         return {"exit_hm": last[0], "exit": last[1], "kind": "end", "why": "no exit by the last snapshot"}
     return {"exit_hm": "", "exit": None, "kind": "n/a", "why": "option not in the snapshots"}
@@ -101,6 +112,12 @@ def main() -> None:
     ap.add_argument("--date", help="YYYY-MM-DD (default: the newest day in the log)")
     ap.add_argument("--log", default=str(mon.ROOT / "oi_monitor.log"))
     a = ap.parse_args()
+    e = mon.env()                                   # the same exit settings as the live bot
+    oi_exit.SL_PCT = float(e.get("OI_SL_ORDER") or 0)
+    oi_exit.TP_MIN = float(e.get("OI_TP_MIN") or 0)
+    oi_exit.TP_NEED_OI = e.get("OI_TP_NEED_OI", "0") == "1"
+    oi_exit.TIME_STOP = int(float(e.get("OI_TIME_STOP") or 0))
+    oi_exit.LOCK_AT_PCT = float(e.get("OI_LOCK_AT") or oi_exit.LOCK_AT_PCT)
     days = log_days(pathlib.Path(a.log))
     dates = sorted(d.name for d in mon.DATA.iterdir() if d.is_dir() and d.name[:2] == "20" and mon.snap_files(
         datetime.date.fromisoformat(d.name)))

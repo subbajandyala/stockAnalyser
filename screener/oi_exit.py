@@ -13,6 +13,13 @@ in the one ~10 min older, and the trade's own option (sold at its bid). In order
                     b  bounce: the stock has given back ≥ RETRACE_PCT of its move since the entry
                     c  momentum: the stock is back against the trade vs ~10 min ago
   5 lock profit   once the premium was LOCK_AT_PCT up, out if half of that best gain is given back
+Optional (all off by default, set from .env by scripts/oi_monitor_bot.py):
+  SL_PCT          premium SL_PCT below the entry → out (the live bot also places this as a real SL order in
+                  Kite right after the fill, so it triggers at once; this check is the backstop)
+  TP_MIN          the take-profit-on-the-turn needs at least this % (instead of MIN_PROFIT_PCT)
+  TP_NEED_OI      … and the OI sign (a) must be one of the two signs (the two price signs alone usually fire
+                  together on any small dip)
+  TIME_STOP       a trade that is not at least TIME_GAIN % up after this many minutes → out ("not working")
 """
 
 from __future__ import annotations
@@ -26,6 +33,15 @@ MIN_PROFIT_PCT = 5.0
 FLIP_PCT = 1.5
 RETRACE_PCT = 35.0
 LOCK_AT_PCT = 20.0
+SL_PCT = 0.0
+TP_MIN = 0.0
+TP_NEED_OI = False
+TIME_STOP = 0
+TIME_GAIN = 5.0
+
+
+def _mins(a_hm: str, b_hm: str) -> int:
+    return (int(b_hm[:2]) * 60 + int(b_hm[2:4])) - (int(a_hm[:2]) * 60 + int(a_hm[2:4]))
 
 
 def _near(now: pd.DataFrame, prev: pd.DataFrame, typ: str, keep: set) -> float | None:
@@ -57,11 +73,16 @@ def check(tr: dict, g: pd.DataFrame, gp: pd.DataFrame | None, hm: str) -> tuple[
         return "time", f"{EXIT_BY[:2]}:{EXIT_BY[2:]} square-off", prem
     if (spot < tr["stop"]) if ce else (spot > tr["stop"]):
         return "stop", f"move failed — stock {spot:g} back {'below' if ce else 'above'} {tr['stop']:g}", prem
+    if SL_PCT and gain <= -SL_PCT:
+        return "stop", f"stop-loss −{SL_PCT:g}% (premium {gain:+.0f}%)", prem
     if gain <= -HARD_STOP_PCT:
         return "stop", f"premium {gain:+.0f}% (hard stop −{HARD_STOP_PCT:g}%)", prem
     best_gain = (tr["best_prem"] / e - 1) * 100
     locked = best_gain >= LOCK_AT_PCT and gain <= best_gain / 2
-    if gain < MIN_PROFIT_PCT or gp is None or gp.empty:
+    if TIME_STOP and tr.get("opened") and _mins(tr["opened"], hm) >= TIME_STOP and gain < TIME_GAIN \
+            and best_gain < LOCK_AT_PCT:
+        return "stop", f"not working — {gain:+.0f}% after {_mins(tr['opened'], hm)} min (needs +{TIME_GAIN:g}%)", prem
+    if gain < (TP_MIN or MIN_PROFIT_PCT) or gp is None or gp.empty:
         if locked:
             return "profit", f"gave back half of the best +{best_gain:.0f}% (now {gain:+.0f}%)", prem
         return None, "", None
@@ -82,7 +103,7 @@ def check(tr: dict, g: pd.DataFrame, gp: pd.DataFrame | None, hm: str) -> tuple[
     sp = float(gp["spot"].iloc[0])
     if (spot < sp) if ce else (spot > sp):
         signs.append(f"stock turned ({sp:g} → {spot:g} in 10 min)")
-    if len(signs) >= 2:
+    if len(signs) >= 2 and (not TP_NEED_OI or signs[0].startswith("OI turning")):
         return "profit", f"take profit {gain:+.0f}% — the move is turning: " + " · ".join(signs), prem
     if locked:
         return "profit", f"gave back half of the best +{best_gain:.0f}% (now {gain:+.0f}%)", prem
