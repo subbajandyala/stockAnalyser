@@ -21,7 +21,9 @@ Every 5 minutes, ~20 s after a 5-min candle closes (09:20–15:30 IST, Mon–Fri
       below the entry up ≥ 1 % in ~15 min — a floor; PE: call OI above) · IOS_EXHAUST=1 (no buy when a wall the
       price just crossed is ≥ 40 % covered from today's peak and flat) · IOS_VIX_UP=4 (no buy when India VIX is
       up ≥ 4 % in 30 min) — these three are off unless set · IOS_ENGINE=unified (core/unified.py: 15-min Supertrend,
-      pivots R1 / S1, a Bollinger super candle arms it, an inside bar / pin bar after it triggers; default structure) · IOS_SCAN_DELAY=20 (s after the
+      pivots R1 / S1, a Bollinger super candle arms it, an inside bar / pin bar after it triggers; default structure)
+      · TT_AUTO=1 + TT_TOKEN_INDEX (+ TT_LOTS=1): mirror each NIFTY / SENSEX entry and exit to the Tradetron Signal
+      Bridge (core/tradetron.py) → Sharekhan; sent even when the Kite order is rejected · IOS_SCAN_DELAY=20 (s after the
       5-min close; 45 on a machine that also runs the OI monitor, so their Kite calls don't collide)
 Usage: python scripts/index_bot.py [--once] [--dry-run] [--force]
 """
@@ -46,6 +48,7 @@ sys.path.insert(0, str(ROOT))
 from core import ios_strategy as ios      # noqa: E402
 from core import kite_order as ko         # noqa: E402
 from core import unified as un            # noqa: E402
+from core import tradetron as ttb         # noqa: E402
 
 IST = datetime.timezone(datetime.timedelta(hours=5, minutes=30))
 DATA = ROOT / "data" / "ios"
@@ -94,6 +97,7 @@ class Ctx:
         self.exhaust = env.get("IOS_EXHAUST", "0") == "1"           # no buy when the crossed wall's squeeze is done
         self.vix_up = float(env.get("IOS_VIX_UP", "0") or 0)        # e.g. 4: no buy when VIX is up ≥ 4 % in 30 min
         self.engine = env.get("IOS_ENGINE", "structure").lower()    # unified = core/unified.py (super candle → IB / pin)
+        self.env = env                                                # TT_AUTO / TT_TOKEN_INDEX / TT_LOTS: Tradetron mirror
         self.key = env.get("KITE_API_KEY", "")
         self.token = env.get("KITE_ACCESS_TOKEN", "")
 
@@ -349,6 +353,10 @@ def close_trade(ctx: Ctx, kite, st: dict, sym: str, why: str, px: float) -> None
                     push(ctx, f"IOS {sym} EXIT FAILED", f"{why}: {info} — retry next scan", "high", "warning")
                     return
         pnl = ko.contract_pnl(kite, tr["ts"])
+    if tr.get("tt"):                                                  # Tradetron mirror (Sharekhan)
+        tt_line = ttb.signal(ctx.env, sym, tr["side"], "BUY EXIT")
+        if tt_line:
+            info = (info + "\n" if info else "") + tt_line
     loss = (pnl < 0) if pnl is not None else pts < 0
     st["losses"] += loss
     tr.update({"exit": why, "pts": round(pts, 1), "R": round(pts / tr["risk"], 2), "pnl": pnl,
@@ -487,6 +495,9 @@ def place(ctx: Ctx, kite, st: dict, g: dict, s, head: str) -> None:
     sym = g["sym"]
     tr = ios.new_trade(s, ctx.lots)
     tr["paper"] = not ctx.auto
+    tt_line = ttb.signal(ctx.env, sym, s.side, "BUY") if not ctx.dry else None
+    if tt_line and "sent" in tt_line:
+        tr["tt"] = ttb.item(sym, s.side)
     if ctx.auto:
         ko.MAX_LOTS[sym] = ctx.lots
         res = ko.place_order_for_signal(sym, s.side, g["spot"], ctx.key, ctx.token, chart_sl=s.stop,
@@ -508,6 +519,8 @@ def place(ctx: Ctx, kite, st: dict, g: dict, s, head: str) -> None:
         top = f"ALERT (IOS_AUTO_TRADE=0, no order): BUY {tr['ts'] or sym + ' ATM ' + s.side}" + \
               (f" ~₹{o['ltp'].iloc[0]:.2f}" if len(o) else "")
     st["open"][sym] = tr
+    if tt_line:
+        top += f"\n{tt_line}"
     push(ctx, f"IOS {sym} BUY {s.side} - {s.kind}", top + "\n\n" + head, "urgent" if ctx.auto else "high",
          "chart_with_upwards_trend" if s.side == "CE" else "chart_with_downwards_trend")
 
