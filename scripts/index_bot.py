@@ -20,7 +20,8 @@ Every 5 minutes, ~20 s after a 5-min candle closes (09:20–15:30 IST, Mon–Fri
       IOS_PUSH_SKIPS=1 (also push setups that the OI check blocked) · IOS_FLOOR=1 (CE: put OI at the strike at /
       below the entry up ≥ 1 % in ~15 min — a floor; PE: call OI above) · IOS_EXHAUST=1 (no buy when a wall the
       price just crossed is ≥ 40 % covered from today's peak and flat) · IOS_VIX_UP=4 (no buy when India VIX is
-      up ≥ 4 % in 30 min) — these three are off unless set · IOS_SCAN_DELAY=20 (s after the
+      up ≥ 4 % in 30 min) — these three are off unless set · IOS_ENGINE=unified (core/unified.py: 15-min Supertrend,
+      pivots R1 / S1, a Bollinger super candle arms it, an inside bar / pin bar after it triggers; default structure) · IOS_SCAN_DELAY=20 (s after the
       5-min close; 45 on a machine that also runs the OI monitor, so their Kite calls don't collide)
 Usage: python scripts/index_bot.py [--once] [--dry-run] [--force]
 """
@@ -44,6 +45,7 @@ sys.path.insert(0, str(ROOT))
 
 from core import ios_strategy as ios      # noqa: E402
 from core import kite_order as ko         # noqa: E402
+from core import unified as un            # noqa: E402
 
 IST = datetime.timezone(datetime.timedelta(hours=5, minutes=30))
 DATA = ROOT / "data" / "ios"
@@ -91,6 +93,7 @@ class Ctx:
         self.floor = float(env.get("IOS_FLOOR", "0") or 0)          # e.g. 1: floor (opposite writers) at the entry
         self.exhaust = env.get("IOS_EXHAUST", "0") == "1"           # no buy when the crossed wall's squeeze is done
         self.vix_up = float(env.get("IOS_VIX_UP", "0") or 0)        # e.g. 4: no buy when VIX is up ≥ 4 % in 30 min
+        self.engine = env.get("IOS_ENGINE", "structure").lower()    # unified = core/unified.py (super candle → IB / pin)
         self.key = env.get("KITE_API_KEY", "")
         self.token = env.get("KITE_ACCESS_TOKEN", "")
 
@@ -372,7 +375,11 @@ def manage(ctx: Ctx, kite, st: dict, g: dict) -> None:
     if g["now"].time().replace(tzinfo=None) >= ios.SQUARE_OFF:          # clock, not only the candle time
         act, why = "exit", "15:15 square-off"
     else:
-        act, why = ios.manage_step(tr, g["m5"], against)
+        why_u = None
+        if str(tr.get("kind", "")).startswith("U "):                      # unified: back past R1 / S1, 15-min ST turned
+            pv = un.pivots(g["daily"], g["now"].date())
+            why_u = un.extra_exit(tr, g["m5"], g["m15"], pv) if pv else None
+        act, why = ("exit", why_u) if why_u else ios.manage_step(tr, g["m5"], against)
     c = float(g["m5"]["close"].iloc[-1])
     if act == "book_half":
         tr["half_pts"] = (tr["target"] - tr["entry"]) * (1 if tr["side"] == "CE" else -1)
@@ -410,6 +417,9 @@ def enter(ctx: Ctx, kite, st: dict, g: dict) -> None:
     if sym in st["open"] or st["trades"] >= ctx.max_trades or st["losses"] >= ctx.max_losses or event_day(day):
         return
     cv = g["cv"]
+    if ctx.engine == "unified":
+        enter_unified(ctx, kite, st, g)
+        return
     setups, why = ios.find_setups(sym, g["m5"], g["m15"], g["daily"], day, (cv.get("call_wall"), cv.get("put_wall")))
     for w in why:
         LOG.info(f"{sym} dropped: {w}")
@@ -433,32 +443,73 @@ def enter(ctx: Ctx, kite, st: dict, g: dict) -> None:
             if ctx.push_skips:
                 push(ctx, f"IOS {sym} {s.side} setup - no buy", f"{blk}\n\n{head}", "low", "pause_button")
             continue
-        tr = ios.new_trade(s, ctx.lots)
-        tr["paper"] = not ctx.auto
-        if ctx.auto:
-            ko.MAX_LOTS[sym] = ctx.lots
-            res = ko.place_order_for_signal(sym, s.side, g["spot"], ctx.key, ctx.token, chart_sl=s.stop,
-                                            chart_target=s.target, trailing=ctx.lots >= 2)
-            st["trades"] += 1
-            if res.get("error"):
-                push(ctx, f"IOS {sym} {s.side} ORDER FAILED", f"{res['error']}\n\n{head}", "high", "warning")
-                return
-            tr.update({"ts": res["tradingsymbol"], "qty": res["qty"], "entry_price": res["entry_price"],
-                       "sl": res["sl"], "gtt_target": res["target"], "gtt_id": res["gtt_id"]})
-            top = (f"BUY {res['tradingsymbol']} × {res['qty']} @ ₹{res['entry_price']:.2f} · GTT stop ₹{res['sl']}"
-                   f" / target ₹{res['target']}")
-        else:
-            st["trades"] += 1
-            row = g["chain"]
-            atm = round(g["spot"] / INDEX[sym]["step"]) * INDEX[sym]["step"]
-            o = row[(row["strike"] == atm) & (row["type"] == s.side)] if len(row) else row
-            tr["ts"] = o["ts"].iloc[0] if len(o) else None
-            top = f"ALERT (IOS_AUTO_TRADE=0, no order): BUY {tr['ts'] or sym + ' ATM ' + s.side}" + \
-                  (f" ~₹{o['ltp'].iloc[0]:.2f}" if len(o) else "")
-        st["open"][sym] = tr
-        push(ctx, f"IOS {sym} BUY {s.side} - {s.kind}", top + "\n\n" + head, "urgent" if ctx.auto else "high",
-             "chart_with_upwards_trend" if s.side == "CE" else "chart_with_downwards_trend")
+        place(ctx, kite, st, g, s, head)
         return
+
+
+def enter_unified(ctx: Ctx, kite, st: dict, g: dict) -> None:
+    """IOS_ENGINE=unified: super candle → inside bar / pin bar (core/unified.py), then the OI check and the
+    optional floor / exhaustion / VIX checks, then the same order as the structure engine."""
+    sym, cv = g["sym"], g["cv"]
+    last = str(g["m5"].index[-1]) if len(g["m5"]) else ""
+    seen = st.setdefault("uni_last", {})
+    if not last or seen.get(sym) == last:                     # each closed 5-min candle once
+        return
+    seen[sym] = last
+    state = st.setdefault("uni", {}).setdefault(sym, {})
+    kind, d = un.live_step(sym, g["m5"], g["m15"], g["daily"], g["now"].date(), state)
+    if kind == "info":
+        LOG.info(d["text"])
+        push(ctx, f"IOS {sym} unified", d["text"], "low", "eyes")
+        return
+    if kind != "enter":
+        return
+    s = un.to_setup(sym, d)
+    pts, reasons, against = ios.oi_check(s.side, cv, g["fut"])
+    head = (f"{s.side} {s.kind} after a super candle · {s.level}\nentry {s.entry:,.1f} · stop {s.stop:,.1f} "
+            f"(risk {s.risk:.0f}) · T1 {s.target:,.1f} = {s.target_label} ({s.rr:.1f}R)\n"
+            f"OI {pts}/4: {'; '.join(reasons) or 'none'}{' · OI AGAINST' if against else ''}\n{describe(g)}")
+    if pts < ctx.oi_need or against:
+        LOG.info(f"{sym} unified {s.side} blocked by OI")
+        if ctx.push_skips:
+            push(ctx, f"IOS {sym} {s.side} unified setup - OI says no", head, "low", "pause_button")
+        return
+    blk = refine_block(ctx, kite, g, s)
+    if blk:
+        if ctx.push_skips:
+            push(ctx, f"IOS {sym} {s.side} unified setup - no buy", f"{blk}\n\n{head}", "low", "pause_button")
+        return
+    place(ctx, kite, st, g, s, head)
+
+
+def place(ctx: Ctx, kite, st: dict, g: dict, s, head: str) -> None:
+    """Open the trade for setup s: a real order (IOS_AUTO_TRADE=1) or an alert, and the push."""
+    sym = g["sym"]
+    tr = ios.new_trade(s, ctx.lots)
+    tr["paper"] = not ctx.auto
+    if ctx.auto:
+        ko.MAX_LOTS[sym] = ctx.lots
+        res = ko.place_order_for_signal(sym, s.side, g["spot"], ctx.key, ctx.token, chart_sl=s.stop,
+                                        chart_target=s.target, trailing=ctx.lots >= 2)
+        st["trades"] += 1
+        if res.get("error"):
+            push(ctx, f"IOS {sym} {s.side} ORDER FAILED", f"{res['error']}\n\n{head}", "high", "warning")
+            return
+        tr.update({"ts": res["tradingsymbol"], "qty": res["qty"], "entry_price": res["entry_price"],
+                   "sl": res["sl"], "gtt_target": res["target"], "gtt_id": res["gtt_id"]})
+        top = (f"BUY {res['tradingsymbol']} × {res['qty']} @ ₹{res['entry_price']:.2f} · GTT stop ₹{res['sl']}"
+               f" / target ₹{res['target']}")
+    else:
+        st["trades"] += 1
+        row = g["chain"]
+        atm = round(g["spot"] / INDEX[sym]["step"]) * INDEX[sym]["step"]
+        o = row[(row["strike"] == atm) & (row["type"] == s.side)] if len(row) else row
+        tr["ts"] = o["ts"].iloc[0] if len(o) else None
+        top = f"ALERT (IOS_AUTO_TRADE=0, no order): BUY {tr['ts'] or sym + ' ATM ' + s.side}" + \
+              (f" ~₹{o['ltp'].iloc[0]:.2f}" if len(o) else "")
+    st["open"][sym] = tr
+    push(ctx, f"IOS {sym} BUY {s.side} - {s.kind}", top + "\n\n" + head, "urgent" if ctx.auto else "high",
+         "chart_with_upwards_trend" if s.side == "CE" else "chart_with_downwards_trend")
 
 
 def scan(dry: bool = False, force: bool = False, cache: dict | None = None) -> None:
