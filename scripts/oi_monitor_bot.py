@@ -35,6 +35,9 @@ Trigger (OI_TRIGGER): start (default) = trade the stock when a move BEGINS — s
   nothing more; a trade AGAINST it, or any trade on a FLAT day, needs the writers on the other side building in
   the same 10 min (short / PE: near-ATM calls added ≥ 1.5 %; buy / CE: puts added ≥ 1.5 %) — covering alone is
   not enough. Replaces the NIFTY ±0.5 % block. 0 / not set = the old block.
+  TT_AUTO=1 + TT_TOKEN_EQ (+ TT_EQ_BASKET): mirror every start trade to a Tradetron Signal Bridge
+  (screener/tradetron.py) → Sharekhan: BUY / SELL <qty> at entry, BUY EXIT / SELL EXIT at the bot's exit; stocks
+  outside the bridge's basket are skipped. Settings in .env.local override .env (for a second copy of the bot).
   strong = the old trigger below (STRONG vs yesterday's close, then the rules).
 Order rules for OI_TRIGGER=strong (screener/oi_rules.py, OI_NEW_RULES=1 default; 0 = buy every new signal):
   before 09:40      EARLY — decided at the first scan from 09:40 where the stock is still STRONG
@@ -84,6 +87,7 @@ from kiteconnect import KiteConnect
 from screener import levels
 from screener import oi_monitor as om
 from screener import oi_start
+from screener import tradetron as ttb
 from screener import oi_exit
 from screener import alert_candle as ac
 from screener import oi_rules as rules
@@ -102,14 +106,16 @@ PUSH_MAX_BYTES = 3500
 
 
 def env() -> dict:
+    """.env (credentials; on a droplet a link to /root/stockAnalyser/.env), then .env.local, whose lines win —
+    so a second copy of this bot can run with its own settings without touching the shared file."""
     e = {}
-    p = ROOT / ".env"
-    if p.exists():
-        for line in p.read_text().splitlines():
-            line = line.strip()
-            if "=" in line and not line.startswith("#"):
-                k, v = line.split("=", 1)
-                e[k.strip()] = v.strip().strip('"').strip("'")
+    for p in (ROOT / ".env", ROOT / ".env.local"):
+        if p.exists():
+            for line in p.read_text().splitlines():
+                line = line.strip()
+                if "=" in line and not line.startswith("#"):
+                    k, v = line.split("=", 1)
+                    e[k.strip()] = v.strip().strip('"').strip("'")
     return e
 
 
@@ -700,6 +706,8 @@ def main() -> None:
                 if q is not None and ((tr["side"] == "CE" and q <= 0) or (tr["side"] == "PE" and q >= 0)):
                     tr.update({"closed": hm, "why": "closed outside the bot (by hand / Zerodha)"})
                     logs.append(f"{tr['name']} {tr['side']}: position no longer held — closed outside the bot")
+                    if tr.get("tt") and not a.dry_run:
+                        logs.append(ttb.signal(e, tr["name"], tr["side"], "EXIT")[1] or "")
                     continue
             g_now = snap[snap["name"] == tr["name"]]
             g_prev = prev_df[prev_df["name"] == tr["name"]] if prev_df is not None else None
@@ -716,6 +724,10 @@ def main() -> None:
                 if not ok:
                     pushes.append(f"⚠️ EXIT FAILED — {tr['name']} {tr['side']}: {why} — {info}")
                     continue
+            if tr.get("tt") and not a.dry_run:                   # Tradetron mirror (Sharekhan)
+                tt_line = ttb.signal(e, tr["name"], tr["side"], "EXIT")[1]
+                if tt_line:
+                    info = f"{info}\n   {tt_line}"
             pct = (1 if tr["side"] == "CE" else -1) * (px / tr["entry"] - 1) * 100
             pnl = pct / 100 * tr["entry"] * tr.get("qty", 0)
             tr.update({"closed": hm, "why": why, "exit": px, "pct": round(pct, 2)})
@@ -767,13 +779,16 @@ def main() -> None:
                 ctx = mk[1]
             fill: dict = {}
             res_line = order(s, fill)
-            pushes.append(f"{head}\n   {ctx}\n   {res_line}")
+            tt_qty = int(fill.get("qty") or max(1, int(rs_per_trade // s["spot"])))
+            tt_var, tt_line = ttb.signal(e, s["name"], s["signal"], "ENTER", tt_qty) if not a.dry_run \
+                else (None, None)                                # Tradetron mirror (Sharekhan); never on --dry-run
+            pushes.append(f"{head}\n   {ctx}\n   {res_line}" + (f"\n   {tt_line}" if tt_line else ""))
             rec = {"name": s["name"], "side": s["signal"], "level": s["level"], "stop": s["stop"],
-                   "entry_spot": s["spot"], "opened": hm, "mode": "equity", "ts": s["name"]}
+                   "entry_spot": s["spot"], "opened": hm, "mode": "equity", "ts": s["name"], "tt": tt_var}
             if fill.get("fill"):
                 trades[key] = {**rec, "qty": fill["qty"], "entry": fill["fill"]}
-            elif not auto:                                   # alerts only: follow it as a paper trade
-                trades[key] = {**rec, "qty": max(1, int(rs_per_trade // s["spot"])), "entry": s["spot"], "paper": True}
+            elif not auto or tt_var:                         # alerts only / only Tradetron has it: follow it as paper
+                trades[key] = {**rec, "qty": tt_qty, "entry": s["spot"], "paper": True}
         print(f"  start trigger: {len(found)} start(s) this scan · 10-min base "
               f"{prev_p.name if prev_p else 'none'} · range from {len(window)} snapshot(s)")
     elif not use_rules:                                 # OI_NEW_RULES=0: buy every new signal (old way)
