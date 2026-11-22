@@ -1,0 +1,2 @@
+# NSE trading holidays (YYYY-MM-DD) — used to count trading days to expiry. Add the new year's list each January.
+2026-12-25

@@ -1,4 +1,4 @@
-# CLAUDE.md — branch `indexoptions-oi-marketstructure`
+# CLAUDE.md — branch `nifty-pulse` (from `indexoptions-oi-marketstructure`)
 
 (Started from `praveen-new-changes`; praveen_bot is still here unchanged.)
 
@@ -65,3 +65,16 @@ Cron: `30 2 * * * cd /root/stockAnalyser && /root/venv/bin/python auto_token.py 
   5-min change of character → out · OI against → out · 15:15 out.
 - .env: IOS_AUTO_TRADE=0 · IOS_NTFY_TOPIC=index-oi-structure · IOS_LOTS=1 · IOS_SYMBOLS=NIFTY,BANKNIFTY,SENSEX
   · IOS_MAX_TRADES=3 · IOS_MAX_LOSSES=2 · IOS_OI_NEED=2 · IOS_PUSH_SKIPS=1. State in data/ios/<date>/.
+
+## NIFTY Pulse (branch `nifty-pulse`) — spec NIFTY_CE_PE_Intraday_Bot_Spec.md
+| Path | What |
+|---|---|
+| `core/pulse.py` | Pure logic: Config (any field overridable as `PULSE_<FIELD>`), EMA 8/21/200, ATR, futures VWAP, CPR, levels, patterns, `Strategy.evaluate`, `manage_exit`, expiry / strike / sizing, `can_trade` |
+| `scripts/pulse_bot.py` | Daemon: scan 8 s after each 5-min close + watch every 15 s; paper by default |
+| `scripts/pulse_backtest.py` | Same logic on Kite history (current futures contract only → ~3 months; no OI levels; premium = entry + delta × move) |
+| `start_pulse.sh` / `stop_pulse.sh` | Start / stop the bot (cron 09:05 IST Mon–Fri; it exits at 15:20) |
+- Droplet folder `/root/pulse` (Subba), `.env` → symlink to `/root/stockAnalyser/.env`; PULSE_* go in `.env.local`.
+- Live orders need BOTH `PULSE_MODE=live` and `PULSE_CONFIRM_LIVE=1`; otherwise paper (`data/pulse/paper_trades.csv`).
+- `touch STOP_BOT` = no new entries + square off. Journal / state: `data/pulse/<date>/`. Trades: `data/pulse/trades.csv`.
+- Orders: LIMIT MIS at ask × 1.01, cancelled after 20 s (no chasing); exits re-price twice; broker SL (stop-limit) at
+  entry − delta × R × 1.3 as a disaster stop. Tag `niftypulse`. ntfy topic `nifty-pulse`.

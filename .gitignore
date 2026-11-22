@@ -8,3 +8,5 @@ data/
 *.log
 state*.json
 .watchdog_off
+.env.local
+STOP_BOT
