@@ -6,7 +6,9 @@ at most OI_MAX_ORDERS (default 5) a day, none after 15:00; unfilled after 8 s �
   OI_PRODUCT=NRML (default): carried overnight. No stop / target is placed — set them in
       Kite by hand. OI_GTT=1 adds an OCO GTT on each fill instead: stop OI_SL_PCT (20) %
       below the fill, target OI_TARGET_PCT (40) % above.
-      No order within 4 days of expiry (stock options are physically settled).
+      No order within 4 days of expiry (stock options are physically settled) — unless OI_ROLL_DAYS is set:
+      OI_ROLL_DAYS=4 buys NEXT month's ATM CE / PE when this month's expiry is under 4 days away (signals
+      still come from this month's OI; the bot quotes the next-month contract for its exits).
   OI_PRODUCT=MIS: intraday, no GTT; Zerodha squares it off ~15:20.
 The result (filled + GTT / Kite's rejection reason) is added to the push.
 
@@ -163,7 +165,7 @@ def universe(kite: KiteConnect, today: datetime.date) -> dict:
     cache = DATA / f"universe_{today}.json"
     if cache.exists():
         uni = json.loads(cache.read_text())
-        if all("lot" in v and "futs" in v for v in uni.values()):
+        if all("lot" in v and "futs" in v and "next" in v for v in uni.values()):
             return uni
     rows = [r for r in kite.instruments("NFO") if r["name"] not in INDEXES and r["expiry"] >= today]
     uni: dict = {}
@@ -182,9 +184,21 @@ def universe(kite: KiteConnect, today: datetime.date) -> dict:
                 legs.setdefault(float(r["strike"]), {})[r["instrument_type"]] = r["tradingsymbol"]
         opts = [[k, v["CE"], v["PE"]] for k, v in sorted(legs.items()) if "CE" in v and "PE" in v]
         if len(opts) >= 2 * om.NEAR + 1:
+            nxt = None                                   # next month's options (OI_ROLL_DAYS buys these near expiry)
+            if len(opt_exp) > 1:
+                nlegs: dict = {}
+                nlot = 0
+                for r in rs:
+                    if r["expiry"] == opt_exp[1] and r["instrument_type"] in ("CE", "PE"):
+                        nlegs.setdefault(float(r["strike"]), {})[r["instrument_type"]] = r["tradingsymbol"]
+                        nlot = nlot or int(r.get("lot_size") or 0)
+                nopts = [[k, v["CE"], v["PE"]] for k, v in sorted(nlegs.items()) if "CE" in v and "PE" in v]
+                if nopts:
+                    nxt = {"expiry": str(opt_exp[1]), "opts": nopts, "lot": nlot or int(fut[0].get("lot_size") or 1)}
             uni[name] = {"fut": fut[0]["tradingsymbol"], "expiry": str(exp), "opts": opts,
                          "lot": int(fut[0].get("lot_size") or 1),
-                         "futs": [[int(f.get("instrument_token") or 0), str(f["expiry"])] for f in fut[:2]]}
+                         "futs": [[int(f.get("instrument_token") or 0), str(f["expiry"])] for f in fut[:2]],
+                         "next": nxt}
     DATA.mkdir(parents=True, exist_ok=True)
     cache.write_text(json.dumps(uni))
     for old in DATA.glob("universe_*.json"):
@@ -282,7 +296,8 @@ def tick(x: float, size: float = 0.05) -> float:
 def buy_atm(kite: KiteConnect, r: dict, snap: pd.DataFrame, lot: int, lots: int,
             product: str = "NRML", sl_pct: float = 20.0, tgt_pct: float = 40.0,
             gtt: bool = False, exchange: str = "NFO", tick_size: float = 0.05,
-            price_factor: float = 1.005, out: dict | None = None) -> str:
+            price_factor: float = 1.005, out: dict | None = None,
+            ts: str | None = None, ref: float | None = None) -> str:
     """BUY lots × lot of the signal's ATM option: LIMIT just above the ask. `out` (if given) gets
     ts / qty / fill / gtt_id of a filled order, for the exit manager.
 
@@ -290,13 +305,16 @@ def buy_atm(kite: KiteConnect, r: dict, snap: pd.DataFrame, lot: int, lots: int,
     below the fill, target tgt_pct above; off by default (stop / target managed by hand).
     MIS: intraday, Zerodha squares it off ~15:20.
     An order not filled within ~8 s is cancelled. Returns a result line for the push."""
-    row = snap[(snap["name"] == r["name"]) & (snap["strike"] == r["option"]["strike"])
-               & (snap["type"] == r["signal"])]
-    if not len(row):
-        return "order: contract not found"
-    o = row.iloc[0]
-    ts = o["ts"]
-    ref = max(float(o["ask"] or 0), float(o["ltp"] or 0))
+    if ts is None:                                      # the signal's own contract, priced from the snapshot
+        row = snap[(snap["name"] == r["name"]) & (snap["strike"] == r["option"]["strike"])
+                   & (snap["type"] == r["signal"])]
+        if not len(row):
+            return "order: contract not found"
+        o = row.iloc[0]
+        ts = o["ts"]
+        ref = max(float(o["ask"] or 0), float(o["ltp"] or 0))
+    if not ref:
+        return f"order ✗ {ts} — no price"
     price, qty = max(tick_size, tick(ref * price_factor, tick_size)), lot * lots
     prod = kite.PRODUCT_MIS if product == "MIS" else kite.PRODUCT_NRML
     try:
@@ -584,6 +602,7 @@ def main() -> None:
     tgt_pct = float(e.get("OI_TARGET_PCT") or 40)
     use_gtt = e.get("OI_GTT", "0") == "1"
     days_left = lambda u: (datetime.date.fromisoformat(u["expiry"]) - today).days
+    roll_days = int(float(e.get("OI_ROLL_DAYS") or 0))   # e.g. 4: under 4 days to expiry → next month's ATM
     by_name = {r["name"]: r for r in res if "error" not in r}
     naive = now.replace(tzinfo=None, second=0, microsecond=0)
     hm4 = now.strftime("%H%M")
@@ -597,9 +616,30 @@ def main() -> None:
             return "no order — OI_AUTO_TRADE is off"
         if hm4 >= rules.ORDER_UNTIL:
             return "no order — 15:00 or later"
-        if product == "NRML" and days_left(uni[r["name"]]) < MIN_DAYS_TO_EXPIRY:
-            return (f"no order — expiry {uni[r['name']]['expiry']} is under {MIN_DAYS_TO_EXPIRY} days away "
-                    f"(stock options settle physically)")
+        u = uni[r["name"]]
+        if roll_days and days_left(u) < roll_days:       # near expiry: buy next month's ATM instead
+            nx = u.get("next")
+            if not nx:
+                return f"no order — expiry {u['expiry']} near and no next-month options for {r['name']}"
+            if n_orders >= max_orders:
+                return f"no order — {max_orders} orders already today (OI_MAX_ORDERS)"
+            k = min(nx["opts"], key=lambda o: abs(o[0] - float(r["option"]["strike"])))
+            ts_n = k[1] if r["signal"] == "CE" else k[2]
+            try:
+                q = kite.quote([f"NFO:{ts_n}"])[f"NFO:{ts_n}"]
+                ask_n = float(((q.get("depth") or {}).get("sell") or [{}])[0].get("price") or 0)
+                ref_n = max(ask_n, float(q.get("last_price") or 0))
+            except Exception as ex:
+                return f"no order — {ts_n} quote failed: {ex}"
+            n_orders += 1
+            if out is not None:
+                out["roll"] = True
+            return (f"⤴ rolled to {nx['expiry']} (this month's {u['expiry']} is {days_left(u)} day(s) away) · "
+                    + buy_atm(kite, r, snap, int(nx.get("lot") or 1), lots, product, sl_pct, tgt_pct, use_gtt,
+                              out=out, ts=ts_n, ref=ref_n))
+        if product == "NRML" and days_left(u) < MIN_DAYS_TO_EXPIRY:
+            return (f"no order — expiry {u['expiry']} is under {MIN_DAYS_TO_EXPIRY} days away "
+                    f"(stock options settle physically; OI_ROLL_DAYS={MIN_DAYS_TO_EXPIRY} buys next month instead)")
         if n_orders >= max_orders:
             return f"no order — {max_orders} orders already today (OI_MAX_ORDERS)"
         n_orders += 1
@@ -702,6 +742,15 @@ def main() -> None:
                     continue
             g_now = snap[snap["name"] == tr["name"]]
             g_prev = prev_df[prev_df["name"] == tr["name"]] if prev_df is not None else None
+            if tr.get("roll") and not g_now.empty:             # next-month contract: not in the snapshot → quote it
+                try:
+                    q = kite.quote([f"NFO:{tr['ts']}"])[f"NFO:{tr['ts']}"]
+                    bid = float(((q.get("depth") or {}).get("buy") or [{}])[0].get("price") or 0)
+                    extra = g_now.iloc[[0]].copy()
+                    extra["ts"], extra["bid"], extra["ltp"], extra["oi"] = tr["ts"], bid, float(q.get("last_price") or 0), 0
+                    g_now = pd.concat([g_now, extra], ignore_index=True)
+                except Exception as ex:
+                    logs.append(f"{tr['name']} {tr['ts']}: quote failed ({ex}) — exit check next scan")
             kind, why, prem = oi_exit.check(tr, g_now, g_prev, hm)
             if kind not in ("time", "stop") and alert_mode != "0":
                 why_a = alert_check(tr)                         # opposite 5-EMA alert candle broken
@@ -779,7 +828,8 @@ def main() -> None:
             """Keep the trade for the exit manager; a live fill also gets its SL order. → extra push line."""
             if fill.get("fill"):
                 trades[key] = {**rec, "ts": fill["ts"], "qty": fill["qty"], "entry": fill["fill"],
-                               "exchange": fill.get("exchange", "NFO"), "gtt_id": fill.get("gtt_id")}
+                               "exchange": fill.get("exchange", "NFO"), "gtt_id": fill.get("gtt_id"),
+                               "roll": bool(fill.get("roll"))}
                 if sl_pct:
                     oid, txt = place_sl(kite, fill["ts"], fill["qty"], fill["fill"], sl_pct, product,
                                         fill.get("exchange", "NFO"))
