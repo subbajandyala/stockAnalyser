@@ -38,6 +38,8 @@ Trigger (OI_TRIGGER): start (default) = trade the stock when a move BEGINS — s
   TT_AUTO=1 + TT_TOKEN_EQ (+ TT_EQ_BASKET): mirror every start trade to a Tradetron Signal Bridge
   (screener/tradetron.py) → Sharekhan: BUY / SELL <qty> at entry, BUY EXIT / SELL EXIT at the bot's exit; stocks
   outside the bridge's basket are skipped. Settings in .env.local override .env (for a second copy of the bot).
+  SK_EQ_AUTO=1: the same trades straight to Sharekhan through its API (screener/sharekhan_eq.py) — no Tradetron,
+  no daily click (token from scripts/auto_sk_token.py at 08:05). It replaces the Tradetron mirror (never both).
   strong = the old trigger below (STRONG vs yesterday's close, then the rules).
 Order rules for OI_TRIGGER=strong (screener/oi_rules.py, OI_NEW_RULES=1 default; 0 = buy every new signal):
   before 09:40      EARLY — decided at the first scan from 09:40 where the stock is still STRONG
@@ -88,6 +90,7 @@ from screener import levels
 from screener import oi_monitor as om
 from screener import oi_start
 from screener import tradetron as ttb
+from screener import sharekhan_eq as skq
 from screener import oi_exit
 from screener import alert_candle as ac
 from screener import oi_rules as rules
@@ -708,6 +711,10 @@ def main() -> None:
                     logs.append(f"{tr['name']} {tr['side']}: position no longer held — closed outside the bot")
                     if tr.get("tt") and not a.dry_run:
                         logs.append(ttb.signal(e, tr["name"], tr["side"], "EXIT")[1] or "")
+                    if tr.get("sk") and not a.dry_run:
+                        sk_px = float((snap.loc[snap["name"] == tr["name"], "spot"].tolist() or [tr["entry"]])[0])
+                        ok_sk, sk_line = skq.exit_(e, tr["name"], tr["side"], tr["sk"], sk_px, nse_tick(kite, tr["name"]))
+                        (logs if ok_sk else pushes).append(sk_line if ok_sk else f"⚠️ {sk_line} — close it at Sharekhan")
                     continue
             g_now = snap[snap["name"] == tr["name"]]
             g_prev = prev_df[prev_df["name"] == tr["name"]] if prev_df is not None else None
@@ -728,6 +735,9 @@ def main() -> None:
                 tt_line = ttb.signal(e, tr["name"], tr["side"], "EXIT")[1]
                 if tt_line:
                     info = f"{info}\n   {tt_line}"
+            if tr.get("sk") and not a.dry_run:                   # direct Sharekhan
+                ok_sk, sk_line = skq.exit_(e, tr["name"], tr["side"], tr["sk"], px, nse_tick(kite, tr["name"]))
+                info = f"{info}\n   {sk_line}" + ("" if ok_sk else " — ⚠️ close it at Sharekhan")
             pct = (1 if tr["side"] == "CE" else -1) * (px / tr["entry"] - 1) * 100
             pnl = pct / 100 * tr["entry"] * tr.get("qty", 0)
             tr.update({"closed": hm, "why": why, "exit": px, "pct": round(pct, 2)})
@@ -780,14 +790,22 @@ def main() -> None:
             fill: dict = {}
             res_line = order(s, fill)
             tt_qty = int(fill.get("qty") or max(1, int(rs_per_trade // s["spot"])))
-            tt_var, tt_line = ttb.signal(e, s["name"], s["signal"], "ENTER", tt_qty) if not a.dry_run \
-                else (None, None)                                # Tradetron mirror (Sharekhan); never on --dry-run
+            sk_on = e.get("SK_EQ_AUTO", "0") == "1" and not a.dry_run
+            tt_var, tt_line = ttb.signal(e, s["name"], s["signal"], "ENTER", tt_qty) \
+                if not (a.dry_run or sk_on) else (None, None)    # Tradetron mirror; never with SK_EQ_AUTO / --dry-run
+            sk_qty = 0
+            if sk_on:                                            # direct Sharekhan (screener/sharekhan_eq.py)
+                ok_sk, sk_line = skq.enter(e, s["name"], s["signal"], tt_qty, float(fill.get("fill") or s["spot"]),
+                                           nse_tick(kite, s["name"]))
+                sk_qty = tt_qty if ok_sk else 0
+                tt_line = sk_line
             pushes.append(f"{head}\n   {ctx}\n   {res_line}" + (f"\n   {tt_line}" if tt_line else ""))
             rec = {"name": s["name"], "side": s["signal"], "level": s["level"], "stop": s["stop"],
-                   "entry_spot": s["spot"], "opened": hm, "mode": "equity", "ts": s["name"], "tt": tt_var}
+                   "entry_spot": s["spot"], "opened": hm, "mode": "equity", "ts": s["name"], "tt": tt_var,
+                   "sk": sk_qty}
             if fill.get("fill"):
                 trades[key] = {**rec, "qty": fill["qty"], "entry": fill["fill"]}
-            elif not auto or tt_var:                         # alerts only / only Tradetron has it: follow it as paper
+            elif not auto or tt_var or sk_qty:               # alerts only / only Sharekhan has it: follow as paper
                 trades[key] = {**rec, "qty": tt_qty, "entry": s["spot"], "paper": True}
         print(f"  start trigger: {len(found)} start(s) this scan · 10-min base "
               f"{prev_p.name if prev_p else 'none'} · range from {len(window)} snapshot(s)")
