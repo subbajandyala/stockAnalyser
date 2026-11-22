@@ -395,7 +395,7 @@ class Bot:
             self.push("NIFTY Pulse: signal expired", f"{self.armed.side} {self.armed.pattern} — trigger "
                       f"{self.armed.trigger:.1f} not hit in {self.cfg.trigger_valid_bars} candles", "low")
             self.armed = None
-        if stale:
+        if stale and not force:
             self.journal("STALE", f"last candle {b.ts:%H:%M} is old — no new entries")
             self.save()
             return
