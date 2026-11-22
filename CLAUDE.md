@@ -78,3 +78,8 @@ Cron: `30 2 * * * cd /root/stockAnalyser && /root/venv/bin/python auto_token.py 
 - `touch STOP_BOT` = no new entries + square off. Journal / state: `data/pulse/<date>/`. Trades: `data/pulse/trades.csv`.
 - Orders: LIMIT MIS at ask × 1.01, cancelled after 20 s (no chasing); exits re-price twice; broker SL (stop-limit) at
   entry − delta × R × 1.3 as a disaster stop. Tag `niftypulse`. ntfy topic `nifty-pulse`.
+- `PULSE_MAX_LOTS=1` caps every trade at 1 lot (first live week).
+- Sharekhan copy (`core/sharekhan_fno.py`, `PULSE_SK=1`, live only): each Kite buy / sell is repeated on Subba's
+  Sharekhan account through its API (NF, instrumentType OI, product `PULSE_SK_PRODUCT`, default MARGIN), LIMIT 2 %
+  through, cancelled if open after 4 s. Token: `scripts/auto_sk_token.py` in `/root/stockAnalyser` (cron 08:05).
+  No Sharekhan disaster stop: the bot's own exits and the 15:10 square-off sell it. Test first: `scripts/sk_fno_test.py`.

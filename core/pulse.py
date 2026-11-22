@@ -41,6 +41,7 @@ class Config:
     capital: float = 200_000.0
     risk_pct: float = 0.01
     max_premium_pct: float = 0.30
+    max_lots: int = 0                    # cap on lots per trade (PULSE_MAX_LOTS=1 for a first live week); 0 = none
     max_trades_per_day: int = 3
     max_losses_per_day: int = 2
     daily_loss_limit_pct: float = 0.025
@@ -629,6 +630,8 @@ def size_lots(risk_pts: float, prem: float, delta: float, lot_size: int, cfg: Co
     risk_rupees = cfg.capital * cfg.risk_pct * (0.5 if half else 1.0)
     lots = math.floor(risk_rupees / (opt_risk * lot_size + cfg.cost_per_lot_rt))
     max_lots = math.floor(cfg.capital * cfg.max_premium_pct / (prem * lot_size)) if prem > 0 else 0
+    if cfg.max_lots > 0:
+        lots = min(lots, cfg.max_lots)
     return max(0, min(lots, max_lots))
 
 

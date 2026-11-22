@@ -16,6 +16,8 @@ Kill switch: create the file STOP_BOT in this folder → no new entries and the 
 Settings: .env (Kite keys, shared) + .env.local (PULSE_* — any core/pulse.py Config field, e.g.
   PULSE_CAPITAL=200000 · PULSE_RISK_PCT=0.01 · PULSE_MODE=paper · PULSE_CONFIRM_LIVE=0 ·
   PULSE_NTFY_TOPIC=nifty-pulse · PULSE_PUSH_SKIPS=0 (1 = also push why each candle was skipped)).
+  PULSE_MAX_LOTS=1 caps every trade at 1 lot. PULSE_SK=1 (live only): each Kite buy / sell is copied to
+  Sharekhan through its API (core/sharekhan_fno.py; test first with scripts/sk_fno_test.py).
 Log / journal / state: pulse_bot.log, data/pulse/<date>/journal.txt, data/pulse/<date>/state.json (a restart
 picks up the armed signal and the open position).
 
@@ -40,6 +42,7 @@ sys.path.insert(0, str(ROOT))
 
 from core import kite_order as ko   # noqa: E402
 from core import pulse as P         # noqa: E402
+from core import sharekhan_fno as skf  # noqa: E402
 
 IST = datetime.timezone(datetime.timedelta(hours=5, minutes=30))
 DATA = ROOT / "data" / "pulse"
@@ -95,6 +98,7 @@ class Bot:
             LOG.warning("PULSE_MODE=live without PULSE_CONFIRM_LIVE=1 — staying in PAPER")
         self.topic = env.get("PULSE_NTFY_TOPIC", "nifty-pulse")
         self.push_skips = env.get("PULSE_PUSH_SKIPS", "0") == "1"
+        self.sk_on = self.live and env.get("PULSE_SK", "0") == "1"      # Sharekhan copy (core/sharekhan_fno.py)
         self.kite = ko.kite_for(env.get("KITE_API_KEY", ""), env.get("KITE_ACCESS_TOKEN", ""))
         self.strat = P.Strategy(self.cfg)
         self.hol = holidays()
@@ -117,6 +121,7 @@ class Bot:
         self.pos = P.Position.from_dict(s["pos"]) if s.get("pos") else None
         self.oi = s.get("oi", {"at": "", "levels": []})
         self.last_scan = s.get("last_scan", "")
+        self.skpos = s.get("sk") or None                 # {"row": Sharekhan contract, "qty": open qty}
         self.last_why = ""
 
     def save(self) -> None:
@@ -124,7 +129,7 @@ class Bot:
         tmp = p.with_suffix(".tmp")
         tmp.write_text(json.dumps({"day": self.st.__dict__, "armed": self.armed.__dict__ if self.armed else None,
                                    "pos": self.pos.to_dict() if self.pos else None, "oi": self.oi,
-                                   "last_scan": self.last_scan}, indent=1, default=str))
+                                   "last_scan": self.last_scan, "sk": self.skpos}, indent=1, default=str))
         tmp.replace(p)
 
     def journal(self, event: str, text: str) -> None:
@@ -520,9 +525,17 @@ class Bot:
                               peak_prem=px, best_spot=spot, qty_open=filled, atr_now=s.atr)
         self.st.trades += 1
         self.place_sl(self.pos)
+        sk_line = ""
+        if self.sk_on:
+            sk_got, sk_row, sk_line = skf.buy(self.env, strike, s.side, exp, filled, ask)
+            self.skpos = {"row": sk_row, "qty": sk_got} if sk_got else None
+            self.journal("SHAREKHAN", sk_line)
+            if not sk_got:
+                self.push("NIFTY Pulse: Sharekhan buy FAILED", f"{inst['tradingsymbol']} × {filled} — {sk_line}",
+                          "high", "warning")
         msg = (f"BUY {inst['tradingsymbol']} × {filled} ({lots_f} lot{'s' if lots_f > 1 else ''}{', half size' if half else ''}) "
                f"@ ₹{px:.2f} · spot {spot:.1f} · stop {s.stop:.1f} · T1 {s.t1:.1f} · T2 {s.t2:.1f} · "
-               f"risk ≈ ₹{delta * s.risk * filled:,.0f} · {txt}")
+               f"risk ≈ ₹{delta * s.risk * filled:,.0f} · {txt}" + (f"\n{sk_line}" if sk_line else ""))
         self.journal("ENTER", msg)
         self.push(f"NIFTY Pulse: BUY {s.side}", f"{msg}\n{s.kind} · {s.pattern} · {s.reason}", "high", "rocket")
 
@@ -536,6 +549,7 @@ class Bot:
                     continue
                 p.realised += (px - p.entry_prem) * got
                 p.qty_open -= got
+                self.sk_sell(min(got, (self.skpos or {}).get("qty", 0)), px)
                 if self.live and p.sl_order_id:
                     try:
                         self.kite.modify_order(variety=self.kite.VARIETY_REGULAR, order_id=p.sl_order_id,
@@ -561,8 +575,23 @@ class Bot:
                 self.finish(px, act[1])
                 return
 
+    def sk_sell(self, qty: int, ref: float) -> str:
+        """Sell `qty` of the Sharekhan copy (ref = Kite's fill / LTP). A failure is pushed: sell it by hand."""
+        if not (self.skpos and qty > 0):
+            return ""
+        got, line = skf.sell(self.env, self.skpos["row"], qty, ref)
+        self.journal("SHAREKHAN", line)
+        self.skpos["qty"] -= got
+        if got < qty:
+            self.push("NIFTY Pulse: Sharekhan SELL FAILED", f"{line}\n{self.skpos['qty']} still open — sell it in "
+                      f"Sharekhan", "urgent", "warning")
+        if self.skpos["qty"] <= 0:
+            self.skpos = None
+        return line
+
     def finish(self, px: float, why: str) -> None:
         p = self.pos
+        sk_line = self.sk_sell((self.skpos or {}).get("qty", 0), px)
         if p.qty_open:
             p.realised += (px - p.entry_prem) * p.qty_open
             p.qty_open = 0
@@ -577,7 +606,8 @@ class Bot:
         if self.st.pnl <= -self.cfg.daily_loss_limit_pct * self.cfg.capital:
             self.st.halted = True
         msg = (f"EXIT {p.symbol} @ ₹{px:.2f} — {why} · trade ₹{p.realised:+,.0f} ({r:+.2f}R, after costs) · "
-               f"day ₹{self.st.pnl:+,.0f} · {self.st.trades} trades / {self.st.losses} losses")
+               f"day ₹{self.st.pnl:+,.0f} · {self.st.trades} trades / {self.st.losses} losses"
+               + (f"\n{sk_line}" if sk_line else ""))
         self.journal("EXIT", msg)
         self.push(f"NIFTY Pulse: EXIT {'+' if p.realised >= 0 else '-'}", msg, "high",
                   "white_check_mark" if p.realised >= 0 else "red_circle")
