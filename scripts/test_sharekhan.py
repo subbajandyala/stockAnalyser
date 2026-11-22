@@ -42,7 +42,7 @@ if not (api_key and access_token):
     sys.exit(1)
 
 from SharekhanApi import SharekhanConnect
-client = SharekhanConnect(api_key, access_token)
+client = SharekhanConnect(api_key, access_token=access_token)
 print("\nSharekhanConnect object created")
 
 # ── Test 1: funds (simplest authenticated call) ───────────────────────────────
