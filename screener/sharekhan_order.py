@@ -63,7 +63,7 @@ def _update_env(key: str, value: str) -> None:
 def _sk_client(api_key: str, access_token: str):
     try:
         from SharekhanApi import SharekhanConnect
-        return SharekhanConnect(api_key, access_token=access_token)   # 2nd positional arg is `state`
+        return SharekhanConnect(api_key, access_token)
     except ImportError:
         _LOG.error("SharekhanApi not found — run: pip install shareconnect")
         return None
