@@ -89,6 +89,15 @@ class Config:
     shallow_pullback_atr: float = 0.25
     retest_max_bars: int = 6
 
+    # initial balance = high / low of the first hour (09:15–10:15)
+    ib_mode: int = 0                     # 0 off · 1 IB high / low + 1× / 1.5× IB-range extensions as levels ·
+                                         # 2 = 1 + after 10:15 trade only the side the IB broke (5-min close
+                                         # outside), nothing while inside, a failed break blocks that side for the day,
+                                         # and a pullback that holds the broken edge is an entry ("ib retest")
+    ib_end: str = "10:15"
+    ib_early: str = "strong"             # ib_mode 2, before the IB is complete: all | strong (strong trend only) | none
+    ib_fail_atr: float = 0.3             # failed break: a close back inside by more than this × ATR
+
     # stops & targets (spot points)
     stop_buffer_atr: float = 0.25
     stop_buffer_min_pts: float = 5.0
@@ -354,6 +363,52 @@ def bear_fakey(bars: List[Bar], i: int) -> bool:
     return is_inside(ib, m) and b.high > ib.high and m.low <= b.close <= m.high and b.close < ib.high
 
 
+# ====================================================================== initial balance
+def initial_balance(spot: List[Bar], i: int, cfg: Config, a: float) -> Optional[dict]:
+    """First-hour range of bar i's day, from closed candles up to i, and what happened to it since:
+    side = "CE" (a 5-min close above the IB high, not failed since) / "PE" (below the low) / None (inside),
+    failed = sides whose break closed back inside by > ib_fail_atr × ATR (blocked for the rest of the day)."""
+    d, end = spot[i].ts.date(), cfg.t(cfg.ib_end)
+    k0 = i
+    while k0 > 0 and spot[k0 - 1].ts.date() == d:
+        k0 -= 1
+    ib = [spot[k] for k in range(k0, i + 1) if spot[k].ts.time() < end]
+    if not ib:
+        return None
+    hi, lo = max(b.high for b in ib), min(b.low for b in ib)
+    out = {"hi": hi, "lo": lo, "rng": hi - lo, "side": None, "failed": set(),
+           "done": (spot[i].ts + timedelta(minutes=cfg.candle_minutes)).time() >= end}
+    if not out["done"]:
+        return out
+    side, failed = None, out["failed"]
+    for k in range(k0, i + 1):
+        b = spot[k]
+        if b.ts.time() < end:
+            continue
+        if side is None:
+            if b.close > hi and "CE" not in failed:
+                side = "CE"
+            elif b.close < lo and "PE" not in failed:
+                side = "PE"
+        elif side == "CE" and b.close < hi - cfg.ib_fail_atr * a:
+            failed.add("CE")
+            side = None
+        elif side == "PE" and b.close > lo + cfg.ib_fail_atr * a:
+            failed.add("PE")
+            side = None
+    out["side"] = side
+    return out
+
+
+def ib_levels(spot: List[Bar], cfg: Config) -> List[float]:
+    """IB high / low and the 1× / 1.5× IB-range extensions beyond each edge, once the first hour is complete."""
+    ib = initial_balance(spot, len(spot) - 1, cfg, 0.0)
+    if not ib or not ib["done"] or ib["rng"] <= 0:
+        return []
+    hi, lo, r = ib["hi"], ib["lo"], ib["rng"]
+    return [hi, lo, hi + r, hi + 1.5 * r, lo - r, lo - 1.5 * r]
+
+
 # ====================================================================== strategy
 def align(spot: List[Bar], fut: List[Bar]):
     """Only candles present in both series, so index i is the same candle in both."""
@@ -496,6 +551,14 @@ class Strategy:
             return None, f"{side}: {why}"
         if ts in st.used_bars:
             return None, "this candle was already used"
+        ib = initial_balance(spot, i, c, a) if c.ib_mode >= 2 else None
+        if ib and ib["done"]:
+            rng_txt = f"IB {ib['lo']:.0f}–{ib['hi']:.0f}"
+            if ib["side"] is None:
+                f = f", failed break {'/'.join(sorted(ib['failed']))}" if ib["failed"] else ""
+                return None, f"{side} trend but price is inside the {rng_txt}{f} — rotation, no trade"
+            if ib["side"] != side:
+                return None, f"{side} trend but the {rng_txt} broke {'up' if ib['side'] == 'CE' else 'down'}"
 
         kind, pat = None, self.pattern(i, side, spot, levels)
         where = self.at_pullback(i, side, spot, x, levels)
@@ -511,8 +574,18 @@ class Strategy:
                 kind, pat, where = "retest", pat or "retest hold", f"retest of {L:.0f}"
             elif touch:
                 kind, pat, where = "continuation", pat or "EMA8 touch", "shallow pullback in a strong trend"
+        if kind is None and ib and ib["done"]:
+            # the first pullback to the broken IB edge that holds it (a close back beyond it, with-trend candle)
+            edge = ib["hi"] if side == "CE" else ib["lo"]
+            if side == "CE" and b.low <= edge + c.level_zone_atr * a and b.close > edge and b.green:
+                kind, pat, where = "ib retest", pat or "IB edge held", f"pullback to the IB high {edge:.0f}"
+            elif side == "PE" and b.high >= edge - c.level_zone_atr * a and b.close < edge and b.red:
+                kind, pat, where = "ib retest", pat or "IB edge held", f"pullback to the IB low {edge:.0f}"
         if kind is None:
             return None, f"{side} trend: {'no candle signal' if not pat else 'candle not at a pullback / level'}"
+        if ib and not ib["done"] and c.ib_early != "all" and (c.ib_early == "none" or not strong):
+            return None, (f"{side} {pat}: first hour still forming (IB until {c.ib_end}) — "
+                          f"{'no entries' if c.ib_early == 'none' else 'strong-trend setups only'}")
 
         buf = max(c.stop_buffer_atr * a, c.stop_buffer_min_pts)
         swing = spot[i - 1: i + 1]
@@ -671,6 +744,8 @@ def build_levels(spot: List[Bar], cfg: Config, atr_now: float, oi_levels: Option
     keep = set(prev_days[-1:]) | {today}
     hs, ls = swing_points([b for b in spot if b.ts.date() in keep])
     raw += hs + ls + [float(v) for v in (oi_levels or [])]
+    if cfg.ib_mode >= 1:
+        raw += ib_levels(spot, cfg)
     last = spot[-1].close
     raw += [math.floor(last / 100) * 100.0, math.ceil(last / 100) * 100.0]
     zones: List[List[float]] = []

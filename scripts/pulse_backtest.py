@@ -16,11 +16,14 @@ max-OI strikes are left out (no option-OI history); the premium is modelled as e
 Usage (droplet):
   /root/venv/bin/python scripts/pulse_backtest.py                 # 60 days
   /root/venv/bin/python scripts/pulse_backtest.py --days 85 --capital 300000 --risk 0.02
+  /root/venv/bin/python scripts/pulse_backtest.py --compare          # baseline vs initial-balance variants
+  /root/venv/bin/python scripts/pulse_backtest.py --ib-mode 2 --ib-early none
 """
 
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import datetime
 import sys
 from pathlib import Path
@@ -179,6 +182,9 @@ def main() -> None:
     ap.add_argument("--days", type=int, default=60)
     ap.add_argument("--capital", type=float)
     ap.add_argument("--risk", type=float)
+    ap.add_argument("--ib-mode", type=int, help="0 off · 1 IB levels · 2 IB levels + IB break filter")
+    ap.add_argument("--ib-early", choices=["all", "strong", "none"], help="ib-mode 2: entries before 10:15")
+    ap.add_argument("--compare", action="store_true", help="baseline vs the initial-balance variants")
     a = ap.parse_args()
     env = pb.load_env()
     cfg = P.Config.from_env(env)
@@ -186,6 +192,10 @@ def main() -> None:
         cfg.capital = a.capital
     if a.risk:
         cfg.risk_pct = a.risk
+    if a.ib_mode is not None:
+        cfg.ib_mode = a.ib_mode
+    if a.ib_early:
+        cfg.ib_early = a.ib_early
     bot = pb.Bot(env, dry=True)
     kite = bot.kite
     kite.profile()
@@ -217,13 +227,39 @@ def main() -> None:
         if first > start:
             print(f"note: {fut_row['tradingsymbol']} history starts {first} — test window starts there")
             start = max(start, (fut[0].ts + datetime.timedelta(days=4)).date())
+    if a.compare:
+        variants = [("baseline (no IB)", 0, "all"), ("IB levels only", 1, "all"),
+                    ("IB filter · before 10:15 strong trend only", 2, "strong"),
+                    ("IB filter · nothing before 10:15", 2, "none"),
+                    ("IB filter · before 10:15 all", 2, "all")]
+        print(f"\nNIFTY Pulse · {start} → {end} · capital ₹{cfg.capital:,.0f} · risk {cfg.risk_pct:.1%}\n")
+        allrows = []
+        for name, mode, early in variants:
+            v = dataclasses.replace(cfg, ib_mode=mode, ib_early=early)
+            rs = run(v, spot, fut, vix, start)
+            print(summary(rs, f"{name:<44}"))
+            days = sorted({r["day"] for r in rs})
+            losing = sum(1 for d in days if sum(r["rs"] for r in rs if r["day"] == d) < 0)
+            print(f"{'':<46}days traded {len(days)} · losing days {losing} · "
+                  f"ib retest trades {sum(1 for r in rs if r['kind'] == 'ib retest')}")
+            allrows += [{"variant": name, **r} for r in rs]
+        out = ROOT / "data" / "pulse"
+        out.mkdir(parents=True, exist_ok=True)
+        f = out / f"backtest_compare_{end}_{a.days}d.csv"
+        if allrows:
+            keys = list(allrows[0])
+            f.write_text(",".join(keys) + "\n" + "\n".join(",".join(str(r[k]).replace(",", ";") for k in keys)
+                                                           for r in allrows) + "\n")
+            print(f"\nall trades → {f}")
+        return
     rows = run(cfg, spot, fut, vix, start)
-    print(f"\nNIFTY Pulse · {start} → {end} · capital ₹{cfg.capital:,.0f} · risk {cfg.risk_pct:.1%} · premium "
+    print(f"\nNIFTY Pulse · IB mode {cfg.ib_mode} ({cfg.ib_early}) · {start} → {end} · capital ₹{cfg.capital:,.0f} · "
+          f"risk {cfg.risk_pct:.1%} · premium "
           f"modelled at ₹{PREM:g}, delta {cfg.delta_itm}, lot {LOT}, ₹{cfg.cost_per_lot_rt:g}/lot costs\n")
     print(summary(rows, "ALL"))
     for side in ("CE", "PE"):
         print(summary([r for r in rows if r["side"] == side], side))
-    for kind in ("pullback", "continuation", "retest"):
+    for kind in ("pullback", "continuation", "retest", "ib retest"):
         print(summary([r for r in rows if r["kind"] == kind], kind))
     days = sorted({r["day"] for r in rows})
     if days:

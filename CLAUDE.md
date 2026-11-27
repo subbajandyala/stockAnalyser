@@ -83,3 +83,8 @@ Cron: `30 2 * * * cd /root/stockAnalyser && /root/venv/bin/python auto_token.py 
   Sharekhan account through its API (NF, instrumentType OI, product `PULSE_SK_PRODUCT`, default MARGIN), LIMIT 2 %
   through, cancelled if open after 4 s. Token: `scripts/auto_sk_token.py` in `/root/stockAnalyser` (cron 08:05).
   No Sharekhan disaster stop: the bot's own exits and the 15:10 square-off sell it. Test first: `scripts/sk_fno_test.py`.
+- Initial balance (first hour 09:15–10:15), off by default — `PULSE_IB_MODE`: 1 = IB high / low + 1× / 1.5× IB-range
+  extensions as levels (location, room, targets); 2 = 1 + after 10:15 only the side the IB broke (5-min close outside),
+  no trades inside it, a failed break (close back inside by > 0.3 ATR) blocks that side for the day, and a pullback that
+  holds the broken edge is an entry ("ib retest"). `PULSE_IB_EARLY` (mode 2, before 10:15): strong (default) / none / all.
+  Test: `scripts/pulse_backtest.py --compare` (baseline vs 4 IB variants).
